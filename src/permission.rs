@@ -82,6 +82,9 @@ struct BridgeState {
     hook_root: Option<PathBuf>,
     /// Directories a read may touch without asking.
     workspace_roots: Vec<PathBuf>,
+    /// What may be approved without asking. Empty by default, so tests and any
+    /// path that forgets to set it prompt for everything.
+    policy: AutoAllowPolicy,
 }
 
 /// Shared handle to the permission bridge.
@@ -104,7 +107,10 @@ impl PermissionBridge {
 
         let listener = UnixListener::bind(&socket_path)?;
         let bridge = PermissionBridge {
-            state: Arc::new(Mutex::new(BridgeState::default())),
+            state: Arc::new(Mutex::new(BridgeState {
+                policy: AutoAllowPolicy::from_env(),
+                ..BridgeState::default()
+            })),
             out_tx,
             socket_path: Arc::new(socket_path),
         };
@@ -308,24 +314,27 @@ impl PermissionBridge {
     /// about. And tools that reach the network are excluded even though they only
     /// read: a URL is an exfiltration channel, not just a fetch.
     async fn auto_allow_reason(&self, tool_name: &str, args: &Value) -> Option<String> {
-        if std::env::var(PROMPT_ALL_ENV).is_ok_and(|v| !v.is_empty() && v != "0") {
+        let (policy, workspace_roots) = {
+            let state = self.state.lock().await;
+            (state.policy.clone(), state.workspace_roots.clone())
+        };
+
+        if !policy.allows(tool_name) {
             return None;
         }
-        if !AUTO_ALLOWED_TOOLS.contains(&tool_name) {
+        // Leaving the workspace is worth a prompt on its own.
+        if outside_workspace(args, &workspace_roots).is_some() {
+            return None;
+        }
+        // As is anything that looks like it holds credentials. Checked over every
+        // string argument, not just the absolute ones, so a relative `.env` counts.
+        if string_args(args).iter().any(|arg| policy.is_sensitive(arg)) {
             return None;
         }
 
-        let workspace_roots = self.state.lock().await.workspace_roots.clone();
-        match outside_workspace(args, &workspace_roots) {
-            Some(path) => {
-                // Worth a prompt precisely because it leaves the workspace.
-                let _ = path;
-                None
-            }
-            None => Some(format!(
-                "Auto-allowed: `{tool_name}` cannot modify anything."
-            )),
-        }
+        Some(format!(
+            "Auto-allowed: `{tool_name}` cannot modify anything."
+        ))
     }
 
     async fn apply_outcome(
@@ -397,26 +406,130 @@ fn permission_options() -> Value {
     ])
 }
 
-/// Set to a non-empty value other than `0` to prompt for every tool call.
-pub const PROMPT_ALL_ENV: &str = "AGY_ACP_PROMPT_ALL";
+/// Comma-separated list of what may run without asking. Accepts tool names and
+/// the groups `reads`, `searches` and `none`. Defaults to [`DEFAULT_AUTO_ALLOW`].
+pub const AUTO_ALLOW_ENV: &str = "AGY_ACP_AUTO_ALLOW";
 
-/// Tools approved without asking, when their paths stay inside the workspace.
+/// Comma-separated extra substrings marking a path as too sensitive to read
+/// without asking. Added to [`SENSITIVE_PATTERNS`].
+pub const SENSITIVE_ENV: &str = "AGY_ACP_SENSITIVE_PATTERNS";
+
+/// Only the model asking the user a question is waved through by default.
 ///
-/// Everything here either only reads, or does nothing but talk to the user.
-/// Deliberately excluded: `read_url_content` and `search_web`, which read but do
-/// so over the network.
-const AUTO_ALLOWED_TOOLS: &[&str] = &[
-    // Asking the user a question is not an action to approve.
-    "ask_question",
-    // Reads.
-    "view_file",
-    "view_code_item",
-    "list_dir",
-    // Searches.
-    "grep_search",
-    "codebase_search",
-    "find_by_name",
+/// Reading is not gated because it is safe — it is gated because agy's own checks
+/// are off, so a read the user never sees is a read of anything on disk. Opt in
+/// with `AGY_ACP_AUTO_ALLOW=reads,searches` when that trade is worth it.
+const DEFAULT_AUTO_ALLOW: &str = "ask_question";
+
+/// Tools that only read local files.
+const READ_TOOLS: &[&str] = &["view_file", "view_code_item", "list_dir"];
+
+/// Tools that only search local files.
+const SEARCH_TOOLS: &[&str] = &["grep_search", "codebase_search", "find_by_name"];
+
+/// Substrings that make a path worth a prompt even when reads are auto-allowed.
+///
+/// A denylist can never be complete — this is a second line, not the defence. The
+/// defence is that reads are not auto-allowed unless asked for. Matching is on the
+/// lowercased path and deliberately broad: `tokenizer.py` trips the `token` rule
+/// and costs one prompt, which is the right way to be wrong.
+const SENSITIVE_PATTERNS: &[&str] = &[
+    // Environment and secret files.
+    ".env",
+    "token",
+    "secret",
+    "password",
+    "passwd",
+    "credential",
+    "api_key",
+    "apikey",
+    // Keys and certificates.
+    ".pem",
+    ".key",
+    ".p12",
+    ".pfx",
+    ".keystore",
+    ".jks",
+    "id_rsa",
+    "id_ed25519",
+    "id_ecdsa",
+    // Tool credential files.
+    ".netrc",
+    ".npmrc",
+    ".pypirc",
+    ".git-credentials",
+    ".htpasswd",
+    // Credential directories.
+    "/.ssh/",
+    "/.aws/",
+    "/.gnupg/",
+    "/.kube/",
+    "/.docker/config",
 ];
+
+/// What the bridge may approve without asking the user.
+#[derive(Clone, Debug, Default)]
+pub struct AutoAllowPolicy {
+    tools: Vec<String>,
+    extra_sensitive: Vec<String>,
+}
+
+impl AutoAllowPolicy {
+    /// Reads the policy from the environment, falling back to [`DEFAULT_AUTO_ALLOW`].
+    pub fn from_env() -> Self {
+        let raw = std::env::var(AUTO_ALLOW_ENV)
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_else(|| DEFAULT_AUTO_ALLOW.to_string());
+
+        let mut tools: Vec<String> = Vec::new();
+        for entry in raw.split(',').map(str::trim).filter(|e| !e.is_empty()) {
+            match entry {
+                "none" => return AutoAllowPolicy::default(),
+                "reads" => tools.extend(READ_TOOLS.iter().map(|t| t.to_string())),
+                "searches" => tools.extend(SEARCH_TOOLS.iter().map(|t| t.to_string())),
+                tool => tools.push(tool.to_string()),
+            }
+        }
+
+        let extra_sensitive = std::env::var(SENSITIVE_ENV)
+            .unwrap_or_default()
+            .split(',')
+            .map(|p| p.trim().to_lowercase())
+            .filter(|p| !p.is_empty())
+            .collect();
+
+        AutoAllowPolicy {
+            tools,
+            extra_sensitive,
+        }
+    }
+
+    /// Builds a policy directly, for tests.
+    #[cfg(test)]
+    pub fn with_tools(tools: &[&str]) -> Self {
+        AutoAllowPolicy {
+            tools: tools.iter().map(|t| t.to_string()).collect(),
+            extra_sensitive: Vec::new(),
+        }
+    }
+
+    fn allows(&self, tool: &str) -> bool {
+        self.tools.iter().any(|t| t == tool)
+    }
+
+    /// True if the path looks like it holds credentials.
+    fn is_sensitive(&self, path: &str) -> bool {
+        let lowered = path.to_lowercase();
+        SENSITIVE_PATTERNS
+            .iter()
+            .any(|pattern| lowered.contains(pattern))
+            || self
+                .extra_sensitive
+                .iter()
+                .any(|pattern| lowered.contains(pattern))
+    }
+}
 
 /// Returns the first absolute path in `args` that falls outside every root.
 ///
@@ -458,9 +571,17 @@ fn resolve(path: &Path) -> Option<PathBuf> {
 
 /// Collects every absolute-looking path appearing in the tool arguments.
 fn absolute_paths(args: &Value) -> Vec<String> {
+    string_args(args)
+        .into_iter()
+        .filter(|s| s.starts_with('/'))
+        .collect()
+}
+
+/// Collects every string value anywhere in the tool arguments.
+fn string_args(args: &Value) -> Vec<String> {
     fn walk(value: &Value, found: &mut Vec<String>) {
         match value {
-            Value::String(s) if s.starts_with('/') => found.push(s.clone()),
+            Value::String(s) => found.push(s.clone()),
             Value::Array(items) => items.iter().for_each(|v| walk(v, found)),
             Value::Object(map) => map.values().for_each(|v| walk(v, found)),
             _ => {}
@@ -763,13 +884,17 @@ mod tests {
         assert!(rx.try_recv().is_err(), "the user must not be prompted");
     }
 
-    /// Builds a bridge wired to a session, a hook root and a workspace.
+    /// Builds a bridge wired to a session, a workspace and an explicit policy.
     async fn test_bridge(
         workspace: &str,
+        auto_allow: &[&str],
     ) -> (PermissionBridge, mpsc::UnboundedReceiver<Option<String>>) {
         let (tx, rx) = mpsc::unbounded_channel();
         let bridge = PermissionBridge {
-            state: Arc::new(Mutex::new(BridgeState::default())),
+            state: Arc::new(Mutex::new(BridgeState {
+                policy: AutoAllowPolicy::with_tools(auto_allow),
+                ..BridgeState::default()
+            })),
             out_tx: tx,
             socket_path: Arc::new(PathBuf::from("/tmp/unused.sock")),
         };
@@ -778,11 +903,96 @@ mod tests {
         (bridge, rx)
     }
 
+    #[test]
+    fn only_ask_question_is_auto_allowed_by_default() {
+        let policy = AutoAllowPolicy::from_env();
+        assert!(policy.allows("ask_question"));
+        for tool in ["view_file", "list_dir", "grep_search", "run_command"] {
+            assert!(!policy.allows(tool), "{tool} must not be auto-allowed");
+        }
+    }
+
+    #[test]
+    fn groups_and_none_are_understood() {
+        let readers = AutoAllowPolicy {
+            tools: READ_TOOLS.iter().map(|t| t.to_string()).collect(),
+            extra_sensitive: Vec::new(),
+        };
+        assert!(readers.allows("view_file"));
+        assert!(!readers.allows("grep_search"));
+        assert!(!AutoAllowPolicy::default().allows("ask_question"));
+    }
+
+    #[test]
+    fn credential_looking_paths_are_flagged() {
+        let policy = AutoAllowPolicy::with_tools(&[]);
+        for path in [
+            "/work/.env",
+            "/work/.env.production",
+            "/work/config/API_TOKEN.txt",
+            "/work/secrets.yaml",
+            "/work/server.pem",
+            "/Users/me/.ssh/id_rsa",
+            "/Users/me/.aws/credentials",
+            "/work/.npmrc",
+        ] {
+            assert!(policy.is_sensitive(path), "{path} should be sensitive");
+        }
+        for path in ["/work/src/main.rs", "/work/README.md"] {
+            assert!(!policy.is_sensitive(path), "{path} should be ordinary");
+        }
+    }
+
+    #[test]
+    fn extra_sensitive_patterns_are_honoured() {
+        let policy = AutoAllowPolicy {
+            tools: Vec::new(),
+            extra_sensitive: vec!["patient".to_string()],
+        };
+        assert!(policy.is_sensitive("/work/patient_data.csv"));
+        assert!(!policy.is_sensitive("/work/notes.csv"));
+    }
+
+    #[tokio::test]
+    async fn sensitive_reads_still_ask_even_when_reads_are_auto_allowed() {
+        let workspace = std::env::temp_dir().join("agy-acp-sensitive-test");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let (bridge, mut rx) = test_bridge(&workspace.display().to_string(), READ_TOOLS).await;
+
+        let asking = {
+            let bridge = bridge.clone();
+            let target = workspace.join(".env").display().to_string();
+            tokio::spawn(async move {
+                bridge
+                    .decide(&json!({
+                        "conversationId": "conv-1",
+                        "toolCall": { "name": "view_file", "args": { "AbsolutePath": target } },
+                    }))
+                    .await
+            })
+        };
+
+        let raw = rx.recv().await.unwrap().unwrap();
+        let request: Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(request["method"], "session/request_permission");
+        bridge
+            .resolve_response(
+                &request["id"],
+                Some(json!({ "outcome": { "outcome": "selected", "optionId": "reject_once" } })),
+            )
+            .await;
+        assert_eq!(asking.await.unwrap().0, Decision::Deny);
+    }
+
     #[tokio::test]
     async fn reads_inside_the_workspace_are_allowed_without_asking() {
         let workspace = std::env::temp_dir().join("agy-acp-auto-allow-test");
         std::fs::create_dir_all(&workspace).unwrap();
-        let (bridge, mut rx) = test_bridge(&workspace.display().to_string()).await;
+        let (bridge, mut rx) = test_bridge(
+            &workspace.display().to_string(),
+            &["ask_question", "view_file", "view_code_item", "list_dir"],
+        )
+        .await;
 
         for (tool, args) in [
             (
@@ -808,7 +1018,11 @@ mod tests {
     async fn reads_outside_the_workspace_still_ask() {
         let workspace = std::env::temp_dir().join("agy-acp-auto-allow-test");
         std::fs::create_dir_all(&workspace).unwrap();
-        let (bridge, mut rx) = test_bridge(&workspace.display().to_string()).await;
+        let (bridge, mut rx) = test_bridge(
+            &workspace.display().to_string(),
+            &["ask_question", "view_file", "view_code_item", "list_dir"],
+        )
+        .await;
 
         let asking = {
             let bridge = bridge.clone();
@@ -838,35 +1052,26 @@ mod tests {
         assert_eq!(asking.await.unwrap().0, Decision::Deny);
     }
 
-    #[tokio::test]
-    async fn network_reads_are_never_auto_allowed() {
-        let (bridge, mut rx) = test_bridge("/work").await;
+    /// Network tools read without writing, so they are the ones most likely to be
+    /// swept into the read groups by mistake. A URL carries data out, so they must
+    /// stay out of `reads` and `searches`.
+    #[test]
+    fn the_read_groups_never_include_network_tools() {
+        for tool in ["read_url_content", "search_web"] {
+            assert!(!READ_TOOLS.contains(&tool), "{tool} must not be a read");
+            assert!(!SEARCH_TOOLS.contains(&tool), "{tool} must not be a search");
+        }
 
-        let asking = {
-            let bridge = bridge.clone();
-            tokio::spawn(async move {
-                bridge
-                    .decide(&json!({
-                        "conversationId": "conv-1",
-                        "toolCall": {
-                            "name": "read_url_content",
-                            "args": { "Url": "https://example.com/?leak=secret" },
-                        },
-                    }))
-                    .await
-            })
+        let everything = AutoAllowPolicy {
+            tools: READ_TOOLS
+                .iter()
+                .chain(SEARCH_TOOLS.iter())
+                .map(|t| t.to_string())
+                .collect(),
+            extra_sensitive: Vec::new(),
         };
-
-        let raw = rx.recv().await.unwrap().unwrap();
-        let request: Value = serde_json::from_str(&raw).unwrap();
-        assert_eq!(request["method"], "session/request_permission");
-        bridge
-            .resolve_response(
-                &request["id"],
-                Some(json!({ "outcome": { "outcome": "selected", "optionId": "reject_once" } })),
-            )
-            .await;
-        assert_eq!(asking.await.unwrap().0, Decision::Deny);
+        assert!(!everything.allows("read_url_content"));
+        assert!(!everything.allows("search_web"));
     }
 
     #[test]
