@@ -55,6 +55,7 @@ async fn start_permission_prompts(
 ) -> std::io::Result<(permission::PermissionBridge, hook_install::HookRoot)> {
     let bridge = permission::PermissionBridge::start(out_tx.clone())?;
     let hook_root = hook_install::HookRoot::create()?;
+    bridge.set_hook_root(hook_root.path()).await;
     adapter
         .lock()
         .await

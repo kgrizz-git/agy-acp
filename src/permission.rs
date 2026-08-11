@@ -78,6 +78,8 @@ struct BridgeState {
     pending: HashMap<String, oneshot::Sender<Value>>,
     /// Sticky answers from "always" options.
     always: HashMap<AlwaysKey, Decision>,
+    /// The adapter's private hook directory, refused on sight. See [`targets_hook_root`].
+    hook_root: Option<PathBuf>,
 }
 
 /// Shared handle to the permission bridge.
@@ -127,6 +129,13 @@ impl PermissionBridge {
         state
             .conversations
             .insert(conversation_id.to_string(), session_id.to_string());
+    }
+
+    /// Tells the bridge which directory holds its own hook, so tool calls aimed at
+    /// it can be refused without troubling the user.
+    pub async fn set_hook_root(&self, hook_root: &Path) {
+        let mut state = self.state.lock().await;
+        state.hook_root = Some(hook_root.to_path_buf());
     }
 
     /// Marks the session whose prompt is running, for the duration of that prompt.
@@ -203,6 +212,22 @@ impl PermissionBridge {
                 }
             }
         };
+
+        // The hook lives in a directory agy is given as a workspace root, so the model
+        // can see it and will occasionally try to work in it — most often after a
+        // refusal, when it goes looking for somewhere else to write. Nothing there is
+        // the user's, and it is deleted when the adapter exits, so refuse without
+        // asking rather than putting a meaningless prompt in front of them.
+        if let Some(hook_root) = self.state.lock().await.hook_root.clone() {
+            if targets_hook_root(&args, &hook_root) {
+                return (
+                    Decision::Deny,
+                    "agy-acp: that path is the adapter's internal directory, not part \
+                     of the workspace. Use the workspace directory instead."
+                        .to_string(),
+                );
+            }
+        }
 
         let always_key = (session_id.clone(), tool_name.clone());
         if let Some(decision) = self.state.lock().await.always.get(&always_key).copied() {
@@ -326,6 +351,24 @@ fn permission_options() -> Value {
         { "optionId": OPTION_REJECT_ONCE, "name": "Reject", "kind": "reject_once" },
         { "optionId": OPTION_REJECT_ALWAYS, "name": "Always reject", "kind": "reject_always" },
     ])
+}
+
+/// True if any string argument points inside the adapter's hook directory.
+///
+/// Deliberately a substring test over every argument rather than a check of known
+/// path fields: the hook root is an unmistakable temp path, and tool arguments that
+/// embed it (a shell command line, say) matter just as much as a `TargetFile`.
+fn targets_hook_root(args: &Value, hook_root: &Path) -> bool {
+    let needle = hook_root.to_string_lossy();
+    fn any_string(value: &Value, needle: &str) -> bool {
+        match value {
+            Value::String(s) => s.contains(needle),
+            Value::Array(items) => items.iter().any(|v| any_string(v, needle)),
+            Value::Object(map) => map.values().any(|v| any_string(v, needle)),
+            _ => false,
+        }
+    }
+    any_string(args, &needle)
 }
 
 fn step_idx(payload: &Value) -> i64 {
@@ -551,6 +594,55 @@ mod tests {
         let (decision, _) = bridge.decide(&payload).await;
         assert_eq!(decision, Decision::Allow);
         assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn hook_root_targets_are_spotted_in_any_argument() {
+        let root = Path::new("/tmp/agy-acp-hooks-42");
+        assert!(targets_hook_root(
+            &json!({ "TargetFile": "/tmp/agy-acp-hooks-42/a.txt" }),
+            root
+        ));
+        assert!(targets_hook_root(
+            &json!({ "CommandLine": "rm -rf /tmp/agy-acp-hooks-42" }),
+            root
+        ));
+        assert!(targets_hook_root(
+            &json!({ "Paths": ["ok.txt", "/tmp/agy-acp-hooks-42/b.txt"] }),
+            root
+        ));
+        assert!(!targets_hook_root(
+            &json!({ "TargetFile": "/work/repo/a.txt" }),
+            root
+        ));
+    }
+
+    #[tokio::test]
+    async fn tool_calls_aimed_at_the_hook_root_are_refused_without_asking() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let bridge = PermissionBridge {
+            state: Arc::new(Mutex::new(BridgeState::default())),
+            out_tx: tx,
+            socket_path: Arc::new(PathBuf::from("/tmp/unused.sock")),
+        };
+        bridge.register_conversation("conv-1", "session-1").await;
+        bridge
+            .set_hook_root(Path::new("/tmp/agy-acp-hooks-42"))
+            .await;
+
+        let (decision, reason) = bridge
+            .decide(&json!({
+                "conversationId": "conv-1",
+                "toolCall": {
+                    "name": "write_to_file",
+                    "args": { "TargetFile": "/tmp/agy-acp-hooks-42/a.txt" },
+                },
+            }))
+            .await;
+
+        assert_eq!(decision, Decision::Deny);
+        assert!(reason.contains("internal directory"));
+        assert!(rx.try_recv().is_err(), "the user must not be prompted");
     }
 
     #[tokio::test]
