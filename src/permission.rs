@@ -25,9 +25,25 @@ use uuid::Uuid;
 /// there into the hook command).
 pub const SOCKET_ENV: &str = "AGY_ACP_PERMISSION_SOCKET";
 
-/// How long the hook waits for a human to answer before giving up and denying.
-/// Must stay below the `timeout` set on the hook in `hooks.json`.
-const RESPONSE_TIMEOUT: Duration = Duration::from_secs(540);
+/// Overrides how long a permission request waits for an answer, in seconds.
+pub const TIMEOUT_ENV: &str = "AGY_ACP_PERMISSION_TIMEOUT_SECS";
+
+/// How long to wait for a human before giving up and denying.
+///
+/// Three timeouts are stacked around a permission request and the order matters:
+/// this one must expire first, then the hook's own `timeout`, then agy's
+/// `--print-timeout`. Only the innermost produces a clean deny that the model can
+/// carry on from; if either outer one fires first, agy aborts and the whole prompt
+/// turn fails with an error instead.
+const DEFAULT_RESPONSE_TIMEOUT: Duration = Duration::from_secs(540);
+
+fn response_timeout() -> Duration {
+    std::env::var(TIMEOUT_ENV)
+        .ok()
+        .and_then(|raw| raw.parse().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(DEFAULT_RESPONSE_TIMEOUT)
+}
 
 /// Decision returned to `agy`'s `PreToolUse` hook.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -229,7 +245,7 @@ impl PermissionBridge {
             );
         }
 
-        let outcome = match tokio::time::timeout(RESPONSE_TIMEOUT, rx).await {
+        let outcome = match tokio::time::timeout(response_timeout(), rx).await {
             Ok(Ok(value)) => value,
             _ => {
                 self.state.lock().await.pending.remove(&request_id);

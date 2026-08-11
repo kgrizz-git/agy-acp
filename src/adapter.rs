@@ -34,6 +34,10 @@ pub struct Adapter {
     pub hook_root_dir: Option<PathBuf>,
 }
 
+/// Print-mode timeout used when permission prompts are on. Must outlast the
+/// bridge's own wait so an unanswered prompt ends as a deny, not a failed turn.
+const PERMISSION_PRINT_TIMEOUT: &str = "60m";
+
 impl Adapter {
     pub const MODEL_CONFIG_ID: &'static str = "model";
 
@@ -680,6 +684,14 @@ impl Adapter {
         // the hook becomes the sole gate.
         if self.permission_bridge.is_some() {
             args.push("--dangerously-skip-permissions".to_string());
+
+            // Waiting on a human easily outlasts agy's 5 minute print-mode default,
+            // and when that fires agy aborts the whole turn instead of letting the
+            // bridge deny cleanly. Give it room, unless the user set their own.
+            if !args.iter().any(|arg| arg == "--print-timeout") {
+                args.push("--print-timeout".to_string());
+                args.push(PERMISSION_PRINT_TIMEOUT.to_string());
+            }
         }
         args.push("-p".to_string());
         args.push(clean_prompt.to_string());
