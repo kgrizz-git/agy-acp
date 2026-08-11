@@ -1,5 +1,7 @@
 mod adapter;
 mod db;
+mod hook_install;
+mod permission;
 mod protobuf;
 mod streaming;
 mod types;
@@ -7,7 +9,7 @@ mod types;
 #[cfg(test)]
 mod tests;
 
-use serde_json::json;
+use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
 use std::sync::{
@@ -26,11 +28,49 @@ struct Cli {
     /// Skip pure narration messages from agy, such as "I will ...".
     #[arg(long = "skip-naration", default_value_t = false)]
     skip_naration: bool,
+
+    /// Run agy's tool calls past the ACP client for approval instead of letting
+    /// agy auto-deny them in headless mode.
+    #[arg(long = "permission-prompts", default_value_t = false)]
+    permission_prompts: bool,
+
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Debug, clap::Subcommand)]
+enum Command {
+    /// Internal: the `PreToolUse` hook agy invokes to ask the ACP client for permission.
+    PermissionHook,
+}
+
+/// Starts the permission bridge and writes the hook agy will call into.
+///
+/// Both are needed for prompting to work, so a failure in either leaves the
+/// adapter running with agy's default (headless) permission behaviour rather than
+/// with agy's checks disabled and no bridge to replace them.
+async fn start_permission_prompts(
+    adapter: &Arc<tokio::sync::Mutex<Adapter>>,
+    out_tx: &mpsc::UnboundedSender<Option<String>>,
+) -> std::io::Result<(permission::PermissionBridge, hook_install::HookRoot)> {
+    let bridge = permission::PermissionBridge::start(out_tx.clone())?;
+    let hook_root = hook_install::HookRoot::create()?;
+    adapter
+        .lock()
+        .await
+        .enable_permission_bridge(&bridge, hook_root.path());
+    Ok((bridge, hook_root))
 }
 
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
+
+    if let Some(Command::PermissionHook) = cli.command {
+        permission::run_hook();
+        return;
+    }
+
     let adapter = if cli.skip_naration {
         Adapter::new_with_skip_naration(true)
     } else {
@@ -42,6 +82,24 @@ async fn main() {
 
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
     let (out_tx, mut out_rx) = mpsc::unbounded_channel::<Option<String>>();
+
+    // Permission prompting is opt-in: enabling it disables agy's own tool gating
+    // and makes this bridge the only thing standing between the model and the
+    // tool, so it must not switch on by accident.
+    // `_hook_root` must outlive the session loop: dropping it deletes the hook.
+    let (bridge, _hook_root) = if cli.permission_prompts {
+        match start_permission_prompts(&adapter, &out_tx).await {
+            Ok((bridge, hook_root)) => (Some(bridge), Some(hook_root)),
+            Err(e) => {
+                eprintln!("agy-acp: could not enable permission prompts: {e}");
+                eprintln!("agy-acp: continuing with agy's own permission handling");
+                (None, None)
+            }
+        }
+    } else {
+        (None, None)
+    };
+
     std::thread::spawn(move || {
         let stdin = io::stdin();
         for line in stdin.lock().lines() {
@@ -115,6 +173,20 @@ async fn main() {
             Ok(r) => r,
             Err(_) => continue,
         };
+
+        // A message with an id but no method is a response to something we sent —
+        // currently only permission requests.
+        if req.method.is_none() {
+            if let (Some(bridge), Some(id)) = (bridge.as_ref(), req.id.as_ref()) {
+                let result = serde_json::from_str::<Value>(&line)
+                    .ok()
+                    .and_then(|v| v.get("result").cloned());
+                if bridge.resolve_response(id, result).await {
+                    continue;
+                }
+            }
+        }
+
         let id = match req.id {
             Some(id) => id,
             None => {

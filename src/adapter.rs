@@ -3,7 +3,7 @@ use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, Mutex,
@@ -16,6 +16,7 @@ use uuid::Uuid;
 #[cfg(test)]
 use crate::db::read_delta_from_db;
 use crate::db::read_replay_updates_from_db;
+use crate::permission::{PermissionBridge, SOCKET_ENV};
 use crate::streaming::poll_streaming_delta;
 use crate::types::*;
 
@@ -26,10 +27,21 @@ pub struct Adapter {
     pub state_file: PathBuf,
     pub available_models: Vec<String>,
     pub skip_naration: bool,
+    /// Present only when `--permission-prompts` is on. Its presence is what makes
+    /// the adapter hand agy's tool gating over to the ACP client.
+    pub permission_bridge: Option<PermissionBridge>,
+    /// Private workspace root supplying the `PreToolUse` hook to agy.
+    pub hook_root_dir: Option<PathBuf>,
 }
 
 impl Adapter {
     pub const MODEL_CONFIG_ID: &'static str = "model";
+
+    /// Routes agy's tool permission checks through the ACP client.
+    pub fn enable_permission_bridge(&mut self, bridge: &PermissionBridge, hook_root: &Path) {
+        self.permission_bridge = Some(bridge.clone());
+        self.hook_root_dir = Some(hook_root.to_path_buf());
+    }
 
     pub fn new() -> Self {
         Self::new_with_skip_naration(false)
@@ -47,6 +59,8 @@ impl Adapter {
             state_file: state_dir.join("sessions.json"),
             available_models: Self::fetch_available_models(),
             skip_naration,
+            permission_bridge: None,
+            hook_root_dir: None,
         }
     }
 
@@ -634,9 +648,20 @@ impl Adapter {
             None
         };
 
+        if let Some(bridge) = self.permission_bridge.clone() {
+            bridge.set_active_session(Some(session_id)).await;
+        }
+
         let mut args: Vec<String> = Vec::new();
         args.push("--add-dir".to_string());
         args.push(self.working_dir.clone());
+        // agy picks up `.agents/hooks.json` from every workspace root, so adding the
+        // adapter's private root is what installs the permission hook for this run
+        // and nothing else.
+        if let Some(hook_root) = &self.hook_root_dir {
+            args.push("--add-dir".to_string());
+            args.push(hook_root.display().to_string());
+        }
         if let Ok(extra) = std::env::var("AGY_EXTRA_ARGS") {
             args.extend(extra.split_whitespace().map(String::from));
         }
@@ -650,16 +675,26 @@ impl Adapter {
                 args.push(model_id.clone());
             }
         }
+        // With the bridge on, agy's own permission checks would auto-deny before the
+        // PreToolUse hook's decision could take effect, so they are turned off and
+        // the hook becomes the sole gate.
+        if self.permission_bridge.is_some() {
+            args.push("--dangerously-skip-permissions".to_string());
+        }
         args.push("-p".to_string());
         args.push(clean_prompt.to_string());
 
-        let spawn_result = Command::new("agy")
+        let mut command = Command::new("agy");
+        command
             .args(&args)
             .current_dir(&self.working_dir)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn();
+            .stderr(std::process::Stdio::piped());
+        if let Some(bridge) = &self.permission_bridge {
+            command.env(SOCKET_ENV, bridge.socket_path());
+        }
+        let spawn_result = command.spawn();
 
         let mut child = match spawn_result {
             Ok(child) => child,
@@ -774,11 +809,15 @@ impl Adapter {
             let _ = stdout.flush();
         }
 
-        let state = streaming_state.lock().unwrap();
-        let bound_conv_id = state.conversation_id.clone();
-        let new_step_idx = state.last_step_idx;
-        let had_updates = state.had_updates || !final_lines.is_empty();
-        drop(state);
+        // Scoped so the non-Send guard cannot be held across the awaits below.
+        let (bound_conv_id, new_step_idx, had_updates) = {
+            let state = streaming_state.lock().unwrap();
+            (
+                state.conversation_id.clone(),
+                state.last_step_idx,
+                state.had_updates || !final_lines.is_empty(),
+            )
+        };
 
         if let Some(session) = self.sessions.get_mut(session_id) {
             if session.conversation_id.is_none() {
@@ -787,6 +826,13 @@ impl Adapter {
             if bound_conv_id.is_some() {
                 session.last_step_idx = new_step_idx;
             }
+        }
+
+        if let Some(bridge) = self.permission_bridge.clone() {
+            if let Some(conv_id) = bound_conv_id.as_deref() {
+                bridge.register_conversation(conv_id, session_id).await;
+            }
+            bridge.set_active_session(None).await;
         }
         if bound_conv_id.is_some() {
             let model_id = self

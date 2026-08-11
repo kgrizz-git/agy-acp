@@ -347,7 +347,11 @@ fn test_extract_tool_update_formats_structured_grep_hits_without_text_output() {
     let mut hit = Vec::new();
     push_len_field(&mut hit, 1, b"src/protobuf.rs");
     push_varint_field(&mut hit, 2, 42);
-    push_len_field(&mut hit, 3, b"fn parse_tool_result(blob: &[u8]) -> Option<Value> {");
+    push_len_field(
+        &mut hit,
+        3,
+        b"fn parse_tool_result(blob: &[u8]) -> Option<Value> {",
+    );
 
     let mut grep = Vec::new();
     push_len_field(&mut grep, 1, b"parse_tool_result");
@@ -376,14 +380,26 @@ fn test_extract_tool_update_from_structured_view_payload() {
     push_len_field(&mut view, 4, b"pub fn read_varint() {}\n```");
     push_varint_field(&mut view, 11, 13);
     push_varint_field(&mut view, 12, 200);
-    let payload = make_tool_payload("view-call", "view_file", "{}", "Viewing file", Some((14, view)));
+    let payload = make_tool_payload(
+        "view-call",
+        "view_file",
+        "{}",
+        "Viewing file",
+        Some((14, view)),
+    );
 
     let update = extract_tool_update_from_step_payload(23, 8, &payload).unwrap();
     assert_eq!(update["title"], "Viewing file");
     assert_eq!(update["kind"], "read");
-    assert_eq!(update["rawOutput"]["fileUri"], "file:///tmp/project/src/protobuf.rs");
+    assert_eq!(
+        update["rawOutput"]["fileUri"],
+        "file:///tmp/project/src/protobuf.rs"
+    );
     assert_eq!(update["rawOutput"]["startLine"], 10);
-    assert_eq!(update["locations"][0]["path"], "file:///tmp/project/src/protobuf.rs");
+    assert_eq!(
+        update["locations"][0]["path"],
+        "file:///tmp/project/src/protobuf.rs"
+    );
     assert_eq!(update["locations"][0]["line"], 10);
     assert_eq!(
         update["content"][0]["content"]["text"],
@@ -401,7 +417,13 @@ fn test_extract_tool_update_from_structured_list_payload() {
     let mut list = Vec::new();
     push_len_field(&mut list, 1, b"file:///tmp/project");
     push_len_field(&mut list, 3, &entry);
-    let payload = make_tool_payload("list-call", "list_dir", "{}", "Listing directory", Some((15, list)));
+    let payload = make_tool_payload(
+        "list-call",
+        "list_dir",
+        "{}",
+        "Listing directory",
+        Some((15, list)),
+    );
 
     let update = extract_tool_update_from_step_payload(24, 9, &payload).unwrap();
     assert_eq!(update["title"], "Listing directory");
@@ -505,6 +527,8 @@ fn test_session_load_restores_persisted_session() {
         state_file: root.join("sessions.json"),
         available_models: vec![],
         skip_naration: false,
+        permission_bridge: None,
+        hook_root_dir: None,
     };
     adapter.persist_session("sess-1", Some("conv-abc"), 5, None);
 
@@ -539,6 +563,8 @@ fn test_session_load_rejects_unknown_session() {
         state_file: root.join("sessions.json"),
         available_models: vec![],
         skip_naration: false,
+        permission_bridge: None,
+        hook_root_dir: None,
     };
 
     let output = adapter.handle_session_load(json!(9), &json!({"sessionId": "missing"}));
@@ -646,6 +672,8 @@ fn test_session_load_replays_conversation_history() {
         state_file: root.join("sessions.json"),
         available_models: vec![],
         skip_naration: false,
+        permission_bridge: None,
+        hook_root_dir: None,
     };
     adapter.persist_session("sess-replay", Some("conv-replay"), 8, None);
 
@@ -769,6 +797,8 @@ fn test_session_resume_restores_persisted_session() {
         state_file: root.join("sessions.json"),
         available_models: vec![],
         skip_naration: false,
+        permission_bridge: None,
+        hook_root_dir: None,
     };
     adapter.persist_session("sess-r1", Some("conv-xyz"), 3, None);
 
@@ -810,6 +840,8 @@ fn test_session_resume_rejects_unknown_session() {
         state_file: root.join("sessions.json"),
         available_models: vec![],
         skip_naration: false,
+        permission_bridge: None,
+        hook_root_dir: None,
     };
 
     let response = adapter.handle_session_resume(json!(11), &json!({"sessionId": "nope"}));
@@ -850,6 +882,8 @@ fn test_session_resume_accepts_in_memory_session() {
         state_file: PathBuf::from("/tmp/nonexistent-agy-acp-sessions.json"),
         available_models: vec![],
         skip_naration: false,
+        permission_bridge: None,
+        hook_root_dir: None,
     };
     adapter.sessions.insert(
         "sess-memory".to_string(),
@@ -882,6 +916,8 @@ fn test_session_load_accepts_in_memory_session_without_replay() {
         state_file: PathBuf::from("/tmp/nonexistent-agy-acp-sessions.json"),
         available_models: vec![],
         skip_naration: false,
+        permission_bridge: None,
+        hook_root_dir: None,
     };
     adapter.sessions.insert(
         "sess-memory-load".to_string(),
@@ -913,6 +949,8 @@ fn test_session_resume_does_not_replay_history() {
         state_file: root.join("sessions.json"),
         available_models: vec![],
         skip_naration: false,
+        permission_bridge: None,
+        hook_root_dir: None,
     };
     adapter.persist_session("sess-nr", Some("conv-nr"), 10, None);
 
@@ -945,6 +983,8 @@ fn test_snapshot_detects_db_conversations() {
         state_file: root.join("sessions.json"),
         available_models: vec![],
         skip_naration: false,
+        permission_bridge: None,
+        hook_root_dir: None,
     };
 
     let before = adapter.conversation_snapshot();
@@ -975,6 +1015,8 @@ fn test_snapshot_ignores_multiple_new_files() {
         state_file: root.join("sessions.json"),
         available_models: vec![],
         skip_naration: false,
+        permission_bridge: None,
+        hook_root_dir: None,
     };
 
     let before = adapter.conversation_snapshot();
@@ -998,6 +1040,8 @@ fn test_persist_and_restore_session() {
         state_file: root.join("sessions.json"),
         available_models: vec![],
         skip_naration: false,
+        permission_bridge: None,
+        hook_root_dir: None,
     };
 
     adapter.persist_session("sess-1", Some("conv-abc"), 7, None);
@@ -1063,6 +1107,8 @@ fn test_read_response_from_db() {
         state_file: root.join("sessions.json"),
         available_models: vec![],
         skip_naration: false,
+        permission_bridge: None,
+        hook_root_dir: None,
     };
 
     let result = adapter.read_response_from_db("test-conv", -1);
@@ -1510,6 +1556,8 @@ fn test_read_response_multi_step_no_skip_no_duplicate() {
         state_file: root.join("sessions.json"),
         available_models: vec![],
         skip_naration: false,
+        permission_bridge: None,
+        hook_root_dir: None,
     };
 
     let result = adapter.read_response_from_db("multi", -1);
@@ -1550,6 +1598,8 @@ fn test_read_response_missing_steps_table() {
         state_file: root.join("sessions.json"),
         available_models: vec![],
         skip_naration: false,
+        permission_bridge: None,
+        hook_root_dir: None,
     };
 
     let result = adapter.read_response_from_db("empty", -1);
@@ -1744,6 +1794,8 @@ fn test_session_set_model_persists() {
         state_file: root.join("sessions.json"),
         available_models: vec![],
         skip_naration: false,
+        permission_bridge: None,
+        hook_root_dir: None,
     };
 
     adapter.persist_session("sess-m1", Some("conv-m1"), 0, None);
@@ -1761,6 +1813,8 @@ fn test_session_set_model_persists() {
         state_file: root.join("sessions.json"),
         available_models: vec![],
         skip_naration: false,
+        permission_bridge: None,
+        hook_root_dir: None,
     };
     let restored = adapter2.restore_session("sess-m1");
     assert_eq!(
