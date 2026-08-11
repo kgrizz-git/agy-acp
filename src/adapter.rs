@@ -653,6 +653,7 @@ impl Adapter {
         };
 
         if let Some(bridge) = self.permission_bridge.clone() {
+            bridge.set_workspace_root(&self.working_dir).await;
             bridge.set_active_session(Some(session_id)).await;
         }
 
