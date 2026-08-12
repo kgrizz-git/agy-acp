@@ -1,0 +1,74 @@
+#!/bin/sh
+# Keeps fork-local files out of branches destined for an upstream pull request,
+# and refuses to push to upstream at all.
+#
+# The mistake this catches is cutting a feature branch from `mine` instead of
+# `upstream/main`: the branch then quietly carries every local-only commit, and
+# nothing says so until a maintainer is reading the diff.
+#
+# Canonical copy lives in .git/hooks/pre-push, NOT here. .git/hooks is outside the
+# working tree, so it keeps working on branches cut from upstream/main — which is
+# exactly when it has to. This copy is for reference and reinstallation:
+#
+#     cp .githooks/pre-push .git/hooks/pre-push && chmod +x .git/hooks/pre-push
+#
+# Bypass with `git push --no-verify` when you mean it.
+
+set -e
+
+remote_name="$1"
+remote_url="$2"
+
+# Files that exist only in this fork and must never reach upstream.
+local_only="AGENTS.fork.md"
+
+# Branches that are allowed to contain them.
+is_local_branch() {
+    case "$1" in
+    mine | main) return 0 ;;
+    *) return 1 ;;
+    esac
+}
+
+case "$remote_name$remote_url" in
+*hicder/agy-acp*)
+    echo "pre-push: refusing to push to upstream (hicder/agy-acp)." >&2
+    echo "  Push to 'origin' and open a pull request from there instead." >&2
+    exit 1
+    ;;
+esac
+
+if ! git rev-parse --verify --quiet upstream/main >/dev/null; then
+    echo "pre-push: no upstream/main to compare against, skipping check." >&2
+    exit 0
+fi
+
+status=0
+zero='0000000000000000000000000000000000000000'
+
+while read -r local_ref local_sha _remote_ref _remote_sha; do
+    # Branch deletion.
+    [ "$local_sha" = "$zero" ] && continue
+
+    branch=${local_ref#refs/heads/}
+    is_local_branch "$branch" && continue
+
+    changed=$(git diff --name-only "upstream/main...$local_sha")
+    for path in $local_only; do
+        if printf '%s\n' "$changed" | grep -qx "$path"; then
+            echo >&2
+            echo "pre-push: '$branch' contains $path, which must not go upstream." >&2
+            echo "  It was probably branched from 'mine' rather than 'upstream/main'." >&2
+            echo >&2
+            echo "  Check what the pull request would actually contain:" >&2
+            echo "      git diff --stat upstream/main...$branch" >&2
+            echo >&2
+            echo "  Then rebuild it on the right base, e.g.:" >&2
+            echo "      git rebase --onto upstream/main mine $branch" >&2
+            echo >&2
+            status=1
+        fi
+    done
+done
+
+exit $status
