@@ -94,6 +94,77 @@ feature, maintenance, and security comparison.
 - [ ] Do not treat `paseo-agy-acp`'s direct permission-bypass mode or its
   Paseo-specific prompt injection as general ACP behavior.
 
+## Local code-risk to do
+
+These are source-audit leads for `mine`, not confirmed regressions. Reproduce
+and add a regression test before changing behavior.
+
+### Security and permission-boundary leads
+
+- [ ] **Relative-path auto-allow escape:** `outside_workspace()` only evaluates
+  strings beginning with `/`, while `reads` and `searches` may accept a relative
+  path such as `../../some-readable-file`. Confirm how each `agy` read/search
+  tool resolves relative paths; if it resolves them from the workspace, normalize
+  relative path arguments against that root before auto-allowing, and prompt on
+  any escape. Do not rely on the sensitive-name denylist for containment.
+- [ ] **“Always allow” bypasses safety checks:** remembered choices are keyed
+  only by `(session, tool name)` and are evaluated after the hook-root check but
+  without workspace or sensitive-path checks. Verify whether a benign "Always
+  allow view_file" can later read an external or credential-looking path. If so,
+  retain a per-tool preference but keep path containment and sensitive-path
+  checks non-bypassable.
+- [ ] **Workspace-supplied hooks:** the adapter passes the user workspace as an
+  `--add-dir`, and `agy` discovers `.agents/hooks.json` in every workspace root.
+  Determine whether opening an untrusted repository can execute its hook commands
+  outside the ACP permission bridge. If yes, document the trust boundary and
+  consider an opt-in allowlist/isolated hook discovery strategy.
+- [ ] **Permission socket hardening:** the Unix-socket pathname is predictable
+  from the adapter PID and hook connections/tasks have no explicit peer or
+  concurrency limit. Measure socket permissions and test same-user spoofing or
+  connection exhaustion; use a private `0700` directory, an unguessable path,
+  framing limits, and bounded connection handling if the threat is realistic.
+- [ ] **Hook-root temporary-directory race:** the private hook root is also a
+  predictable `$TMPDIR/agy-acp-hooks-<pid>` path, created with `create_dir_all`
+  and made read-only only after writing `hooks.json`. Replace it with an exclusive
+  random `0700` temporary directory; never recursively delete a merely
+  prefix-matching stale directory without proving it was created by this adapter.
+
+### Protocol and lifecycle leads
+
+- [ ] **One stdout owner:** the streaming poller writes JSON-RPC directly to
+  stdout while the main loop and final-drain path also write there. Large writes
+  can interleave and corrupt line-delimited JSON-RPC. Route every notification
+  through the main output channel and add a concurrent-streaming framing test.
+- [ ] **Cancellation map race:** a second `session/prompt` for the same session
+  overwrites the first cancellation token before the global adapter lock admits
+  it; the first task can then remove the second token. Define whether concurrent
+  prompts are rejected, queued, or supersede one another, and test cancellation
+  in each state.
+- [ ] **Global prompt serialization:** `handle_session_prompt()` holds the one
+  adapter mutex through the entire child process, so every session is serialized
+  and state operations queue behind a long-running prompt. Decide whether this
+  is intentional; if not, split short state mutations from per-session runtime
+  state without weakening permission routing.
+- [ ] **Conversation binding collision:** discovery by diffing all conversation
+  DB filenames refuses to bind if any other `agy` process creates a DB at the
+  same time, but can also bind to the wrong sole new DB and replay its private
+  conversation into this ACP session. Reproduce alongside an interactive `agy`
+  run; then assess PID-based binding with a snapshot fallback.
+- [ ] **Unbounded input/output work:** stdin JSON-RPC lines, hook payloads,
+  pending permission requests, and SQLite rows are not size- or count-bounded.
+  Establish host limits and add practical frame, queue, and database-poll
+  safeguards to prevent a malformed client or provider data from exhausting
+  memory.
+- [ ] **Defensive protobuf bounds checks:** hand-rolled field walkers convert
+  provider-controlled varint lengths to `usize` and use `i + len` before slicing.
+  Replace all index arithmetic with checked operations and add maximal-varint /
+  malformed-length regression cases so a corrupted conversation DB cannot panic
+  the adapter.
+- [ ] **Streaming work grows with turn size:** each 500 ms poll queries and
+  reparses all DB rows after the pre-prompt index, even though `last_step_idx`
+  advances. Benchmark a long tool-heavy turn, then incrementally query new rows
+  and separately track the one growing agent-message row.
+
 ## Branches
 
 | Branch | Purpose |
