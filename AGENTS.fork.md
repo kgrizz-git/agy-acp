@@ -31,6 +31,69 @@ Used with Paseo, though nothing in the code is Paseo-specific — `session/reque
 is standard ACP and Zed implements it too. Keep it host-neutral so it stays
 upstreamable.
 
+## Related community projects
+
+- [javimosch/agy-acp-bridge](https://github.com/javimosch/agy-acp-bridge) — ACP stdio bridge for `agy`.
+- [tiezbro/paseo-agy-acp](https://github.com/tiezbro/paseo-agy-acp) — Paseo-focused ACP adapter for `agy`.
+
+### To do
+
+Compare these projects with this fork before porting anything. Identify ideas we
+can adapt, and assess whether either is a better fit for Paseo or the broader
+ACP use case. Do not assume an implementation is better without a concrete
+feature, maintenance, and security comparison.
+
+#### Investigate first
+
+- [ ] **Permission-denial race:** verify whether a late successful provider row
+  can overwrite or visually contradict an ACP rejection. If it can, retain the
+  bridge's deny decision as authoritative and suppress the contradictory update.
+  This is the most relevant idea from `paseo-agy-acp`.
+- [ ] **Completion gating:** confirm that a turn is not completed after progress,
+  idle, or tool lifecycle rows alone; require final visible assistant output after
+  the last tool boundary. Add regression fixtures before changing the poller.
+- [ ] **Missing streaming tool types:** assess upstream PR
+  [#15](https://github.com/hicder/agy-acp/pull/15) and add fixtures for observed
+  Antigravity step types before expanding narration/tool classification.
+
+#### Consider after validation
+
+- [ ] **Robust conversation binding:** evaluate PID-based database discovery,
+  with the existing before/after database snapshot as a fallback. Upstream PR
+  [#20](https://github.com/hicder/agy-acp/pull/20) has an implementation, but is
+  conflicting and unreviewed; independently validate macOS behavior first.
+- [ ] **More ACP configuration:** selectively expose supported `agy` options
+  (mode, model, reasoning effort, and sandbox) with validation and session
+  persistence. Keep `--dangerously-skip-permissions` under the bridge's own
+  fail-closed permission policy rather than exposing it as an ordinary bypass
+  mode.
+- [ ] **Per-session workspace roots:** assess ACP `cwd` and
+  `additionalDirectories` support from upstream PR
+  [#18](https://github.com/hicder/agy-acp/pull/18), including its interaction
+  with the private hook directory and workspace-bound read policy.
+- [ ] **Provider robustness:** test newest-first protobuf field-20 extraction,
+  clear surfacing of `agy` backend errors, and configurable `agy` binary paths.
+  These are parts of upstream PR #20, not yet a reviewed upstream baseline.
+- [ ] **PTY fallback:** reproduce the non-TTY and thinking-model failures that
+  motivated `agy-acp-bridge`; only add a PTY path if current `agy` versions still
+  need it and it preserves multi-session streaming and permissions.
+
+#### Paseo-only candidates
+
+- [ ] **Daemon context bridge:** investigate Paseo's appended system context only
+  if Paseo proves it is unavailable to `agy`. Treat it as trusted host data and
+  make it opt-in, observable, and isolated from general ACP hosts.
+- [ ] **Paseo task/revert edge cases:** reproduce the foreground task-state and
+  trailing-newline whole-file-revert issues reported by `paseo-agy-acp` before
+  adopting their fixes.
+
+#### Do not adopt as-is
+
+- [ ] Do not replace this adapter with `agy-acp-bridge`'s single-session,
+  non-streaming, unconditional permission-bypass design.
+- [ ] Do not treat `paseo-agy-acp`'s direct permission-bypass mode or its
+  Paseo-specific prompt injection as general ACP behavior.
+
 ## Branches
 
 | Branch | Purpose |
