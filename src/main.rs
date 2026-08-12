@@ -1,6 +1,6 @@
 mod adapter;
 mod db;
-mod hook_install;
+mod hook_root;
 mod permission;
 mod protobuf;
 mod streaming;
@@ -52,9 +52,9 @@ enum Command {
 async fn start_permission_prompts(
     adapter: &Arc<tokio::sync::Mutex<Adapter>>,
     out_tx: &mpsc::UnboundedSender<Option<String>>,
-) -> std::io::Result<(permission::PermissionBridge, hook_install::HookRoot)> {
+) -> std::io::Result<(permission::PermissionBridge, hook_root::HookRoot)> {
     let bridge = permission::PermissionBridge::start(out_tx.clone())?;
-    let hook_root = hook_install::HookRoot::create()?;
+    let hook_root = hook_root::HookRoot::create()?;
     bridge.set_hook_root(hook_root.path()).await;
     adapter
         .lock()

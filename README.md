@@ -70,12 +70,55 @@ Set the `AGY_EXTRA_ARGS` environment variable to pass additional arguments to ev
 }
 ```
 
+## Permission Prompts
+
+`agy` runs headless under this adapter, and headless `agy` cannot prompt for tool permissions — it auto-denies anything that needs one, so the tool call fails silently and the model stops. Pass `--permission-prompts` to ask the ACP host instead:
+
+```json
+{
+  "agent_servers": {
+    "agy": {
+      "type": "custom",
+      "command": "agy-acp",
+      "args": ["--permission-prompts"],
+      "env": {}
+    }
+  }
+}
+```
+
+Tool calls then arrive as ACP `session/request_permission` requests, with **Allow** / **Always allow** / **Reject** / **Always reject** options. "Always" answers are remembered per tool for the rest of the session.
+
+This works by installing a `PreToolUse` hook for `agy` in a private directory of the adapter's own — nothing is written to your workspace or to your global `agy` config, so plain `agy` use in a terminal is unaffected.
+
+> [!IMPORTANT]
+> Enabling this runs `agy` with `--dangerously-skip-permissions`, because a hook cannot grant a permission that `agy`'s own checks have already denied — while they are active a hook can only veto. The adapter becomes the only gate on tool execution, so anything it cannot resolve (no host to ask, host disconnected, no answer in time) is denied.
+
+### What runs without asking
+
+Only `ask_question` by default: it asks you something and cannot touch the filesystem. Reads are *not* auto-allowed out of the box — `agy`'s own checks are off, so a read you never see is a read of anything the process can reach.
+
+Opt in with `AGY_ACP_AUTO_ALLOW`, which takes tool names and the groups `reads` (`view_file`, `view_code_item`, `list_dir`), `searches` (`grep_search`, `codebase_search`, `find_by_name`) and `none`:
+
+```json
+"env": { "AGY_ACP_AUTO_ALLOW": "ask_question,reads,searches" }
+```
+
+Whatever is enabled, three limits still apply:
+
+- **Only inside the workspace** — an absolute path outside the workspace root is still prompted.
+- **No network reads** — `read_url_content` and `search_web` are outside both groups. They only read, but a URL carries data out.
+- **Credential-looking paths are still prompted** — `.env`, `.pem`/`.key`/`id_rsa`, `.ssh`/`.aws`/`.gnupg`/`.kube`, `.netrc`/`.npmrc`/`.git-credentials`, and names containing `token`, `secret`, `password` or `credential`. Extend with `AGY_ACP_SENSITIVE_PATTERNS`. This list cannot be complete and is not what makes the feature safe — the narrow default is.
+
 ## Environment Variables
 
 | Variable | Description |
 |---|---|
 | `GEMINI_API_KEY` | API key for Gemini (passed through to `agy`) |
 | `AGY_EXTRA_ARGS` | Space-separated extra args passed to every `agy` invocation |
+| `AGY_ACP_AUTO_ALLOW` | What may run without asking. Tool names plus the groups `reads`, `searches`, `none`. Default `ask_question` |
+| `AGY_ACP_SENSITIVE_PATTERNS` | Extra comma-separated substrings marking a path as too sensitive to read without asking |
+| `AGY_ACP_PERMISSION_TIMEOUT_SECS` | How long a permission request waits for an answer before denying. Default `540` |
 
 ## Session Persistence
 
