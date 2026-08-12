@@ -14,6 +14,9 @@ cargo test e2e -- --ignored --nocapture  # e2e only (needs agy binary + auth)
 
 No separate lint/typecheck/format commands — just `cargo build` and `cargo test`.
 
+> Fork note: see `AGENTS.local.md` for fork-specific workflow. That file exists only
+> on the `mine` branch and must never appear in an upstream PR.
+
 ## Architecture
 
 - `main.rs` — stdin/stdout JSON-RPC loop. Reads lines, dispatches to adapter methods, writes responses.
