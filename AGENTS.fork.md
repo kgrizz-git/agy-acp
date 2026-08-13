@@ -80,6 +80,22 @@ feature, maintenance, and security comparison.
 
 #### Paseo-only candidates
 
+- [ ] **Native agy subagent visibility:** evaluate switching the adapter's agy
+  invocation to `--output-format stream-json` in a feature spike. agy 1.1.8+
+  documents a `subagent_info` event with the child `conversation_id` and
+  `log_uri`; verify it is emitted in `--print` mode, remains ordered with
+  `step_update`/`result`, and carries enough lifecycle information to expose
+  child progress safely. Today the adapter polls only the root SQLite
+  conversation and cannot identify a child as a distinct agent.
+- [ ] **Paseo child-agent representation:** determine whether Paseo has a
+  supported provider-extension or external-child API that accepts a stable
+  child ID, lifecycle updates, logs, and cancellation. If it does, map agy's
+  `conversation_id` to that API and preserve the parent/child relationship. If
+  it does not, present native children as ACP progress/activity updates only;
+  do not create synthetic independent Paseo agents or use `paseo import`, which
+  imports sessions only for Paseo-owned providers and would give incorrect
+  lifecycle/cancellation semantics. Keep this opt-in and version-gated (agy
+  1.1.8+) until an end-to-end fixture proves it.
 - [ ] **Daemon context bridge:** investigate Paseo's appended system context only
   if Paseo proves it is unavailable to `agy`. Treat it as trusted host data and
   make it opt-in, observable, and isolated from general ACP hosts.
