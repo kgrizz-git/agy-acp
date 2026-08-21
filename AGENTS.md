@@ -21,11 +21,10 @@ No separate lint/typecheck/format commands — just `cargo build` and `cargo tes
 ## Architecture
 
 - `main.rs` — stdin/stdout JSON-RPC loop. Reads lines, dispatches to adapter methods, writes responses.
-- `adapter.rs` — core logic: session lifecycle, spawning `agy` subprocess, state persistence. `Adapter::new()` reads `HOME` for state/conv dirs.
-- `db.rs` — reads agy's SQLite conversation DBs (read-only). Table: `steps` with columns `idx`, `step_type`, `step_payload`.
-- `protobuf.rs` — hand-rolled protobuf varint/field extraction (no prost/protobuf dependency). Extracts text from `step_payload` field 20 → sub-field 1.
-- `streaming.rs` — polls SQLite every 500ms during `session/prompt`, emits incremental `session/update` notifications to stdout.
-- `types.rs` — JSON-RPC types, `SessionStore` for persistence, `StreamingState`.
+- `adapter.rs` — core logic: session lifecycle, spawning `agy` subprocess, state persistence. `Adapter::new()` reads `HOME` for the state dir.
+- `streaming.rs` — parses `agy --output-format stream-json` NDJSON (`init`, `step_update`, `result`) into ACP `session/update` notifications via `StreamProcessor`, which runs in a background task reading the `agy` subprocess's stdout as it streams.
+- `tools.rs` — maps agy tool names/parameters/output into ACP tool-call fields (`kind`, locations, content).
+- `types.rs` — JSON-RPC types, `SessionStore` for persistence.
 - `permission.rs` — `--permission-prompts` only. Unix socket server turning agy's `PreToolUse` hook into ACP `session/request_permission`, plus the `agy-acp permission-hook` subcommand agy invokes.
 - `hook_root.rs` — `--permission-prompts` only. Writes that hook into a private temp dir handed to agy as an extra `--add-dir`.
 
@@ -34,12 +33,11 @@ No separate lint/typecheck/format commands — just `cargo build` and `cargo tes
 | Path | Purpose |
 |---|---|
 | `~/.openab/agy-acp/sessions.json` | Persisted session→conversation mapping (with `.lock` file for mutual exclusion) |
-| `~/.gemini/antigravity-cli/conversations/*.db` | agy's SQLite conversation databases |
 
 ## Test tiers
 
-1. **Unit tests** (`cargo test`) — protobuf parsing, narration filtering, JSON-RPC response shape. No filesystem or network I/O.
-2. **Ignored I/O tests** (`-- --include-ignored`) — session persist/restore, SQLite read, conversation snapshot. Create temp dirs in `$TMPDIR`.
+1. **Unit tests** (`cargo test`) — stream-json parsing, narration filtering, JSON-RPC response shape. No filesystem or network I/O.
+2. **Ignored I/O tests** (`-- --include-ignored`) — session persist/restore. Create temp dirs in `$TMPDIR`.
 3. **E2E tests** (`e2e -- --ignored`) — spawn the release binary, send JSON-RPC over stdin, verify responses. Requires:
    - `agy` in `PATH` (install from `google-antigravity/antigravity-cli` releases)
    - Auth via `GEMINI_API_KEY` env var or macOS Keychain (`~/.gemini/antigravity-cli/settings.json`)
@@ -58,15 +56,13 @@ No separate lint/typecheck/format commands — just `cargo build` and `cargo tes
 
 ## Quirks
 
-- `rusqlite` uses `bundled` feature — no system SQLite dependency needed.
-- SQLite reads use `SQLITE_OPEN_READ_ONLY | SQLITE_OPEN_NO_MUTEX` — single-threaded access assumed per conversation DB.
 - State persistence uses write-to-tmp-then-rename pattern under an exclusive file lock (`fs2`).
-- Streaming writes JSON-RPC notifications directly to stdout from a background polling thread (not through the main channel). Both the main loop and the poller write to stdout concurrently.
-- `handle_session_load` returns a `Vec<String>` (multiple notifications + final response), not a single response like other methods.
-- Conversation binding: on first prompt for a new session, the adapter snapshots conversation DB filenames, then diffs after `agy` exits to discover the new conversation ID. Refuses to bind if multiple new DBs appear simultaneously.
+- Streaming writes JSON-RPC notifications directly to stdout from the `agy` stdout reader (not through the main channel). The main loop may still write concurrently if other requests arrive during a prompt.
+- `handle_session_load` returns a `Vec<String>` (same shape as other multi-line handlers). History is not replayed; load restores the conversation binding so later prompts pass `--conversation`.
+- Conversation binding: the `init` / `result` stream-json events include `conversation_id`, which is persisted and passed back as `--conversation` on subsequent prompts.
 - `fetch_available_models()` runs `agy models` synchronously during `Adapter::new()`. If `agy` isn't installed, models list is empty (no error).
 - `agy models` prints `id<TAB>Human Label` on stdout and its "Fetching available models..." banner on stderr. Only the id is a valid `--model` argument; ACP gets the id as `modelId`/`value` and the label as `name`. Ids arriving from a client are checked against that list, and a `id<TAB>label` string left in an old `sessions.json` is repaired on restore.
-- `session/cancel` is a no-op — always returns `{}`.
+- `session/cancel` returns `{}` immediately but sets an `AtomicBool` flag that the prompt task polls; when set, it kills the in-flight `agy` subprocess and the turn ends with `stopReason: "cancelled"`.
 - Both `session/set_model` and `session/setConfigOption` are accepted for model selection.
 
 ### Permission bridge (`--permission-prompts`)
@@ -110,19 +106,18 @@ feature, maintenance, and security comparison.
   can overwrite or visually contradict an ACP rejection. If it can, retain the
   bridge's deny decision as authoritative and suppress the contradictory update.
   This is the most relevant idea from `paseo-agy-acp`.
-- [ ] **Completion gating:** confirm that a turn is not completed after progress,
-  idle, or tool lifecycle rows alone; require final visible assistant output after
-  the last tool boundary. Add regression fixtures before changing the poller.
-- [ ] **Missing streaming tool types:** assess upstream PR
-  [#15](https://github.com/hicder/agy-acp/pull/15) and add fixtures for observed
-  Antigravity step types before expanding narration/tool classification.
+- [ ] **Completion gating:** the turn now ends on the stream's `result` event
+  rather than on a poller's judgement. Confirm that a stream ending without a
+  `result` (agy killed, stdout closed early) is reported as a failed turn and not
+  a silent success, and add fixtures for both.
+- [ ] **Session-load replay:** upstream's stream-json rewrite dropped it.
+  `handle_session_load` used to replay prior turns out of SQLite; it now returns
+  config only, so a reopened thread shows an empty transcript while agy itself
+  still has the context via `--conversation`. Decide whether to restore replay
+  from some source the adapter still reads, or to document the loss.
 
 #### Consider after validation
 
-- [ ] **Robust conversation binding:** evaluate PID-based database discovery,
-  with the existing before/after database snapshot as a fallback. Upstream PR
-  [#20](https://github.com/hicder/agy-acp/pull/20) has an implementation, but is
-  conflicting and unreviewed; independently validate macOS behavior first.
 - [ ] **More ACP configuration:** selectively expose supported `agy` options
   (mode, model, reasoning effort, and sandbox) with validation and session
   persistence. Keep `--dangerously-skip-permissions` under the bridge's own
@@ -132,22 +127,21 @@ feature, maintenance, and security comparison.
   `additionalDirectories` support from upstream PR
   [#18](https://github.com/hicder/agy-acp/pull/18), including its interaction
   with the private hook directory and workspace-bound read policy.
-- [ ] **Provider robustness:** test newest-first protobuf field-20 extraction,
-  clear surfacing of `agy` backend errors, and configurable `agy` binary paths.
-  These are parts of upstream PR #20, not yet a reviewed upstream baseline.
+- [ ] **Provider robustness:** confirm `agy` backend errors reach the user —
+  the stream's `result` event carries `status` and `error`, and the adapter now
+  reads both — and consider a configurable `agy` binary path.
 - [ ] **PTY fallback:** reproduce the non-TTY and thinking-model failures that
   motivated `agy-acp-bridge`; only add a PTY path if current `agy` versions still
   need it and it preserves multi-session streaming and permissions.
 
 #### Paseo-only candidates
 
-- [ ] **Native agy subagent visibility:** evaluate switching the adapter's agy
-  invocation to `--output-format stream-json` in a feature spike. agy 1.1.8+
-  documents a `subagent_info` event with the child `conversation_id` and
-  `log_uri`; verify it is emitted in `--print` mode, remains ordered with
-  `step_update`/`result`, and carries enough lifecycle information to expose
-  child progress safely. Today the adapter polls only the root SQLite
-  conversation and cannot identify a child as a distinct agent.
+- [ ] **Native agy subagent visibility:** the stream-json switch this called for
+  has landed — upstream did it, and `StreamProcessor` already turns
+  `subagent_info` into a tool call. What is left is the part that spike was
+  really about: verify the child `conversation_id` and `log_uri` carry enough
+  lifecycle information to expose child progress as more than one opaque tool
+  call, and that subagent events stay ordered with `step_update`/`result`.
 - [ ] **Paseo child-agent representation:** determine whether Paseo has a
   supported provider-extension or external-child API that accepts a stable
   child ID, lifecycle updates, logs, and cancellation. If it does, map agy's
@@ -208,10 +202,11 @@ and add a regression test before changing behavior.
 
 ### Protocol and lifecycle leads
 
-- [ ] **One stdout owner:** the streaming poller writes JSON-RPC directly to
-  stdout while the main loop and final-drain path also write there. Large writes
-  can interleave and corrupt line-delimited JSON-RPC. Route every notification
-  through the main output channel and add a concurrent-streaming framing test.
+- [ ] **One stdout owner:** the stream-reader task writes JSON-RPC directly to
+  stdout while the main loop also writes there. Large writes can interleave and
+  corrupt line-delimited JSON-RPC. Route every notification through the main
+  output channel and add a concurrent-streaming framing test. The stream-json
+  port removed the final-drain writer but not the shared-stdout problem.
 - [ ] **Cancellation map race:** a second `session/prompt` for the same session
   overwrites the first cancellation token before the global adapter lock admits
   it; the first task can then remove the second token. Define whether concurrent
@@ -222,25 +217,11 @@ and add a regression test before changing behavior.
   and state operations queue behind a long-running prompt. Decide whether this
   is intentional; if not, split short state mutations from per-session runtime
   state without weakening permission routing.
-- [ ] **Conversation binding collision:** discovery by diffing all conversation
-  DB filenames refuses to bind if any other `agy` process creates a DB at the
-  same time, but can also bind to the wrong sole new DB and replay its private
-  conversation into this ACP session. Reproduce alongside an interactive `agy`
-  run; then assess PID-based binding with a snapshot fallback.
 - [ ] **Unbounded input/output work:** stdin JSON-RPC lines, hook payloads,
-  pending permission requests, and SQLite rows are not size- or count-bounded.
-  Establish host limits and add practical frame, queue, and database-poll
+  pending permission requests, and stream-json lines are not size- or
+  count-bounded. Establish host limits and add practical frame and queue
   safeguards to prevent a malformed client or provider data from exhausting
   memory.
-- [ ] **Defensive protobuf bounds checks:** hand-rolled field walkers convert
-  provider-controlled varint lengths to `usize` and use `i + len` before slicing.
-  Replace all index arithmetic with checked operations and add maximal-varint /
-  malformed-length regression cases so a corrupted conversation DB cannot panic
-  the adapter.
-- [ ] **Streaming work grows with turn size:** each 500 ms poll queries and
-  reparses all DB rows after the pre-prompt index, even though `last_step_idx`
-  advances. Benchmark a long tool-heavy turn, then incrementally query new rows
-  and separately track the one growing agent-message row.
 
 ## Branches
 
@@ -287,11 +268,11 @@ fork has not taken, comparing against the sha in `.upstream-watermark`. It exits
 `upstream-watch` issue in sync with the result.
 
 The watermark moves **only in a commit a human made** (`--update` writes it, you
-commit it). It records what has been reviewed, not what exists: upstream's
-stream-json rewrite deletes `db.rs` and `protobuf.rs`, which the permission
-bridge, conversation binding and model handling here are all built on. Adopting
-that is a port, not a merge, and a watermark that advanced by itself would
-quietly claim otherwise.
+commit it). It records what has been reviewed, not what exists. Upstream's
+stream-json rewrite is the example: it deleted `db.rs` and `protobuf.rs`, which
+the permission bridge, conversation binding and model handling were all built
+on, so taking it was a port rather than a merge. A watermark that advanced by
+itself would have claimed that was absorbed.
 
 The report always goes to the run's job summary. Forks also have issues disabled
 by default; the workflow detects that and skips the issue steps rather than
@@ -316,9 +297,8 @@ in the repository settings.
   started as `AGENTS.local.md` and sat uncommitted for exactly that reason, then
   lived in `AGENTS.fork.md` until the hard fork folded them into this file.
 - **Do not run bare `cargo fmt`.** The repo is not kept rustfmt-clean and has no
-  format command, so it reflows files a change does not touch — `src/protobuf.rs`
-  especially. Format specific files, or restore afterwards with
-  `git checkout HEAD -- src/protobuf.rs`.
+  format command, so it reflows files a change does not touch. Format specific
+  files, or restore the rest afterwards with `git checkout HEAD -- <path>`.
 - Paseo runs the adapter as `["agy-acp", "--permission-prompts"]` in
   `~/.paseo/config.json`. Provider command changes need a daemon restart.
 - The permission flag is off by default. Without it the adapter behaves as the
