@@ -65,6 +65,7 @@ No separate lint/typecheck/format commands — just `cargo build` and `cargo tes
 - `handle_session_load` returns a `Vec<String>` (multiple notifications + final response), not a single response like other methods.
 - Conversation binding: on first prompt for a new session, the adapter snapshots conversation DB filenames, then diffs after `agy` exits to discover the new conversation ID. Refuses to bind if multiple new DBs appear simultaneously.
 - `fetch_available_models()` runs `agy models` synchronously during `Adapter::new()`. If `agy` isn't installed, models list is empty (no error).
+- `agy models` prints `id<TAB>Human Label` on stdout and its "Fetching available models..." banner on stderr. Only the id is a valid `--model` argument; ACP gets the id as `modelId`/`value` and the label as `name`. Ids arriving from a client are checked against that list, and a `id<TAB>label` string left in an old `sessions.json` is repaired on restore.
 - `session/cancel` is a no-op — always returns `{}`.
 - Both `session/set_model` and `session/setConfigOption` are accepted for model selection.
 

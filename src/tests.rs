@@ -11,6 +11,7 @@ use crate::protobuf::{
     extract_tool_update_from_step_payload, extract_user_text_from_step_payload, is_tool_step_type,
     read_varint,
 };
+use crate::types::AgyModel;
 use crate::Cli;
 use clap::Parser;
 
@@ -1691,6 +1692,7 @@ fn test_session_new_returns_models() {
 #[test]
 fn test_session_set_model() {
     let mut adapter = Adapter::new();
+    adapter.available_models = test_models();
     let new_resp = adapter.handle_session_new(json!(1));
     let session_id = new_resp.result.as_ref().unwrap()["sessionId"]
         .as_str()
@@ -1699,7 +1701,7 @@ fn test_session_set_model() {
 
     let set_resp = adapter.handle_session_set_model(
         json!(2),
-        &json!({"sessionId": session_id, "modelId": "Gemini 3.5 Flash (High)"}),
+        &json!({"sessionId": session_id, "modelId": "model-b"}),
     );
     assert!(set_resp.error.is_none());
     assert_eq!(
@@ -1709,7 +1711,7 @@ fn test_session_set_model() {
             .unwrap()
             .model_id
             .as_deref(),
-        Some("Gemini 3.5 Flash (High)")
+        Some("model-b")
     );
 }
 
@@ -1735,7 +1737,7 @@ fn test_session_set_model_unknown_session() {
 #[test]
 fn test_session_set_config_option_sets_model() {
     let mut adapter = Adapter::new();
-    adapter.available_models = vec!["Model A".to_string(), "Model B".to_string()];
+    adapter.available_models = test_models();
     let new_resp = adapter.handle_session_new(json!(1));
     let session_id = new_resp.result.as_ref().unwrap()["sessionId"]
         .as_str()
@@ -1744,7 +1746,7 @@ fn test_session_set_config_option_sets_model() {
 
     let set_resp = adapter.handle_session_set_config_option(
         json!(2),
-        &json!({"sessionId": session_id, "configId": "model", "value": "Model B"}),
+        &json!({"sessionId": session_id, "configId": "model", "value": "model-b"}),
     );
 
     assert!(set_resp.error.is_none(), "error: {:?}", set_resp.error);
@@ -1755,12 +1757,12 @@ fn test_session_set_config_option_sets_model() {
             .unwrap()
             .model_id
             .as_deref(),
-        Some("Model B")
+        Some("model-b")
     );
     let config_options = set_resp.result.as_ref().unwrap()["configOptions"]
         .as_array()
         .unwrap();
-    assert_eq!(config_options[0]["currentValue"].as_str(), Some("Model B"));
+    assert_eq!(config_options[0]["currentValue"].as_str(), Some("model-b"));
 }
 
 #[test]
@@ -1900,33 +1902,161 @@ fn test_session_models_json_default() {
     if adapter.available_models.is_empty() {
         assert_eq!(current, "");
     } else {
-        assert_eq!(current, adapter.available_models[0]);
+        assert_eq!(current, adapter.available_models[0].id);
     }
+}
+
+/// What `agy models` actually prints on stdout: `id<TAB>label`, no header —
+/// the "Fetching available models..." banner goes to stderr.
+const AGY_MODELS_STDOUT: &str = "\
+gemini-3.7-flash-high\tGemini 3.7 Flash (High)
+gemini-3.7-flash-low\tGemini 3.7 Flash (Low)
+gemini-3.1-pro-high\tGemini 3.1 Pro (High)
+claude-sonnet-4-6\tClaude Sonnet 4.6 (Thinking)
+";
+
+fn test_models() -> Vec<AgyModel> {
+    vec![
+        AgyModel {
+            id: "model-a".to_string(),
+            label: "Model A".to_string(),
+        },
+        AgyModel {
+            id: "model-b".to_string(),
+            label: "Model B".to_string(),
+        },
+    ]
+}
+
+#[test]
+fn test_parse_models_output_splits_id_from_label() {
+    let models = Adapter::parse_models_output(AGY_MODELS_STDOUT);
+    assert_eq!(models.len(), 4);
+    assert_eq!(models[0].id, "gemini-3.7-flash-high");
+    assert_eq!(models[0].label, "Gemini 3.7 Flash (High)");
+    assert_eq!(models[3].id, "claude-sonnet-4-6");
+    assert_eq!(models[3].label, "Claude Sonnet 4.6 (Thinking)");
+    for model in &models {
+        assert!(
+            !model.id.contains('\t') && !model.id.contains(' '),
+            "id must be the bare model name agy accepts, got {:?}",
+            model.id
+        );
+    }
+}
+
+#[test]
+fn test_parse_models_output_without_label_column() {
+    let models = Adapter::parse_models_output("gemini-3.7-flash-high\n\ngemini-3.1-pro-low\n");
+    assert_eq!(models.len(), 2);
+    assert_eq!(models[0].id, "gemini-3.7-flash-high");
+    assert_eq!(models[0].label, "gemini-3.7-flash-high");
+    assert_eq!(models[1].id, "gemini-3.1-pro-low");
+}
+
+#[test]
+fn test_session_models_json_never_emits_a_label_as_an_id() {
+    let mut adapter = Adapter::new();
+    adapter.available_models = Adapter::parse_models_output(AGY_MODELS_STDOUT);
+    let models = adapter.session_models_json(None);
+    let available = models["availableModels"].as_array().unwrap();
+    assert_eq!(available[0]["modelId"].as_str(), Some("gemini-3.7-flash-high"));
+    assert_eq!(available[0]["name"].as_str(), Some("Gemini 3.7 Flash (High)"));
+    for entry in available {
+        assert!(!entry["modelId"].as_str().unwrap().contains('\t'));
+    }
+    assert_eq!(
+        models["currentModelId"].as_str(),
+        Some("gemini-3.7-flash-high")
+    );
 }
 
 #[test]
 fn test_session_models_json_with_model() {
     let mut adapter = Adapter::new();
-    adapter.available_models = vec!["Model A".to_string(), "Model B".to_string()];
-    let models = adapter.session_models_json(Some("Model B"));
-    assert_eq!(models["currentModelId"].as_str(), Some("Model B"));
+    adapter.available_models = test_models();
+    let models = adapter.session_models_json(Some("model-b"));
+    assert_eq!(models["currentModelId"].as_str(), Some("model-b"));
     let available = models["availableModels"].as_array().unwrap();
     assert_eq!(available.len(), 2);
-    assert_eq!(available[0]["modelId"].as_str(), Some("Model A"));
-    assert_eq!(available[1]["modelId"].as_str(), Some("Model B"));
+    assert_eq!(available[0]["modelId"].as_str(), Some("model-a"));
+    assert_eq!(available[0]["name"].as_str(), Some("Model A"));
+    assert_eq!(available[1]["modelId"].as_str(), Some("model-b"));
 }
 
 #[test]
 fn test_session_config_options_json_with_model() {
     let mut adapter = Adapter::new();
-    adapter.available_models = vec!["Model A".to_string(), "Model B".to_string()];
-    let config_options = adapter.session_config_options_json(Some("Model B"));
+    adapter.available_models = test_models();
+    let config_options = adapter.session_config_options_json(Some("model-b"));
     assert_eq!(config_options[0]["id"].as_str(), Some("model"));
     assert_eq!(config_options[0]["category"].as_str(), Some("model"));
     assert_eq!(config_options[0]["type"].as_str(), Some("select"));
-    assert_eq!(config_options[0]["currentValue"].as_str(), Some("Model B"));
+    assert_eq!(config_options[0]["currentValue"].as_str(), Some("model-b"));
     let options = config_options[0]["options"].as_array().unwrap();
     assert_eq!(options.len(), 2);
-    assert_eq!(options[0]["value"].as_str(), Some("Model A"));
-    assert_eq!(options[1]["value"].as_str(), Some("Model B"));
+    assert_eq!(options[0]["value"].as_str(), Some("model-a"));
+    assert_eq!(options[0]["name"].as_str(), Some("Model A"));
+    assert_eq!(options[1]["value"].as_str(), Some("model-b"));
+}
+
+/// A client that stored the old mangled `id<TAB>label` string and sends it back
+/// must not have it passed through to `--model`, which agy would reject.
+#[test]
+fn test_set_model_strips_a_label_glued_to_the_id() {
+    let mut adapter = Adapter::new();
+    adapter.available_models = Adapter::parse_models_output(AGY_MODELS_STDOUT);
+    let new_resp = adapter.handle_session_new(json!(1));
+    let session_id = new_resp.result.as_ref().unwrap()["sessionId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let resp = adapter.handle_session_set_model(
+        json!(2),
+        &json!({
+            "sessionId": session_id,
+            "modelId": "gemini-3.7-flash-high\tGemini 3.7 Flash (High)",
+        }),
+    );
+    assert!(resp.error.is_none(), "error: {:?}", resp.error);
+    assert_eq!(
+        adapter.sessions[&session_id].model_id.as_deref(),
+        Some("gemini-3.7-flash-high")
+    );
+}
+
+#[test]
+fn test_set_model_rejects_a_model_agy_does_not_offer() {
+    let mut adapter = Adapter::new();
+    adapter.available_models = test_models();
+    let new_resp = adapter.handle_session_new(json!(1));
+    let session_id = new_resp.result.as_ref().unwrap()["sessionId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let resp = adapter.handle_session_set_model(
+        json!(2),
+        &json!({"sessionId": session_id, "modelId": "Model B"}),
+    );
+    assert_eq!(resp.error.as_ref().unwrap()["code"].as_i64(), Some(-32602));
+    assert_eq!(adapter.sessions[&session_id].model_id, None);
+}
+
+#[test]
+fn test_set_config_option_rejects_a_model_agy_does_not_offer() {
+    let mut adapter = Adapter::new();
+    adapter.available_models = test_models();
+    let new_resp = adapter.handle_session_new(json!(1));
+    let session_id = new_resp.result.as_ref().unwrap()["sessionId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let resp = adapter.handle_session_set_config_option(
+        json!(2),
+        &json!({"sessionId": session_id, "configId": "model", "value": "nope"}),
+    );
+    assert_eq!(resp.error.as_ref().unwrap()["code"].as_i64(), Some(-32602));
 }

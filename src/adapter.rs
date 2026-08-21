@@ -25,7 +25,7 @@ pub struct Adapter {
     pub working_dir: String,
     pub conversations_dir: PathBuf,
     pub state_file: PathBuf,
-    pub available_models: Vec<String>,
+    pub available_models: Vec<AgyModel>,
     pub skip_naration: bool,
     /// Present only when `--permission-prompts` is on. Its presence is what makes
     /// the adapter hand agy's tool gating over to the ACP client.
@@ -68,21 +68,66 @@ impl Adapter {
         }
     }
 
-    /// Run `agy models` and parse the output into a list of model names.
-    fn fetch_available_models() -> Vec<String> {
+    /// Run `agy models` and parse the output into id/label pairs.
+    fn fetch_available_models() -> Vec<AgyModel> {
         std::process::Command::new("agy")
             .arg("models")
             .output()
             .ok()
             .filter(|o| o.status.success())
-            .map(|o| {
-                String::from_utf8_lossy(&o.stdout)
-                    .lines()
-                    .map(|l| l.trim().to_string())
-                    .filter(|l| !l.is_empty())
-                    .collect()
-            })
+            .map(|o| Self::parse_models_output(&String::from_utf8_lossy(&o.stdout)))
             .unwrap_or_default()
+    }
+
+    /// `agy models` prints `id<TAB>Human Label` per line, and its "Fetching
+    /// available models..." banner goes to stderr, so stdout is data only. Taking
+    /// the whole line as the id is the bug this splits: agy rejects
+    /// `gemini-3.7-flash-high\tGemini 3.7 Flash (High)` as a model name.
+    pub(crate) fn parse_models_output(stdout: &str) -> Vec<AgyModel> {
+        stdout
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(|line| match line.split_once('\t') {
+                Some((id, label)) => AgyModel {
+                    id: id.trim().to_string(),
+                    label: label.trim().to_string(),
+                },
+                // An agy that stops printing the label column still works; the id
+                // is the part we cannot do without.
+                None => AgyModel {
+                    id: line.to_string(),
+                    label: line.to_string(),
+                },
+            })
+            .filter(|m| !m.id.is_empty())
+            .collect()
+    }
+
+    /// Strips a label that a client echoed back joined to its id. Sessions
+    /// persisted before the parser was fixed hold exactly that, so this also
+    /// repairs them on restore.
+    pub(crate) fn sanitize_model_id(raw: &str) -> String {
+        match raw.split_once('\t') {
+            Some((id, _label)) => id.trim().to_string(),
+            None => raw.trim().to_string(),
+        }
+    }
+
+    /// Sanitizes an id from a client and checks it against what agy offers.
+    /// Returns `None` for an id agy would reject. When the model list is empty —
+    /// agy missing, or not yet queried — there is nothing to check against, so
+    /// the id is taken at face value rather than refusing every model.
+    fn normalize_model_id(available: &[AgyModel], raw: &str) -> Option<String> {
+        let id = Self::sanitize_model_id(raw);
+        if id.is_empty() {
+            return None;
+        }
+        if available.is_empty() || available.iter().any(|m| m.id == id) {
+            Some(id)
+        } else {
+            None
+        }
     }
 
     /// Build the ACP `models` JSON for a session, given its current model_id.
@@ -91,15 +136,16 @@ impl Adapter {
             self.available_models = Self::fetch_available_models();
         }
         let current = model_id
-            .or_else(|| self.available_models.first().map(|s| s.as_str()))
-            .unwrap_or("");
+            .map(Self::sanitize_model_id)
+            .or_else(|| self.available_models.first().map(|m| m.id.clone()))
+            .unwrap_or_default();
         let available: Vec<Value> = self
             .available_models
             .iter()
-            .map(|name| {
+            .map(|model| {
                 json!({
-                    "modelId": name,
-                    "name": name,
+                    "modelId": model.id,
+                    "name": model.label,
                 })
             })
             .collect();
@@ -115,15 +161,16 @@ impl Adapter {
             self.available_models = Self::fetch_available_models();
         }
         let current = model_id
-            .or_else(|| self.available_models.first().map(|s| s.as_str()))
-            .unwrap_or("");
+            .map(Self::sanitize_model_id)
+            .or_else(|| self.available_models.first().map(|m| m.id.clone()))
+            .unwrap_or_default();
         let options: Vec<Value> = self
             .available_models
             .iter()
-            .map(|name| {
+            .map(|model| {
                 json!({
-                    "value": name,
-                    "name": name,
+                    "value": model.id,
+                    "name": model.label,
                 })
             })
             .collect();
@@ -320,7 +367,10 @@ impl Adapter {
             Session {
                 conversation_id: Some(conversation_id),
                 last_step_idx,
-                model_id,
+                // Sessions written before the parser was fixed hold an id with the
+                // display label glued on; agy rejects that outright, so repair it
+                // here rather than failing every resumed thread.
+                model_id: model_id.as_deref().map(Self::sanitize_model_id),
             },
         );
         true
@@ -519,7 +569,21 @@ impl Adapter {
             };
         };
 
-        session.model_id = Some(model_id.to_string());
+        // Checked after the session lookup so an unknown session is reported as
+        // such rather than blamed on the model.
+        let Some(model_id) = Self::normalize_model_id(&self.available_models, model_id) else {
+            return JsonRpcResponse {
+                jsonrpc: "2.0",
+                id,
+                result: None,
+                error: Some(json!({
+                    "code": -32602,
+                    "message": format!("unknown modelId: {model_id}"),
+                })),
+            };
+        };
+
+        session.model_id = Some(model_id.clone());
         let model_id_str = session.model_id.clone();
         let last_step_idx = session.last_step_idx;
         let conv_id = session.conversation_id.clone();
@@ -593,7 +657,21 @@ impl Adapter {
             };
         };
 
-        session.model_id = Some(model_id.to_string());
+        // Checked after the session lookup so an unknown session is reported as
+        // such rather than blamed on the model.
+        let Some(model_id) = Self::normalize_model_id(&self.available_models, model_id) else {
+            return JsonRpcResponse {
+                jsonrpc: "2.0",
+                id,
+                result: None,
+                error: Some(json!({
+                    "code": -32602,
+                    "message": format!("unknown modelId: {model_id}"),
+                })),
+            };
+        };
+
+        session.model_id = Some(model_id.clone());
         let model_id_str = session.model_id.clone();
         let last_step_idx = session.last_step_idx;
         let conv_id = session.conversation_id.clone();

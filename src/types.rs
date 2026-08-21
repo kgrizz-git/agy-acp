@@ -43,6 +43,14 @@ pub struct StoredSession {
     pub model_id: Option<String>,
 }
 
+/// One row of `agy models` output: the id passed to `--model`, and the human
+/// label shown beside it. They are not interchangeable — agy accepts only the id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgyModel {
+    pub id: String,
+    pub label: String,
+}
+
 pub struct Session {
     pub conversation_id: Option<String>,
     /// Last step idx read from SQLite.
