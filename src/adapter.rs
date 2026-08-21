@@ -786,11 +786,14 @@ impl Adapter {
 
         let bound_conv_id = processor.conversation_id.clone();
         let new_step_idx = processor.last_step_idx;
-        let had_updates = processor.had_updates;
         let result_failed = processor
             .result_status
             .as_deref()
             .is_some_and(|status| status == "ERROR");
+        // Each turn ends with exactly one `result` event. Reaching EOF without it
+        // means the stream was truncated -- agy died, stdout closed early -- and
+        // the exit status alone does not say so.
+        let result_missing = !processor.saw_result;
         let result_error = processor.result_error.clone();
 
         if let Some(session) = self.sessions.get_mut(session_id) {
@@ -802,7 +805,12 @@ impl Adapter {
             }
         }
 
+        // Read before the active session is cleared: agy reports a refused tool
+        // call as a failed turn, and only the bridge knows the refusal was the
+        // user's own answer rather than the provider breaking.
+        let mut denied_by_user = false;
         if let Some(bridge) = self.permission_bridge.clone() {
+            denied_by_user = bridge.denied_during_prompt().await;
             if let Some(conv_id) = bound_conv_id.as_deref() {
                 bridge.register_conversation(conv_id, session_id).await;
             }
@@ -823,6 +831,8 @@ impl Adapter {
 
         let stop_reason = if was_cancelled {
             "cancelled"
+        } else if denied_by_user {
+            "refusal"
         } else {
             "end_turn"
         };
@@ -841,24 +851,34 @@ impl Adapter {
                     eprintln!("[agy-acp] agy stderr: {}", stderr_text.trim_end());
                 }
 
-                if !was_cancelled && (!status.success() || result_failed) {
+                // A turn the user refused is an outcome, not a provider failure;
+                // the bridge exists to make that a clean stop the client can show.
+                if !was_cancelled
+                    && !denied_by_user
+                    && (!status.success() || result_failed || result_missing)
+                {
                     eprintln!("[agy-acp] WARN: agy exited with status: {}", status);
-                    if !had_updates {
-                        let msg = if let Some(error) = result_error.filter(|s| !s.is_empty()) {
-                            format!("agy failed: {}", error.trim_end())
-                        } else if stderr_text.is_empty() {
-                            format!("agy exited with status: {}", status)
-                        } else {
-                            format!("agy failed: {}", stderr_text.trim_end())
-                        };
-                        return vec![serde_json::to_string(&JsonRpcResponse {
-                            jsonrpc: "2.0",
-                            id,
-                            result: None,
-                            error: Some(json!({"code":-32000,"message":msg})),
-                        })
-                        .unwrap()];
-                    }
+                    // Updates already streamed to the client stay where they are;
+                    // what must not happen is a failed turn ending in a success
+                    // response, which is indistinguishable from a good one. This
+                    // used to be gated on `had_updates`, so any turn that produced
+                    // a single chunk before failing reported end_turn.
+                    let msg = if let Some(error) = result_error.filter(|s| !s.is_empty()) {
+                        format!("agy failed: {}", error.trim_end())
+                    } else if result_missing && status.success() {
+                        "agy stream ended without a result event".to_string()
+                    } else if stderr_text.is_empty() {
+                        format!("agy exited with status: {}", status)
+                    } else {
+                        format!("agy failed: {}", stderr_text.trim_end())
+                    };
+                    return vec![serde_json::to_string(&JsonRpcResponse {
+                        jsonrpc: "2.0",
+                        id,
+                        result: None,
+                        error: Some(json!({"code":-32000,"message":msg})),
+                    })
+                    .unwrap()];
                 }
             }
             Err(e) => {

@@ -85,6 +85,11 @@ struct BridgeState {
     /// What may be approved without asking. Empty by default, so tests and any
     /// path that forgets to set it prompt for everything.
     policy: AutoAllowPolicy,
+    /// Whether this bridge denied a tool call during the running prompt. agy
+    /// reports a denial as a failed turn, which is indistinguishable from a real
+    /// provider failure by the time the adapter sees it — this is how the two are
+    /// told apart. Cleared when a prompt starts.
+    denied_during_prompt: bool,
 }
 
 /// Shared handle to the permission bridge.
@@ -156,9 +161,18 @@ impl PermissionBridge {
     }
 
     /// Marks the session whose prompt is running, for the duration of that prompt.
+    /// Starting a prompt also clears the denial flag from the previous one.
     pub async fn set_active_session(&self, session_id: Option<&str>) {
         let mut state = self.state.lock().await;
         state.active_session = session_id.map(str::to_string);
+        if state.active_session.is_some() {
+            state.denied_during_prompt = false;
+        }
+    }
+
+    /// Whether a tool call was denied during the prompt that just ran.
+    pub async fn denied_during_prompt(&self) -> bool {
+        self.state.lock().await.denied_during_prompt
     }
 
     /// Routes an incoming JSON-RPC response back to the waiting hook. Returns
@@ -188,6 +202,9 @@ impl PermissionBridge {
         };
 
         let (decision, reason) = self.decide(&payload).await;
+        if decision == Decision::Deny {
+            self.state.lock().await.denied_during_prompt = true;
+        }
         let response = decision.as_hook_json(&reason).to_string();
         let _ = write_half.write_all(response.as_bytes()).await;
         let _ = write_half.write_all(b"\n").await;

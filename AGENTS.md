@@ -58,7 +58,7 @@ No separate lint/typecheck/format commands — just `cargo build` and `cargo tes
 
 - State persistence uses write-to-tmp-then-rename pattern under an exclusive file lock (`fs2`).
 - Streaming writes JSON-RPC notifications directly to stdout from the `agy` stdout reader (not through the main channel). The main loop may still write concurrently if other requests arrive during a prompt.
-- `handle_session_load` returns a `Vec<String>` (same shape as other multi-line handlers). History is not replayed; load restores the conversation binding so later prompts pass `--conversation`.
+- `handle_session_load` returns a `Vec<String>`: the replayed history as `session/update` notifications, then the response. Replay reads agy's SQLite conversation DB, which is the only place past turns exist — streaming never touches SQLite.
 - Conversation binding: the `init` / `result` stream-json events include `conversation_id`, which is persisted and passed back as `--conversation` on subsequent prompts.
 - `fetch_available_models()` runs `agy models` synchronously during `Adapter::new()`. If `agy` isn't installed, models list is empty (no error).
 - `agy models` prints `id<TAB>Human Label` on stdout and its "Fetching available models..." banner on stderr. Only the id is a valid `--model` argument; ACP gets the id as `modelId`/`value` and the label as `name`. Ids arriving from a client are checked against that list, and a `id<TAB>label` string left in an old `sessions.json` is repaired on restore.
@@ -106,15 +106,17 @@ feature, maintenance, and security comparison.
   can overwrite or visually contradict an ACP rejection. If it can, retain the
   bridge's deny decision as authoritative and suppress the contradictory update.
   This is the most relevant idea from `paseo-agy-acp`.
-- [ ] **Completion gating:** the turn now ends on the stream's `result` event
-  rather than on a poller's judgement. Confirm that a stream ending without a
-  `result` (agy killed, stdout closed early) is reported as a failed turn and not
-  a silent success, and add fixtures for both.
-- [ ] **Session-load replay:** upstream's stream-json rewrite dropped it.
-  `handle_session_load` used to replay prior turns out of SQLite; it now returns
-  config only, so a reopened thread shows an empty transcript while agy itself
-  still has the context via `--conversation`. Decide whether to restore replay
-  from some source the adapter still reads, or to document the loss.
+- [x] **Completion gating:** a stream reaching EOF without its terminal `result`
+  event is reported as a failed turn, as is a failure after partial output. The
+  latter used to be swallowed: the error response was gated on no updates having
+  been emitted, so a turn that streamed one chunk and then failed returned
+  `end_turn`.
+- [ ] **Replay without agy's private schema:** replay works, but only by parsing
+  agy's undocumented conversation DB — the dependency upstream just walked away
+  from. The adapter already sees every update it emits during a turn; persisting
+  those and replaying its own transcript would drop `db.rs`/`protobuf.rs`
+  entirely. The gap is history the adapter never streamed (older threads, other
+  clients), so any switch needs a fallback or a migration.
 
 #### Consider after validation
 

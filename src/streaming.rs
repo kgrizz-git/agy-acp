@@ -44,6 +44,9 @@ pub struct StreamProcessor {
     pub had_updates: bool,
     pub result_status: Option<String>,
     pub result_error: Option<String>,
+    /// Whether the stream carried its terminal `result` event. A stream that ends
+    /// without one lost data, however cleanly the process exited.
+    pub saw_result: bool,
     skip_naration: bool,
     agent_text: HashMap<i64, String>,
     thought_text: HashMap<i64, String>,
@@ -61,6 +64,7 @@ impl StreamProcessor {
             had_updates: false,
             result_status: None,
             result_error: None,
+            saw_result: false,
             skip_naration,
             agent_text: HashMap::new(),
             thought_text: HashMap::new(),
@@ -147,6 +151,7 @@ impl StreamProcessor {
 
     fn process_result(&mut self, result: ResultEvent, session_id: &str) -> Vec<String> {
         self.bind_conversation_id(result.conversation_id.as_deref());
+        self.saw_result = true;
         self.result_status = result.status;
         self.result_error = result.error.filter(|s| !s.is_empty());
 

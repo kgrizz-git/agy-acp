@@ -2117,3 +2117,26 @@ mod harden_check {
         }
     }
 }
+
+/// A turn ends on the stream's terminal `result` event. Without this flag the
+/// adapter cannot tell a completed turn from a truncated one, since a killed agy
+/// can still exit 0 after emitting partial output.
+#[test]
+fn test_stream_json_tracks_whether_the_result_event_arrived() {
+    let mut processor = crate::streaming::StreamProcessor::new(false);
+    processor.process_line(
+        r#"{"event":"step_update","step_update":{"conversation_id":"c1","step_index":0,"text_delta":"partial"}}"#,
+        "s1",
+    );
+    assert!(
+        !processor.saw_result,
+        "a stream carrying only step updates has not completed"
+    );
+    assert!(processor.had_updates, "the partial text was still emitted");
+
+    processor.process_line(
+        r#"{"event":"result","result":{"conversation_id":"c1","status":"SUCCESS","response":"done"}}"#,
+        "s1",
+    );
+    assert!(processor.saw_result, "the result event completes the turn");
+}

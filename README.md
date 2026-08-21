@@ -49,16 +49,17 @@ Add `agy-acp` as a custom agent server in your Zed settings (`~/.config/zed/sett
       "type": "custom",
       "command": "agy-acp",
       "args": [],
-      "env": {
-        "AGY_EXTRA_ARGS": "--dangerously-skip-permissions"
-      }
+      "args": ["--permission-prompts"],
+      "env": {}
     }
   }
 }
 ```
 
 > [!IMPORTANT]
-> **Tool Execution & Permissions:** Antigravity CLI does not natively support the ACP protocol yet, meaning interactive permission prompts from `agy` cannot be answered through ACP hosts. You **must** set `AGY_EXTRA_ARGS="--dangerously-skip-permissions"` in your environment so `agy` auto-approves tool permission requests, enabling tools (file editing, command execution, searching, etc.) to run properly.
+> **Tool Execution & Permissions:** `agy` runs headless under this adapter and cannot ask you about tool permissions itself, so without help it auto-denies them and tool calls fail silently. `--permission-prompts` routes each decision to your ACP host instead — see [Permission Prompts](#permission-prompts) for what it approves on its own and what it always asks about.
+>
+> The alternative is `AGY_EXTRA_ARGS="--dangerously-skip-permissions"`, which makes `agy` approve every tool call itself: file edits, command execution and network access, with nothing to refuse them. Only do that in a sandbox you are willing to lose.
 
 Then open the Agent Panel in Zed (`Cmd-?` on macOS, `Ctrl-?` on Linux), select **agy** from the agent dropdown, and start chatting.
 
