@@ -278,6 +278,24 @@ git fetch https://github.com/hicder/agy-acp main:refs/heads/hicder-snapshot
 
 Cherry-pick what is worth having. Do not add the remote back.
 
+### Watching upstream
+
+`scripts/check-upstream.sh` reports commits on `hicder/agy-acp@main` that this
+fork has not taken, comparing against the sha in `.upstream-watermark`. It exits
+1 when there is something new, 0 when there is not.
+`.github/workflows/upstream-watch.yml` runs it weekly and keeps a single
+`upstream-watch` issue in sync with the result.
+
+The watermark moves **only in a commit a human made** (`--update` writes it, you
+commit it). It records what has been reviewed, not what exists: upstream's
+stream-json rewrite deletes `db.rs` and `protobuf.rs`, which the permission
+bridge, conversation binding and model handling here are all built on. Adopting
+that is a port, not a merge, and a watermark that advanced by itself would
+quietly claim otherwise.
+
+GitHub disables Actions on new forks; if the workflow never runs, enable them in
+the repository settings.
+
 ## Local gotchas
 
 - **Re-sign the binary after copying it.** macOS invalidates the signature on `cp`

@@ -1,0 +1,74 @@
+# Flags commits on hicder/agy-acp's main that this fork has not taken.
+#
+# The fork is hard: no upstream remote, no pull requests filed there. That makes
+# upstream drift invisible, which is what this replaces -- it reports, and never
+# merges or moves the watermark. Adopting upstream work is a judgement call
+# (their stream-json rewrite deletes modules this fork builds on), so the
+# watermark in .upstream-watermark only moves in a commit a human made.
+#
+# Findings land in one reusable issue rather than a new one per run.
+name: upstream-watch
+
+on:
+  schedule:
+    # Mondays, 13:00 UTC.
+    - cron: "0 13 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compare against upstream
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set +e
+          report=$(scripts/check-upstream.sh)
+          status=$?
+          set -e
+          if [ "$status" -eq 2 ]; then
+            echo "$report"
+            exit 2
+          fi
+          echo "behind=$status" >>"$GITHUB_OUTPUT"
+          {
+            echo "report<<REPORT_EOF"
+            echo "$report"
+            echo "REPORT_EOF"
+          } >>"$GITHUB_OUTPUT"
+          echo "$report"
+
+      - name: Open or update the tracking issue
+        if: steps.check.outputs.behind == '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPORT: ${{ steps.check.outputs.report }}
+        run: |
+          title="Upstream hicder/agy-acp has commits this fork has not taken"
+          body=$(printf '%s\n\n---\n\nReported by `.github/workflows/upstream-watch.yml`. Move `.upstream-watermark` (`scripts/check-upstream.sh --update`) once the commits above have been reviewed or deliberately declined; this issue closes on the next run when the watermark catches up.\n' "$REPORT")
+          existing=$(gh issue list --label upstream-watch --state open --json number --jq '.[0].number')
+          if [ -n "$existing" ]; then
+            gh issue edit "$existing" --body "$body"
+            gh issue comment "$existing" --body "Re-checked $(date -u +%Y-%m-%d): still behind. Details updated above."
+          else
+            gh label create upstream-watch --description "Upstream drift tracking" --color ededed 2>/dev/null || true
+            gh issue create --title "$title" --label upstream-watch --body "$body"
+          fi
+
+      - name: Close the tracking issue when caught up
+        if: steps.check.outputs.behind == '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          existing=$(gh issue list --label upstream-watch --state open --json number --jq '.[0].number')
+          if [ -n "$existing" ]; then
+            gh issue close "$existing" --comment "Watermark now matches upstream main. Closing."
+          fi
