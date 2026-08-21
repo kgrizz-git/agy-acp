@@ -43,6 +43,13 @@ pub struct StoredSession {
     pub model_id: Option<String>,
 }
 
+/// Result of a test-only delta read from a conversation DB.
+#[cfg(test)]
+pub struct ConversationDelta {
+    pub text: Option<String>,
+    pub max_step_idx: i64,
+}
+
 /// One row of `agy models` output: the id passed to `--model`, and the human
 /// label shown beside it. They are not interchangeable — agy accepts only the id.
 #[derive(Debug, Clone, PartialEq, Eq)]

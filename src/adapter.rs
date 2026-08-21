@@ -13,6 +13,7 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::process::Command;
 use uuid::Uuid;
 
+use crate::db::read_replay_updates_from_db;
 use crate::permission::{PermissionBridge, SOCKET_ENV};
 use crate::streaming::StreamProcessor;
 use crate::types::*;
@@ -20,6 +21,10 @@ use crate::types::*;
 pub struct Adapter {
     pub sessions: HashMap<String, Session>,
     pub working_dir: String,
+    /// Only the session/load replay path reads this. Live streaming comes from
+    /// agy's stream-json output; agy still writes these SQLite conversation DBs,
+    /// and they remain the only place a past turn's history exists.
+    pub conversations_dir: PathBuf,
     pub state_file: PathBuf,
     pub available_models: Vec<AgyModel>,
     pub skip_naration: bool,
@@ -55,6 +60,7 @@ impl Adapter {
             working_dir: std::env::current_dir()
                 .map(|p| p.to_string_lossy().to_string())
                 .unwrap_or_else(|_| "/tmp".to_string()),
+            conversations_dir: PathBuf::from(&home).join(".gemini/antigravity-cli/conversations"),
             state_file: state_dir.join("sessions.json"),
             available_models: Self::fetch_available_models(),
             skip_naration,
@@ -346,6 +352,13 @@ impl Adapter {
         }
     }
 
+    pub fn read_replay_updates_from_db_inner(
+        &self,
+        conversation_id: &str,
+    ) -> Option<(Vec<Value>, i64)> {
+        read_replay_updates_from_db(&self.conversations_dir, conversation_id, self.skip_naration)
+    }
+
     pub fn handle_session_load(&mut self, id: Value, params: &Value) -> Vec<String> {
         let session_id = params
             .get("sessionId")
@@ -375,7 +388,46 @@ impl Adapter {
             .unwrap()];
         }
 
-        vec![{
+        let mut output_lines: Vec<String> = Vec::new();
+
+        // Upstream dropped this when it stopped reading SQLite for streaming. The
+        // history still only exists in agy's conversation DB, so loading a thread
+        // without it hands the client an empty transcript.
+        let replay_conv_id = self
+            .sessions
+            .get(session_id)
+            .and_then(|session| session.conversation_id.clone());
+        if let Some(conv_id) = replay_conv_id {
+            if let Some((updates, max_step_idx)) = self.read_replay_updates_from_db_inner(&conv_id) {
+                for update in updates {
+                    let notification = serde_json::to_string(&JsonRpcNotification {
+                        jsonrpc: "2.0",
+                        method: "session/update".to_string(),
+                        params: json!({
+                            "sessionId": session_id,
+                            "update": update,
+                        }),
+                    })
+                    .unwrap();
+                    output_lines.push(notification);
+                }
+                if let Some(session) = self.sessions.get_mut(session_id) {
+                    session.last_step_idx = max_step_idx;
+                }
+                let model_id = self
+                    .sessions
+                    .get(session_id)
+                    .and_then(|s| s.model_id.clone());
+                self.persist_session(
+                    session_id,
+                    Some(conv_id.as_str()),
+                    max_step_idx,
+                    model_id.as_deref(),
+                );
+            }
+        }
+
+        output_lines.push({
             let model_id = self
                 .sessions
                 .get(session_id)
@@ -388,7 +440,9 @@ impl Adapter {
                 error: None,
             })
             .unwrap()
-        }]
+        });
+
+        output_lines
     }
 
     pub fn handle_session_resume(&mut self, id: Value, params: &Value) -> JsonRpcResponse {
@@ -824,13 +878,8 @@ impl Adapter {
     }
 }
 
-/// Parse `agy models` stdout into display names.
-///
-/// Each model line is `slug<TAB>Display Name`. ACP clients show `modelId` and
-/// `name` side by side, so we keep only the display name and skip status lines
-/// like "Fetching available models...".
 /// Filter out leading narration ("I will ...", "I'll ...") from response parts.
-#[cfg(test)]
+/// The replay path in `db.rs` uses this outside tests.
 pub fn filter_narration(parts: &[String]) -> Option<String> {
     let text = parts
         .iter()
