@@ -293,8 +293,14 @@ bridge, conversation binding and model handling here are all built on. Adopting
 that is a port, not a merge, and a watermark that advanced by itself would
 quietly claim otherwise.
 
-GitHub disables Actions on new forks; if the workflow never runs, enable them in
-the repository settings.
+The report always goes to the run's job summary. Forks also have issues disabled
+by default; the workflow detects that and skips the issue steps rather than
+failing, so turning issues on in the repository settings is what upgrades it from
+"summary only" to a tracked issue. Note the repository is public, so enabling
+issues lets anyone file one.
+
+GitHub disables Actions on new forks too; if the workflow never runs, enable them
+in the repository settings.
 
 ## Local gotchas
 
