@@ -200,6 +200,15 @@ and add a regression test before changing behavior.
   random `0700` temporary directory; never recursively delete a merely
   prefix-matching stale directory without proving it was created by this adapter.
 
+- [ ] **`test_read_response_from_db` disagrees with the code.** The only red test
+  in the suite, and it was red before the stream-json port too, so it is not a
+  regression from it. `read_delta_from_db` advances `max_step_idx` over every row
+  it read, including the trailing user-message row, and returns 2; the test
+  expects 1, the last row it takes text from. As a cursor, 2 looks right and the
+  assertion looks stale, but the helper is `#[cfg(test)]`-only now, so nothing in
+  production depends on either answer. Decide which semantics were meant, then fix
+  the test or the code — do not just change the number to match.
+
 ### Protocol and lifecycle leads
 
 - [ ] **One stdout owner:** the stream-reader task writes JSON-RPC directly to
