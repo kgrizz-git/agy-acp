@@ -211,6 +211,23 @@ and add a regression test before changing behavior.
   production depends on either answer. Decide which semantics were meant, then fix
   the test or the code — do not just change the number to match.
 
+- [ ] **`sessions.json` grows without bound.** `evict_if_needed` caps the
+  in-memory map at 64, but nothing caps the file: it holds 910 entries / 150 KB
+  on one developer machine, 553 of them with no `conversation_id` (sessions
+  created and never prompted). Every `persist_session` rewrites the whole file
+  under the lock, so the cost of a turn grows with every session ever created.
+  Entries carry no timestamp, so pruning needs one added first; decide between a
+  cap, a TTL, and dropping unbound entries. Note also that `evict_if_needed`
+  removes an arbitrary `HashMap` key, not the least recently used, so it can
+  evict a live session while keeping a dead one.
+- [ ] **Rename the binary and crate to distinguish this fork.** It is a hard
+  fork with different behaviour (permission bridge, load replay, model id
+  handling), and sharing `agy-acp` with upstream makes bug reports and installs
+  ambiguous. Renaming touches `Cargo.toml`, the `agy-acp permission-hook`
+  subcommand the hook shells out to, the Paseo provider command in
+  `~/.paseo/config.json`, and the README. Existing state lives in
+  `~/.openab/agy-acp/`, so decide whether to migrate it or leave it in place.
+
 ### Protocol and lifecycle leads
 
 - [ ] **One stdout owner:** the stream-reader task writes JSON-RPC directly to
