@@ -1,28 +1,29 @@
 use fs2::FileExt;
 use serde_json::{json, Value};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc, Mutex,
+    Arc,
 };
 use std::time::Duration;
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::process::Command;
 use uuid::Uuid;
 
-#[cfg(test)]
-use crate::db::read_delta_from_db;
 use crate::db::read_replay_updates_from_db;
 use crate::permission::{PermissionBridge, SOCKET_ENV};
-use crate::streaming::poll_streaming_delta;
+use crate::streaming::StreamProcessor;
 use crate::types::*;
 
 pub struct Adapter {
     pub sessions: HashMap<String, Session>,
     pub working_dir: String,
+    /// Only the session/load replay path reads this. Live streaming comes from
+    /// agy's stream-json output; agy still writes these SQLite conversation DBs,
+    /// and they remain the only place a past turn's history exists.
     pub conversations_dir: PathBuf,
     pub state_file: PathBuf,
     pub available_models: Vec<AgyModel>,
@@ -264,68 +265,6 @@ impl Adapter {
         }
     }
 
-    /// Scans the conversations directory for SQLite database files (`*.db`)
-    /// and returns their file stems as a set of conversation IDs.
-    pub fn conversation_snapshot(&self) -> HashSet<String> {
-        let Ok(entries) = fs::read_dir(&self.conversations_dir) else {
-            return HashSet::new();
-        };
-        entries
-            .filter_map(|e| e.ok())
-            .filter_map(|e| {
-                let path = e.path();
-                if path.extension().map(|x| x == "db").unwrap_or(false) {
-                    path.file_stem().map(|s| s.to_string_lossy().to_string())
-                } else {
-                    None
-                }
-            })
-            .collect()
-    }
-
-    #[cfg(test)]
-    pub fn new_conversation_id(&self, before: &HashSet<String>) -> Option<String> {
-        let after = self.conversation_snapshot();
-        let mut created: Vec<_> = after.difference(before).collect();
-        if created.is_empty() {
-            return None;
-        }
-        if created.len() > 1 {
-            eprintln!(
-                "[agy-acp] WARN: multiple new agy conversation files appeared; \
-                 refusing to bind"
-            );
-            return None;
-        }
-        Some(created.remove(0).clone())
-    }
-
-    pub fn read_replay_updates_from_db_inner(
-        &self,
-        conversation_id: &str,
-    ) -> Option<(Vec<Value>, i64)> {
-        read_replay_updates_from_db(&self.conversations_dir, conversation_id, self.skip_naration)
-    }
-
-    #[cfg(test)]
-    fn read_delta_from_db_inner(
-        &self,
-        conversation_id: &str,
-        after_step_idx: i64,
-    ) -> Option<crate::types::ConversationDelta> {
-        read_delta_from_db(&self.conversations_dir, conversation_id, after_step_idx)
-    }
-
-    #[cfg(test)]
-    pub fn read_response_from_db(
-        &self,
-        conversation_id: &str,
-        after_step_idx: i64,
-    ) -> Option<(String, i64)> {
-        self.read_delta_from_db_inner(conversation_id, after_step_idx)
-            .and_then(|delta| delta.text.map(|text| (text, delta.max_step_idx)))
-    }
-
     /// Filter out leading narration ("I will ...", "I'll ...") from response parts.
     #[cfg(test)]
     pub fn filter_narration(parts: &[String]) -> Option<String> {
@@ -413,6 +352,13 @@ impl Adapter {
         }
     }
 
+    pub fn read_replay_updates_from_db_inner(
+        &self,
+        conversation_id: &str,
+    ) -> Option<(Vec<Value>, i64)> {
+        read_replay_updates_from_db(&self.conversations_dir, conversation_id, self.skip_naration)
+    }
+
     pub fn handle_session_load(&mut self, id: Value, params: &Value) -> Vec<String> {
         let session_id = params
             .get("sessionId")
@@ -444,13 +390,15 @@ impl Adapter {
 
         let mut output_lines: Vec<String> = Vec::new();
 
+        // Upstream dropped this when it stopped reading SQLite for streaming. The
+        // history still only exists in agy's conversation DB, so loading a thread
+        // without it hands the client an empty transcript.
         let replay_conv_id = self
             .sessions
             .get(session_id)
             .and_then(|session| session.conversation_id.clone());
         if let Some(conv_id) = replay_conv_id {
-            if let Some((updates, max_step_idx)) = self.read_replay_updates_from_db_inner(&conv_id)
-            {
+            if let Some((updates, max_step_idx)) = self.read_replay_updates_from_db_inner(&conv_id) {
                 for update in updates {
                     let notification = serde_json::to_string(&JsonRpcNotification {
                         jsonrpc: "2.0",
@@ -719,17 +667,6 @@ impl Adapter {
             .unwrap_or_default();
         let clean_prompt = prompt_text.trim();
 
-        let snapshot = if self
-            .sessions
-            .get(session_id)
-            .map(|s| s.conversation_id.is_none())
-            .unwrap_or(false)
-        {
-            Some(self.conversation_snapshot())
-        } else {
-            None
-        };
-
         if let Some(bridge) = self.permission_bridge.clone() {
             bridge.set_workspace_root(&self.working_dir).await;
             bridge.set_active_session(Some(session_id)).await;
@@ -748,6 +685,8 @@ impl Adapter {
         if let Ok(extra) = std::env::var("AGY_EXTRA_ARGS") {
             args.extend(extra.split_whitespace().map(String::from));
         }
+        args.push("--output-format".to_string());
+        args.push("stream-json".to_string());
         if let Some(session) = self.sessions.get(session_id) {
             if let Some(conv_id) = &session.conversation_id {
                 args.push("--conversation".to_string());
@@ -800,13 +739,22 @@ impl Adapter {
             }
         };
 
-        let mut stdout = child.stdout.take();
+        let stdout = child.stdout.take();
+        let skip_naration = self.skip_naration;
+        let poll_session_id = session_id.to_string();
         let stdout_reader = tokio::spawn(async move {
-            let mut buf = Vec::new();
-            if let Some(mut stdout) = stdout.take() {
-                let _ = stdout.read_to_end(&mut buf).await;
+            let mut processor = StreamProcessor::new(skip_naration);
+            if let Some(stdout) = stdout {
+                let mut lines = BufReader::new(stdout).lines();
+                let mut out = io::stdout();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    for notification in processor.process_line(&line, &poll_session_id) {
+                        let _ = writeln!(out, "{}", notification);
+                    }
+                    let _ = out.flush();
+                }
             }
-            buf
+            processor
         });
 
         let mut stderr = child.stderr.take();
@@ -816,48 +764,6 @@ impl Adapter {
                 let _ = stderr.read_to_end(&mut buf).await;
             }
             buf
-        });
-
-        let initial_conv_id = self
-            .sessions
-            .get(session_id)
-            .and_then(|s| s.conversation_id.clone());
-        let initial_step_idx = self
-            .sessions
-            .get(session_id)
-            .map(|s| s.last_step_idx)
-            .unwrap_or(-1);
-        let streaming_state = Arc::new(Mutex::new(StreamingState {
-            conversation_id: initial_conv_id,
-            base_step_idx: initial_step_idx,
-            last_step_idx: initial_step_idx,
-            had_updates: false,
-            agent_text_lengths: HashMap::new(),
-            emitted_tool_steps: HashSet::new(),
-            last_title: None,
-            skip_naration: self.skip_naration,
-        }));
-        let stop_polling = Arc::new(AtomicBool::new(false));
-        let poll_conversations_dir = self.conversations_dir.clone();
-        let poll_snapshot = snapshot.clone();
-        let poll_session_id = session_id.to_string();
-        let poll_state = Arc::clone(&streaming_state);
-        let poll_stop = Arc::clone(&stop_polling);
-
-        let poller = std::thread::spawn(move || {
-            let mut stdout = io::stdout();
-            while !poll_stop.load(Ordering::SeqCst) {
-                for line in poll_streaming_delta(
-                    &poll_conversations_dir,
-                    poll_snapshot.as_ref(),
-                    &poll_session_id,
-                    &poll_state,
-                ) {
-                    let _ = writeln!(stdout, "{}", line);
-                }
-                let _ = stdout.flush();
-                std::thread::sleep(Duration::from_millis(500));
-            }
         });
 
         let mut was_cancelled = false;
@@ -873,42 +779,22 @@ impl Adapter {
                 child.wait().await
             }
         };
-        let _ = stdout_reader.await;
+        let processor = stdout_reader
+            .await
+            .unwrap_or_else(|_| StreamProcessor::new(skip_naration));
         let stderr_bytes = stderr_reader.await.unwrap_or_default();
-        stop_polling.store(true, Ordering::SeqCst);
-        let _ = poller.join();
 
-        let mut final_lines = Vec::new();
-        for attempt in 0..3 {
-            let lines = poll_streaming_delta(
-                &self.conversations_dir,
-                snapshot.as_ref(),
-                session_id,
-                &streaming_state,
-            );
-            final_lines.extend(lines);
-            if attempt < 2 {
-                std::thread::sleep(Duration::from_millis(100));
-            }
-        }
-
-        {
-            let mut stdout = io::stdout();
-            for line in &final_lines {
-                let _ = writeln!(stdout, "{}", line);
-            }
-            let _ = stdout.flush();
-        }
-
-        // Scoped so the non-Send guard cannot be held across the awaits below.
-        let (bound_conv_id, new_step_idx, had_updates) = {
-            let state = streaming_state.lock().unwrap();
-            (
-                state.conversation_id.clone(),
-                state.last_step_idx,
-                state.had_updates || !final_lines.is_empty(),
-            )
-        };
+        let bound_conv_id = processor.conversation_id.clone();
+        let new_step_idx = processor.last_step_idx;
+        let result_failed = processor
+            .result_status
+            .as_deref()
+            .is_some_and(|status| status == "ERROR");
+        // Each turn ends with exactly one `result` event. Reaching EOF without it
+        // means the stream was truncated -- agy died, stdout closed early -- and
+        // the exit status alone does not say so.
+        let result_missing = !processor.saw_result;
+        let result_error = processor.result_error.clone();
 
         if let Some(session) = self.sessions.get_mut(session_id) {
             if session.conversation_id.is_none() {
@@ -919,7 +805,14 @@ impl Adapter {
             }
         }
 
+        // Read before the active session is cleared: agy reports a refused tool
+        // call as a failed turn, and only the bridge knows the refusal was the
+        // user's own answer rather than the provider breaking. The bridge's own
+        // fail-closed denials do not count, or one of them could mask a real
+        // failure later in the same turn.
+        let mut denied_by_user = false;
         if let Some(bridge) = self.permission_bridge.clone() {
+            denied_by_user = bridge.refused_during_prompt().await;
             if let Some(conv_id) = bound_conv_id.as_deref() {
                 bridge.register_conversation(conv_id, session_id).await;
             }
@@ -940,6 +833,8 @@ impl Adapter {
 
         let stop_reason = if was_cancelled {
             "cancelled"
+        } else if denied_by_user {
+            "refusal"
         } else {
             "end_turn"
         };
@@ -958,22 +853,34 @@ impl Adapter {
                     eprintln!("[agy-acp] agy stderr: {}", stderr_text.trim_end());
                 }
 
-                if !was_cancelled && !status.success() {
+                // A turn the user refused is an outcome, not a provider failure;
+                // the bridge exists to make that a clean stop the client can show.
+                if !was_cancelled
+                    && !denied_by_user
+                    && (!status.success() || result_failed || result_missing)
+                {
                     eprintln!("[agy-acp] WARN: agy exited with status: {}", status);
-                    if !had_updates {
-                        let msg = if stderr_text.is_empty() {
-                            format!("agy exited with status: {}", status)
-                        } else {
-                            format!("agy failed: {}", stderr_text.trim_end())
-                        };
-                        return vec![serde_json::to_string(&JsonRpcResponse {
-                            jsonrpc: "2.0",
-                            id,
-                            result: None,
-                            error: Some(json!({"code":-32000,"message":msg})),
-                        })
-                        .unwrap()];
-                    }
+                    // Updates already streamed to the client stay where they are;
+                    // what must not happen is a failed turn ending in a success
+                    // response, which is indistinguishable from a good one. This
+                    // used to be gated on `had_updates`, so any turn that produced
+                    // a single chunk before failing reported end_turn.
+                    let msg = if let Some(error) = result_error.filter(|s| !s.is_empty()) {
+                        format!("agy failed: {}", error.trim_end())
+                    } else if result_missing && status.success() {
+                        "agy stream ended without a result event".to_string()
+                    } else if stderr_text.is_empty() {
+                        format!("agy exited with status: {}", status)
+                    } else {
+                        format!("agy failed: {}", stderr_text.trim_end())
+                    };
+                    return vec![serde_json::to_string(&JsonRpcResponse {
+                        jsonrpc: "2.0",
+                        id,
+                        result: None,
+                        error: Some(json!({"code":-32000,"message":msg})),
+                    })
+                    .unwrap()];
                 }
             }
             Err(e) => {
@@ -994,6 +901,7 @@ impl Adapter {
 }
 
 /// Filter out leading narration ("I will ...", "I'll ...") from response parts.
+/// The replay path in `db.rs` uses this outside tests.
 pub fn filter_narration(parts: &[String]) -> Option<String> {
     let text = parts
         .iter()

@@ -1,6 +1,5 @@
 use rusqlite::Connection;
 use serde_json::Value;
-use std::collections::HashSet;
 use std::path::Path;
 
 use crate::adapter::filter_narration;
@@ -11,38 +10,6 @@ use crate::protobuf::{
 
 #[cfg(test)]
 use crate::types::ConversationDelta;
-
-pub fn new_conversation_id_in_dir(
-    conversations_dir: &Path,
-    before: &HashSet<String>,
-) -> Option<String> {
-    let Ok(entries) = std::fs::read_dir(conversations_dir) else {
-        return None;
-    };
-    let after: HashSet<String> = entries
-        .filter_map(|e| e.ok())
-        .filter_map(|e| {
-            let path = e.path();
-            if path.extension().map(|x| x == "db").unwrap_or(false) {
-                path.file_stem().map(|s| s.to_string_lossy().to_string())
-            } else {
-                None
-            }
-        })
-        .collect();
-    let mut created: Vec<_> = after.difference(before).collect();
-    if created.is_empty() {
-        return None;
-    }
-    if created.len() > 1 {
-        eprintln!(
-            "[agy-acp] WARN: multiple new agy conversation files appeared; \
-             refusing to bind"
-        );
-        return None;
-    }
-    Some(created.remove(0).clone())
-}
 
 pub fn read_rows_from_db(
     conversations_dir: &Path,

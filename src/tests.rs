@@ -7,10 +7,11 @@ use uuid::Uuid;
 
 use crate::adapter::{filter_narration, Adapter};
 use crate::protobuf::{
-    extract_text_from_step_payload, extract_title_from_step_payload, extract_tool_name,
-    extract_tool_update_from_step_payload, extract_user_text_from_step_payload, is_tool_step_type,
-    read_varint,
+    extract_text_from_step_payload, extract_tool_name, extract_tool_update_from_step_payload,
+    extract_user_text_from_step_payload, is_tool_step_type, read_varint,
 };
+use crate::streaming::StreamProcessor;
+use crate::tools::tool_kind;
 use crate::types::AgyModel;
 use crate::Cli;
 use clap::Parser;
@@ -46,17 +47,6 @@ fn make_assistant_payload(text: &str) -> Vec<u8> {
     outer
 }
 
-#[test]
-fn test_parse_skip_naration_flag() {
-    assert!(
-        Cli::try_parse_from(["agy-acp", "--skip-naration"])
-            .unwrap()
-            .skip_naration
-    );
-    assert!(!Cli::try_parse_from(["agy-acp"]).unwrap().skip_naration);
-    assert!(Cli::try_parse_from(["agy-acp", "--skip-narration"]).is_err());
-}
-
 fn make_user_payload(text: &str) -> Vec<u8> {
     let mut content = Vec::new();
     push_len_field(&mut content, 1, text.as_bytes());
@@ -67,15 +57,6 @@ fn make_user_payload(text: &str) -> Vec<u8> {
 
     let mut outer = Vec::new();
     push_len_field(&mut outer, 19, &prompt);
-    outer
-}
-
-fn make_title_payload(title: &str) -> Vec<u8> {
-    let mut title_update = Vec::new();
-    push_len_field(&mut title_update, 4, title.as_bytes());
-
-    let mut outer = Vec::new();
-    push_len_field(&mut outer, 30, &title_update);
     outer
 }
 
@@ -105,6 +86,33 @@ fn make_tool_payload(
     outer
 }
 
+fn process_lines(
+    skip_naration: bool,
+    session_id: &str,
+    lines: &[&str],
+) -> (StreamProcessor, Vec<Value>) {
+    let mut processor = StreamProcessor::new(skip_naration);
+    let mut updates = Vec::new();
+    for line in lines {
+        for notification in processor.process_line(line, session_id) {
+            let parsed: Value = serde_json::from_str(&notification).unwrap();
+            updates.push(parsed["params"]["update"].clone());
+        }
+    }
+    (processor, updates)
+}
+
+#[test]
+fn test_parse_skip_naration_flag() {
+    assert!(
+        Cli::try_parse_from(["agy-acp", "--skip-naration"])
+            .unwrap()
+            .skip_naration
+    );
+    assert!(!Cli::try_parse_from(["agy-acp"]).unwrap().skip_naration);
+    assert!(Cli::try_parse_from(["agy-acp", "--skip-narration"]).is_err());
+}
+
 #[test]
 fn test_extract_text_from_step_payload_field20_field1() {
     let mut inner = Vec::new();
@@ -132,23 +140,6 @@ fn test_extract_user_text_from_step_payload_field19_field2() {
     assert_eq!(
         extract_user_text_from_step_payload(&payload),
         Some("how are you?".to_string())
-    );
-}
-
-#[test]
-fn test_extract_title_from_step_payload_field30_field4() {
-    let payload = make_title_payload("Documenting Conversation Snapshot Function");
-    assert_eq!(
-        extract_title_from_step_payload(&payload),
-        Some("Documenting Conversation Snapshot Function".to_string())
-    );
-}
-
-#[test]
-fn test_extract_title_ignores_empty_title() {
-    assert_eq!(
-        extract_title_from_step_payload(&make_title_payload("  ")),
-        None
     );
 }
 
@@ -485,6 +476,112 @@ fn test_read_varint() {
 }
 
 #[test]
+fn test_stream_json_binds_conversation_and_emits_text_deltas() {
+    let (processor, updates) = process_lines(
+        false,
+        "sess-1",
+        &[
+            r#"{"event":"init","conversation_id":"conv-abc","init":{"cwd":"/tmp"}}"#,
+            r#"{"event":"step_update","step_update":{"conversation_id":"conv-abc","step_index":0,"state":"DONE","step_type":"user_input"}}"#,
+            r#"{"event":"step_update","step_update":{"conversation_id":"conv-abc","step_index":1,"state":"DONE","step_type":"unknown"}}"#,
+            r#"{"event":"step_update","step_update":{"conversation_id":"conv-abc","step_index":2,"state":"ACTIVE","step_type":"agent_response","text_delta":"OK"}}"#,
+            r#"{"event":"step_update","step_update":{"conversation_id":"conv-abc","step_index":2,"state":"DONE","step_type":"agent_response","text_delta":"\n"}}"#,
+            r#"{"event":"step_update","step_update":{"conversation_id":"conv-abc","step_index":3,"state":"DONE","step_type":"checkpoint"}}"#,
+            r#"{"event":"result","result":{"conversation_id":"conv-abc","status":"SUCCESS","response":"OK\n"}}"#,
+        ],
+    );
+    assert_eq!(processor.conversation_id.as_deref(), Some("conv-abc"));
+    assert_eq!(processor.last_step_idx, 3);
+    assert!(processor.had_updates);
+    assert_eq!(
+        updates
+            .iter()
+            .map(|u| u["sessionUpdate"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["agent_message_chunk", "agent_message_chunk"]
+    );
+    assert_eq!(updates[0]["content"]["text"], "OK");
+    assert_eq!(updates[1]["content"]["text"], "\n");
+}
+
+#[test]
+fn test_stream_json_skips_narration_prefix() {
+    let (_processor, updates) = process_lines(
+        true,
+        "sess-1",
+        &[
+            r#"{"event":"step_update","step_update":{"step_index":2,"state":"ACTIVE","step_type":"agent_response","text_delta":"I will inspect the file."}}"#,
+            r#"{"event":"step_update","step_update":{"step_index":2,"state":"DONE","step_type":"agent_response","text_delta":"\nHere is the result."}}"#,
+        ],
+    );
+    assert_eq!(updates.len(), 1);
+    assert_eq!(updates[0]["sessionUpdate"], "agent_message_chunk");
+    assert_eq!(updates[0]["content"]["text"], "\nHere is the result.");
+}
+
+#[test]
+fn test_stream_json_emits_tool_call_then_update() {
+    let (_processor, updates) = process_lines(
+        false,
+        "sess-1",
+        &[
+            r#"{"event":"step_update","step_update":{"step_index":3,"state":"ACTIVE","step_type":"tool","tool_name":"run_command","tool_info":{"name":"run_command","parameters":{"CommandLine":"echo hello"}}}}"#,
+            r#"{"event":"step_update","step_update":{"step_index":3,"state":"DONE","step_type":"tool","tool_name":"run_command","tool_info":{"name":"run_command","parameters":{"CommandLine":"echo hello"},"output":"hello\n"}}}"#,
+        ],
+    );
+    assert_eq!(updates.len(), 2);
+    assert_eq!(updates[0]["sessionUpdate"], "tool_call");
+    assert_eq!(updates[0]["status"], "in_progress");
+    assert_eq!(updates[0]["toolCallId"], "agy-3");
+    assert_eq!(updates[0]["kind"], "execute");
+    assert_eq!(updates[0]["rawInput"]["CommandLine"], "echo hello");
+    assert_eq!(updates[1]["sessionUpdate"], "tool_call_update");
+    assert_eq!(updates[1]["status"], "completed");
+    assert_eq!(updates[1]["rawOutput"]["output"], "hello\n");
+}
+
+#[test]
+fn test_stream_json_thinking_tool_emits_thought_chunk() {
+    let (_processor, updates) = process_lines(
+        false,
+        "sess-1",
+        &[
+            r#"{"event":"step_update","step_update":{"step_index":4,"state":"DONE","step_type":"tool","tool_name":"thinking","tool_info":{"name":"thinking","parameters":{"thought":"Need to inspect the protocol.","toolSummary":"Reasoning"}}}}"#,
+        ],
+    );
+    assert_eq!(updates.len(), 1);
+    assert_eq!(updates[0]["sessionUpdate"], "agent_thought_chunk");
+    assert_eq!(
+        updates[0]["content"]["text"],
+        "Need to inspect the protocol."
+    );
+}
+
+#[test]
+fn test_stream_json_result_fallback_when_no_text_delta() {
+    let (_processor, updates) = process_lines(
+        false,
+        "sess-1",
+        &[
+            r#"{"event":"init","conversation_id":"conv-x","init":{}}"#,
+            r#"{"event":"result","result":{"conversation_id":"conv-x","status":"SUCCESS","response":"PONG\n"}}"#,
+        ],
+    );
+    assert_eq!(updates.len(), 1);
+    assert_eq!(updates[0]["sessionUpdate"], "agent_message_chunk");
+    assert_eq!(updates[0]["content"]["text"], "PONG\n");
+}
+
+#[test]
+fn test_tool_kind_mapping() {
+    assert_eq!(tool_kind("run_command"), "execute");
+    assert_eq!(tool_kind("view_file"), "read");
+    assert_eq!(tool_kind("write_to_file"), "edit");
+    assert_eq!(tool_kind("grep_search"), "search");
+    assert_eq!(tool_kind("thinking"), "think");
+}
+
+#[test]
 fn test_initialize_advertises_load_session_support() {
     let adapter = Adapter::new();
     let response = adapter.handle_initialize(json!(1));
@@ -524,8 +621,8 @@ fn test_session_load_restores_persisted_session() {
     let mut adapter = Adapter {
         sessions: HashMap::new(),
         working_dir: root.to_string_lossy().to_string(),
-        conversations_dir: root.join("conversations"),
         state_file: root.join("sessions.json"),
+        conversations_dir: root.join("conversations"),
         available_models: vec![],
         skip_naration: false,
         permission_bridge: None,
@@ -560,8 +657,8 @@ fn test_session_load_rejects_unknown_session() {
     let mut adapter = Adapter {
         sessions: HashMap::new(),
         working_dir: root.to_string_lossy().to_string(),
-        conversations_dir: root.join("conversations"),
         state_file: root.join("sessions.json"),
+        conversations_dir: root.join("conversations"),
         available_models: vec![],
         skip_naration: false,
         permission_bridge: None,
@@ -794,8 +891,8 @@ fn test_session_resume_restores_persisted_session() {
     let mut adapter = Adapter {
         sessions: HashMap::new(),
         working_dir: root.to_string_lossy().to_string(),
-        conversations_dir: root.join("conversations"),
         state_file: root.join("sessions.json"),
+        conversations_dir: root.join("conversations"),
         available_models: vec![],
         skip_naration: false,
         permission_bridge: None,
@@ -837,8 +934,8 @@ fn test_session_resume_rejects_unknown_session() {
     let mut adapter = Adapter {
         sessions: HashMap::new(),
         working_dir: root.to_string_lossy().to_string(),
-        conversations_dir: root.join("conversations"),
         state_file: root.join("sessions.json"),
+        conversations_dir: root.join("conversations"),
         available_models: vec![],
         skip_naration: false,
         permission_bridge: None,
@@ -879,8 +976,8 @@ fn test_session_resume_accepts_in_memory_session() {
     let mut adapter = Adapter {
         sessions: HashMap::new(),
         working_dir: "/tmp".to_string(),
-        conversations_dir: PathBuf::from("/tmp/conversations"),
         state_file: PathBuf::from("/tmp/nonexistent-agy-acp-sessions.json"),
+        conversations_dir: PathBuf::from("/tmp/conversations"),
         available_models: vec![],
         skip_naration: false,
         permission_bridge: None,
@@ -913,8 +1010,8 @@ fn test_session_load_accepts_in_memory_session_without_replay() {
     let mut adapter = Adapter {
         sessions: HashMap::new(),
         working_dir: "/tmp".to_string(),
-        conversations_dir: PathBuf::from("/tmp/conversations"),
         state_file: PathBuf::from("/tmp/nonexistent-agy-acp-sessions.json"),
+        conversations_dir: PathBuf::from("/tmp/conversations"),
         available_models: vec![],
         skip_naration: false,
         permission_bridge: None,
@@ -946,8 +1043,8 @@ fn test_session_resume_does_not_replay_history() {
     let mut adapter = Adapter {
         sessions: HashMap::new(),
         working_dir: root.to_string_lossy().to_string(),
-        conversations_dir: root.join("conversations"),
         state_file: root.join("sessions.json"),
+        conversations_dir: root.join("conversations"),
         available_models: vec![],
         skip_naration: false,
         permission_bridge: None,
@@ -965,92 +1062,6 @@ fn test_session_resume_does_not_replay_history() {
             .and_then(|s| s.as_str()),
         Some("sess-nr")
     );
-
-    let _ = fs::remove_dir_all(root);
-}
-
-#[test]
-#[ignore]
-fn test_snapshot_detects_db_conversations() {
-    let root = std::env::temp_dir().join(format!("agy-acp-db-{}", Uuid::new_v4()));
-    let conv_dir = root.join("conversations");
-    fs::create_dir_all(&conv_dir).unwrap();
-    fs::write(conv_dir.join("existing.db"), b"old").unwrap();
-
-    let adapter = Adapter {
-        sessions: HashMap::new(),
-        working_dir: root.to_string_lossy().to_string(),
-        conversations_dir: conv_dir.clone(),
-        state_file: root.join("sessions.json"),
-        available_models: vec![],
-        skip_naration: false,
-        permission_bridge: None,
-        hook_root_dir: None,
-    };
-
-    let before = adapter.conversation_snapshot();
-    assert!(before.contains("existing"));
-
-    fs::write(conv_dir.join("new-conv.db"), b"new").unwrap();
-    fs::write(conv_dir.join("new-conv.db-wal"), b"wal").unwrap();
-    fs::write(conv_dir.join("new-conv.db-shm"), b"shm").unwrap();
-
-    assert_eq!(
-        adapter.new_conversation_id(&before),
-        Some("new-conv".to_string())
-    );
-    let _ = fs::remove_dir_all(root);
-}
-
-#[test]
-#[ignore]
-fn test_snapshot_ignores_multiple_new_files() {
-    let root = std::env::temp_dir().join(format!("agy-acp-multi-{}", Uuid::new_v4()));
-    let conv_dir = root.join("conversations");
-    fs::create_dir_all(&conv_dir).unwrap();
-
-    let adapter = Adapter {
-        sessions: HashMap::new(),
-        working_dir: root.to_string_lossy().to_string(),
-        conversations_dir: conv_dir.clone(),
-        state_file: root.join("sessions.json"),
-        available_models: vec![],
-        skip_naration: false,
-        permission_bridge: None,
-        hook_root_dir: None,
-    };
-
-    let before = adapter.conversation_snapshot();
-    fs::write(conv_dir.join("a.db"), b"").unwrap();
-    fs::write(conv_dir.join("b.db"), b"").unwrap();
-
-    assert_eq!(adapter.new_conversation_id(&before), None);
-    let _ = fs::remove_dir_all(root);
-}
-
-#[test]
-#[ignore]
-fn test_persist_and_restore_session() {
-    let root = std::env::temp_dir().join(format!("agy-acp-state-{}", Uuid::new_v4()));
-    let _ = fs::create_dir_all(&root);
-
-    let adapter = Adapter {
-        sessions: HashMap::new(),
-        working_dir: root.to_string_lossy().to_string(),
-        conversations_dir: root.join("conversations"),
-        state_file: root.join("sessions.json"),
-        available_models: vec![],
-        skip_naration: false,
-        permission_bridge: None,
-        hook_root_dir: None,
-    };
-
-    adapter.persist_session("sess-1", Some("conv-abc"), 7, None);
-    let restored = adapter.restore_session("sess-1");
-    assert_eq!(restored, Some(("conv-abc".to_string(), 7, None)));
-
-    let missing = adapter.restore_session("sess-unknown");
-    assert_eq!(missing, None);
 
     let _ = fs::remove_dir_all(root);
 }
@@ -1101,22 +1112,158 @@ fn test_read_response_from_db() {
     .unwrap();
     drop(conn);
 
+    let result = crate::db::read_delta_from_db(&conv_dir, "test-conv", -1);
+    let delta = result.expect("expected a delta for the freshly-inserted rows");
+    assert_eq!(delta.text, Some("hello world".to_string()));
+    assert_eq!(delta.max_step_idx, 1);
+
+    let result = crate::db::read_delta_from_db(&conv_dir, "test-conv", 1);
+    assert!(result.is_none());
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+#[ignore]
+fn test_read_response_multi_step_no_skip_no_duplicate() {
+    let root = std::env::temp_dir().join(format!("agy-acp-multi-step-{}", Uuid::new_v4()));
+    let conv_dir = root.join("conversations");
+    fs::create_dir_all(&conv_dir).unwrap();
+
+    let db_path = conv_dir.join("multi.db");
+    let conn = Connection::open(&db_path).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE steps (
+            idx INTEGER PRIMARY KEY,
+            step_type INTEGER NOT NULL DEFAULT 0,
+            status INTEGER NOT NULL DEFAULT 0,
+            has_subtrajectory NUMERIC NOT NULL DEFAULT 0,
+            metadata BLOB,
+            error_details BLOB,
+            permissions BLOB,
+            task_details BLOB,
+            render_info BLOB,
+            step_payload BLOB,
+            step_format INTEGER NOT NULL DEFAULT 0
+        )",
+    )
+    .unwrap();
+
+    fn make_payload(text: &str) -> Vec<u8> {
+        let text_bytes = text.as_bytes();
+        let mut inner = vec![0x0A];
+        let mut len = text_bytes.len();
+        loop {
+            if len < 128 {
+                inner.push(len as u8);
+                break;
+            }
+            inner.push((len as u8 & 0x7F) | 0x80);
+            len >>= 7;
+        }
+        inner.extend_from_slice(text_bytes);
+
+        let mut outer = vec![0xA2, 0x01];
+        let mut ilen = inner.len();
+        loop {
+            if ilen < 128 {
+                outer.push(ilen as u8);
+                break;
+            }
+            outer.push((ilen as u8 & 0x7F) | 0x80);
+            ilen >>= 7;
+        }
+        outer.extend(inner);
+        outer
+    }
+
+    conn.execute(
+        "INSERT INTO steps (idx, step_type, step_payload) VALUES (1, 0, X'0801')",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO steps (idx, step_type, step_payload) VALUES (?1, 15, ?2)",
+        rusqlite::params![2i64, make_payload("hello")],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO steps (idx, step_type, step_payload) VALUES (3, 0, X'0802')",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO steps (idx, step_type, step_payload) VALUES (?1, 15, ?2)",
+        rusqlite::params![4i64, make_payload("world")],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO steps (idx, step_type, step_payload) VALUES (?1, 15, ?2)",
+        rusqlite::params![5i64, make_payload("line1\nline2\nline3")],
+    )
+    .unwrap();
+    drop(conn);
+
+    let result = crate::db::read_delta_from_db(&conv_dir, "multi", -1).unwrap();
+    assert_eq!(result.text, Some("hello\nworld\nline1\nline2\nline3".to_string()));
+    assert_eq!(result.max_step_idx, 5);
+
+    let result = crate::db::read_delta_from_db(&conv_dir, "multi", 2).unwrap();
+    assert_eq!(result.text, Some("world\nline1\nline2\nline3".to_string()));
+    assert_eq!(result.max_step_idx, 5);
+
+    let result = crate::db::read_delta_from_db(&conv_dir, "multi", 4).unwrap();
+    assert_eq!(result.text, Some("line1\nline2\nline3".to_string()));
+    assert_eq!(result.max_step_idx, 5);
+
+    let result = crate::db::read_delta_from_db(&conv_dir, "multi", 5);
+    assert!(result.is_none());
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+#[ignore]
+fn test_read_response_missing_steps_table() {
+    let root = std::env::temp_dir().join(format!("agy-acp-noschema-{}", Uuid::new_v4()));
+    let conv_dir = root.join("conversations");
+    fs::create_dir_all(&conv_dir).unwrap();
+
+    let db_path = conv_dir.join("empty.db");
+    let conn = Connection::open(&db_path).unwrap();
+    conn.execute_batch("CREATE TABLE other (id INTEGER)")
+        .unwrap();
+    drop(conn);
+
+    let result = crate::db::read_delta_from_db(&conv_dir, "empty", -1);
+    assert!(result.is_none());
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+#[ignore]
+fn test_persist_and_restore_session() {
+    let root = std::env::temp_dir().join(format!("agy-acp-state-{}", Uuid::new_v4()));
+    let _ = fs::create_dir_all(&root);
+
     let adapter = Adapter {
         sessions: HashMap::new(),
         working_dir: root.to_string_lossy().to_string(),
-        conversations_dir: conv_dir,
         state_file: root.join("sessions.json"),
+        conversations_dir: root.join("conversations"),
         available_models: vec![],
         skip_naration: false,
         permission_bridge: None,
         hook_root_dir: None,
     };
 
-    let result = adapter.read_response_from_db("test-conv", -1);
-    assert_eq!(result, Some(("hello world".to_string(), 1)));
+    adapter.persist_session("sess-1", Some("conv-abc"), 7, None);
+    let restored = adapter.restore_session("sess-1");
+    assert_eq!(restored, Some(("conv-abc".to_string(), 7, None)));
 
-    let result = adapter.read_response_from_db("test-conv", 1);
-    assert_eq!(result, None);
+    let missing = adapter.restore_session("sess-unknown");
+    assert_eq!(missing, None);
 
     let _ = fs::remove_dir_all(root);
 }
@@ -1470,146 +1617,6 @@ fn test_e2e_error_paths() {
 }
 
 #[test]
-#[ignore]
-fn test_read_response_multi_step_no_skip_no_duplicate() {
-    let root = std::env::temp_dir().join(format!("agy-acp-multi-step-{}", Uuid::new_v4()));
-    let conv_dir = root.join("conversations");
-    fs::create_dir_all(&conv_dir).unwrap();
-
-    let db_path = conv_dir.join("multi.db");
-    let conn = Connection::open(&db_path).unwrap();
-    conn.execute_batch(
-        "CREATE TABLE steps (
-            idx INTEGER PRIMARY KEY,
-            step_type INTEGER NOT NULL DEFAULT 0,
-            status INTEGER NOT NULL DEFAULT 0,
-            has_subtrajectory NUMERIC NOT NULL DEFAULT 0,
-            metadata BLOB,
-            error_details BLOB,
-            permissions BLOB,
-            task_details BLOB,
-            render_info BLOB,
-            step_payload BLOB,
-            step_format INTEGER NOT NULL DEFAULT 0
-        )",
-    )
-    .unwrap();
-
-    fn make_payload(text: &str) -> Vec<u8> {
-        let text_bytes = text.as_bytes();
-        let mut inner = vec![0x0A];
-        let mut len = text_bytes.len();
-        loop {
-            if len < 128 {
-                inner.push(len as u8);
-                break;
-            }
-            inner.push((len as u8 & 0x7F) | 0x80);
-            len >>= 7;
-        }
-        inner.extend_from_slice(text_bytes);
-
-        let mut outer = vec![0xA2, 0x01];
-        let mut ilen = inner.len();
-        loop {
-            if ilen < 128 {
-                outer.push(ilen as u8);
-                break;
-            }
-            outer.push((ilen as u8 & 0x7F) | 0x80);
-            ilen >>= 7;
-        }
-        outer.extend(inner);
-        outer
-    }
-
-    conn.execute(
-        "INSERT INTO steps (idx, step_type, step_payload) VALUES (1, 0, X'0801')",
-        [],
-    )
-    .unwrap();
-    conn.execute(
-        "INSERT INTO steps (idx, step_type, step_payload) VALUES (?1, 15, ?2)",
-        rusqlite::params![2i64, make_payload("hello")],
-    )
-    .unwrap();
-    conn.execute(
-        "INSERT INTO steps (idx, step_type, step_payload) VALUES (3, 0, X'0802')",
-        [],
-    )
-    .unwrap();
-    conn.execute(
-        "INSERT INTO steps (idx, step_type, step_payload) VALUES (?1, 15, ?2)",
-        rusqlite::params![4i64, make_payload("world")],
-    )
-    .unwrap();
-    conn.execute(
-        "INSERT INTO steps (idx, step_type, step_payload) VALUES (?1, 15, ?2)",
-        rusqlite::params![5i64, make_payload("line1\nline2\nline3")],
-    )
-    .unwrap();
-    drop(conn);
-
-    let adapter = Adapter {
-        sessions: HashMap::new(),
-        working_dir: root.to_string_lossy().to_string(),
-        conversations_dir: conv_dir,
-        state_file: root.join("sessions.json"),
-        available_models: vec![],
-        skip_naration: false,
-        permission_bridge: None,
-        hook_root_dir: None,
-    };
-
-    let result = adapter.read_response_from_db("multi", -1);
-    assert_eq!(
-        result,
-        Some(("hello\nworld\nline1\nline2\nline3".to_string(), 5))
-    );
-
-    let result = adapter.read_response_from_db("multi", 2);
-    assert_eq!(result, Some(("world\nline1\nline2\nline3".to_string(), 5)));
-
-    let result = adapter.read_response_from_db("multi", 4);
-    assert_eq!(result, Some(("line1\nline2\nline3".to_string(), 5)));
-
-    let result = adapter.read_response_from_db("multi", 5);
-    assert_eq!(result, None);
-
-    let _ = fs::remove_dir_all(root);
-}
-
-#[test]
-#[ignore]
-fn test_read_response_missing_steps_table() {
-    let root = std::env::temp_dir().join(format!("agy-acp-noschema-{}", Uuid::new_v4()));
-    let conv_dir = root.join("conversations");
-    fs::create_dir_all(&conv_dir).unwrap();
-
-    let db_path = conv_dir.join("empty.db");
-    let conn = Connection::open(&db_path).unwrap();
-    conn.execute_batch("CREATE TABLE other (id INTEGER)")
-        .unwrap();
-    drop(conn);
-
-    let adapter = Adapter {
-        sessions: HashMap::new(),
-        working_dir: root.to_string_lossy().to_string(),
-        conversations_dir: conv_dir,
-        state_file: root.join("sessions.json"),
-        available_models: vec![],
-        skip_naration: false,
-        permission_bridge: None,
-        hook_root_dir: None,
-    };
-
-    let result = adapter.read_response_from_db("empty", -1);
-    assert_eq!(result, None);
-
-    let _ = fs::remove_dir_all(root);
-}
-
-#[test]
 fn test_is_narration_true() {
     assert!(Adapter::is_narration("I will fetch the latest commits."));
     assert!(Adapter::is_narration("I'll fetch the latest commits."));
@@ -1792,8 +1799,8 @@ fn test_session_set_model_persists() {
     let mut adapter = Adapter {
         sessions: HashMap::new(),
         working_dir: root.to_string_lossy().to_string(),
-        conversations_dir: root.join("conversations"),
         state_file: root.join("sessions.json"),
+        conversations_dir: root.join("conversations"),
         available_models: vec![],
         skip_naration: false,
         permission_bridge: None,
@@ -1811,8 +1818,8 @@ fn test_session_set_model_persists() {
     let adapter2 = Adapter {
         sessions: HashMap::new(),
         working_dir: root.to_string_lossy().to_string(),
-        conversations_dir: root.join("conversations"),
         state_file: root.join("sessions.json"),
+        conversations_dir: root.join("conversations"),
         available_models: vec![],
         skip_naration: false,
         permission_bridge: None,
@@ -2059,4 +2066,141 @@ fn test_set_config_option_rejects_a_model_agy_does_not_offer() {
         &json!({"sessionId": session_id, "configId": "model", "value": "nope"}),
     );
     assert_eq!(resp.error.as_ref().unwrap()["code"].as_i64(), Some(-32602));
+}
+
+#[cfg(test)]
+/// The conversation DB is provider-controlled data this adapter only reads, so a
+/// corrupted or hostile row must not be able to panic the process. Before the
+/// checked-arithmetic pass, the first case here aborted with
+/// "slice index starts at 12 but ends at 11".
+mod harden_check {
+    use crate::protobuf::{
+        extract_text_from_step_payload, extract_tool_update_from_step_payload,
+        extract_user_text_from_step_payload, get_proto_field, get_text_field, read_varint,
+    };
+
+    fn lcg(seed: &mut u64) -> u8 {
+        *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        (*seed >> 33) as u8
+    }
+
+    #[test]
+    fn malformed_blobs_do_not_panic() {
+        // Tags are varints: (20 << 3) | wire_type is 162..165, each two bytes.
+        let tag_20_len_delimited = [0xa2u8, 0x01];
+        let tag_20_fixed32 = [0xa5u8, 0x01];
+        let tag_20_fixed64 = [0xa1u8, 0x01];
+        let mut cases: Vec<Vec<u8>> = vec![
+            // length = u64::MAX; `i + len` wraps and the old bounds check passed
+            [&tag_20_len_delimited[..], &[0xff; 9][..], &[0x01][..]].concat(),
+            // length merely points past the end
+            [&tag_20_len_delimited[..], &[0x7f][..], b"short"].concat(),
+            // truncated varint
+            vec![0xff, 0xff, 0xff],
+            // fixed32 / fixed64 running off the end
+            [&tag_20_fixed32[..], &[0x01][..]].concat(),
+            [&tag_20_fixed64[..], &[0x01, 0x02][..]].concat(),
+        ];
+        let mut seed = 7u64;
+        for n in 0..64usize {
+            cases.push((0..n).map(|_| lcg(&mut seed)).collect());
+        }
+        for blob in &cases {
+            for target in [1u64, 2, 4, 19, 20, 30] {
+                let _ = get_proto_field(blob, target);
+                let _ = get_text_field(blob, target);
+            }
+            let _ = extract_text_from_step_payload(blob);
+            let _ = extract_user_text_from_step_payload(blob);
+            let _ = extract_tool_update_from_step_payload(0, 132, blob);
+            let _ = read_varint(blob);
+        }
+    }
+}
+
+/// A turn ends on the stream's terminal `result` event. Without this flag the
+/// adapter cannot tell a completed turn from a truncated one, since a killed agy
+/// can still exit 0 after emitting partial output.
+#[test]
+fn test_stream_json_tracks_whether_the_result_event_arrived() {
+    let mut processor = crate::streaming::StreamProcessor::new(false);
+    processor.process_line(
+        r#"{"event":"step_update","step_update":{"conversation_id":"c1","step_index":0,"text_delta":"partial"}}"#,
+        "s1",
+    );
+    assert!(
+        !processor.saw_result,
+        "a stream carrying only step updates has not completed"
+    );
+    assert!(processor.had_updates, "the partial text was still emitted");
+
+    processor.process_line(
+        r#"{"event":"result","result":{"conversation_id":"c1","status":"SUCCESS","response":"done"}}"#,
+        "s1",
+    );
+    assert!(processor.saw_result, "the result event completes the turn");
+}
+
+/// `result.response` repeats what was streamed, so it is dropped rather than
+/// shown twice. Probed against agy 1.1.12: identical, byte for byte, on both a
+/// plain and a tool-using turn. This pins the dedup and the empty-result case;
+/// divergence is reported on stderr rather than silently swallowed.
+#[test]
+fn test_stream_json_drops_the_result_text_it_already_streamed() {
+    let mut processor = crate::streaming::StreamProcessor::new(false);
+    let streamed = processor.process_line(
+        r#"{"event":"step_update","step_update":{"conversation_id":"c1","step_index":0,"text_delta":"The answer is 42.\n"}}"#,
+        "s1",
+    );
+    assert_eq!(streamed.len(), 1, "the delta reaches the client once");
+
+    let from_result = processor.process_line(
+        r#"{"event":"result","result":{"conversation_id":"c1","status":"SUCCESS","response":"The answer is 42.\n"}}"#,
+        "s1",
+    );
+    assert!(
+        from_result.is_empty(),
+        "the same text must not be sent a second time"
+    );
+    assert!(processor.saw_result);
+}
+
+/// A turn whose text arrives only in the result -- no deltas -- must still show
+/// it, and an empty result must not produce an empty chunk.
+#[test]
+fn test_stream_json_emits_result_text_when_nothing_was_streamed() {
+    let mut processor = crate::streaming::StreamProcessor::new(false);
+    let updates = processor.process_line(
+        r#"{"event":"result","result":{"conversation_id":"c1","status":"SUCCESS","response":"Answer: 42"}}"#,
+        "s1",
+    );
+    assert_eq!(updates.len(), 1, "the only copy of the text must be sent");
+    assert!(updates[0].contains("Answer: 42"));
+
+    let mut empty = crate::streaming::StreamProcessor::new(false);
+    let updates = empty.process_line(
+        r#"{"event":"result","result":{"conversation_id":"c1","status":"SUCCESS","response":""}}"#,
+        "s1",
+    );
+    assert!(updates.is_empty(), "an empty result is not a message");
+    assert!(empty.saw_result, "an empty result still completes the turn");
+}
+
+/// Ten groups is the widest a u64 varint can be, and the tenth carries a single
+/// bit (9 * 7 = 63). A larger tenth group overflows: before this was rejected,
+/// nine continuation bytes followed by `0x02` parsed as 0 rather than failing.
+#[test]
+fn test_read_varint_rejects_an_overflowing_tenth_group() {
+    let mut overflowing = vec![0x80u8; 9];
+    overflowing.push(0x02);
+    assert_eq!(read_varint(&overflowing), None);
+
+    let mut widest = vec![0x80u8; 9];
+    widest.push(0x01);
+    assert_eq!(widest.len(), 10);
+    assert_eq!(read_varint(&widest), Some((1u64 << 63, 10)));
+
+    let mut too_long = vec![0x80u8; 10];
+    too_long.push(0x01);
+    assert_eq!(read_varint(&too_long), None);
 }

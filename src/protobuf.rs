@@ -5,7 +5,14 @@ pub fn read_varint(buf: &[u8]) -> Option<(u64, usize)> {
     let mut result: u64 = 0;
     let mut shift = 0;
     for (i, &byte) in buf.iter().enumerate() {
-        if shift >= 70 {
+        // A varint wider than ten 7-bit groups cannot be a u64.
+        if shift >= 64 {
+            return None;
+        }
+        // The tenth group has one bit left to spend: 9 * 7 = 63. Anything above
+        // 0x01 there overflows a u64, and shifting it would silently truncate the
+        // payload rather than reject it -- a tenth byte of 0x02 used to parse as 0.
+        if shift == 63 && byte & 0x7F > 0x01 {
             return None;
         }
         result |= ((byte & 0x7F) as u64) << shift;
@@ -33,20 +40,25 @@ pub fn get_proto_field(blob: &[u8], target: u64) -> Option<Vec<u8>> {
             2 => {
                 let (len, c) = read_varint(&blob[i..])?;
                 i += c;
-                let len = len as usize;
-                if i + len > blob.len() {
+                // The length is provider-controlled and arrives from a conversation
+                // DB this adapter does not write. `i + len` on a hostile length
+                // wraps and turns the bounds check below into a pass, so the add
+                // has to be the checked one.
+                let len = usize::try_from(len).ok()?;
+                let end = i.checked_add(len)?;
+                if end > blob.len() {
                     return None;
                 }
                 if field_number == target {
-                    return Some(blob[i..i + len].to_vec());
+                    return Some(blob[i..end].to_vec());
                 }
-                i += len;
+                i = end;
             }
             5 => {
-                i += 4;
+                i = i.checked_add(4)?;
             }
             1 => {
-                i += 8;
+                i = i.checked_add(8)?;
             }
             _ => return None,
         }
@@ -75,42 +87,47 @@ fn get_proto_fields(blob: &[u8], target: u64) -> Vec<Vec<u8>> {
                 let Some((_, c)) = read_varint(&blob[i..]) else {
                     return fields;
                 };
+                let Some(end) = start.checked_add(c).filter(|e| *e <= blob.len()) else {
+                    return fields;
+                };
                 if field_number == target {
-                    fields.push(blob[start..start + c].to_vec());
+                    fields.push(blob[start..end].to_vec());
                 }
-                i += c;
+                i = end;
             }
             2 => {
                 let Some((len, c)) = read_varint(&blob[i..]) else {
                     return fields;
                 };
                 i += c;
-                let len = len as usize;
-                if i + len > blob.len() {
+                let Some(len) = usize::try_from(len).ok() else {
                     return fields;
-                }
+                };
+                let Some(end) = i.checked_add(len).filter(|e| *e <= blob.len()) else {
+                    return fields;
+                };
                 if field_number == target {
-                    fields.push(blob[i..i + len].to_vec());
+                    fields.push(blob[i..end].to_vec());
                 }
-                i += len;
+                i = end;
             }
             5 => {
-                if i + 4 > blob.len() {
+                let Some(end) = i.checked_add(4).filter(|e| *e <= blob.len()) else {
                     return fields;
-                }
+                };
                 if field_number == target {
-                    fields.push(blob[i..i + 4].to_vec());
+                    fields.push(blob[i..end].to_vec());
                 }
-                i += 4;
+                i = end;
             }
             1 => {
-                if i + 8 > blob.len() {
+                let Some(end) = i.checked_add(8).filter(|e| *e <= blob.len()) else {
                     return fields;
-                }
+                };
                 if field_number == target {
-                    fields.push(blob[i..i + 8].to_vec());
+                    fields.push(blob[i..end].to_vec());
                 }
-                i += 8;
+                i = end;
             }
             _ => return fields,
         }
@@ -138,13 +155,6 @@ pub fn extract_user_text_from_step_payload(blob: &[u8]) -> Option<String> {
             get_text_field(&content, 1)
         })
         .filter(|text| !text.trim().is_empty())
-}
-
-/// Extract a generated conversation title from a step type 23 payload:
-/// top-level field 30 (sub-message) -> field 4 (string).
-pub fn extract_title_from_step_payload(blob: &[u8]) -> Option<String> {
-    let title_update = get_proto_field(blob, 30)?;
-    get_text_field(&title_update, 4).filter(|title| !title.trim().is_empty())
 }
 
 pub fn extract_first_json_object(s: &str) -> Option<Value> {

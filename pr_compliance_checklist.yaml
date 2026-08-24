@@ -1,0 +1,111 @@
+# Compliance rules for automated PR review (Qodo Merge reads this from the repo root).
+#
+# These describe what this fork actually guarantees. Two earlier review findings
+# came from rules describing the pre-stream-json architecture -- 500ms SQLite
+# polling and DB-filename conversation binding -- both of which were removed on
+# purpose. Rules that outlive the code they describe produce confident, wrong
+# findings, so this file lives next to the code and changes with it.
+
+pr_compliances:
+  - title: "Permission bridge fails closed"
+    compliance_label: true
+    objective: >
+      With --permission-prompts, the bridge is the sole gate on agy's tool calls
+      (agy itself runs with --dangerously-skip-permissions, because its own checks
+      auto-deny before a PreToolUse hook decision can take effect). Every case the
+      bridge cannot resolve must therefore deny.
+    success_criteria: >
+      Every path through the hook handler answers with an explicit decision.
+      Unresolvable cases -- no session to ask, no answer within the timeout, a path
+      inside the adapter's private hook root -- deny. Changes must not widen what
+      is approved without asking.
+
+      Two gaps in this are known and tracked in TODO.md rather than claimed as
+      solved: `outside_workspace()` only evaluates absolute paths, so a relative
+      path may escape the workspace check, and a remembered "always allow" is
+      keyed by tool name alone and skips the containment and sensitive-path
+      checks. Closing either is a fix, not a regression.
+    failure_criteria: >
+      A hook response with no decision field (agy then hangs until print-mode
+      timeout), a default-allow branch, or an "always allow" answer that bypasses
+      the path checks.
+
+  - title: "Streaming comes from stream-json; SQLite is load-only"
+    compliance_label: true
+    objective: >
+      Live updates are parsed from `agy --output-format stream-json`. agy's SQLite
+      conversation DB is read for exactly one purpose: replaying history in
+      session/load, because that is the only place past turns exist.
+    success_criteria: >
+      session/prompt streams from the child's stdout via StreamProcessor and opens
+      no database. db.rs is reached only from the session/load replay path.
+    failure_criteria: >
+      Reintroducing a polling loop over SQLite during a prompt, or requiring a
+      fixed poll interval. The 500ms poll was removed deliberately and is not a
+      requirement.
+
+  - title: "Conversation binding uses the id from the stream"
+    compliance_label: true
+    objective: >
+      The conversation id arrives in the stream's init/result events. Binding by
+      snapshotting and diffing conversation DB filenames was removed: it could
+      refuse to bind when another agy ran concurrently, and could bind to the
+      wrong sole new DB and replay a private conversation into an ACP session.
+    success_criteria: >
+      session/prompt takes conversation_id from StreamProcessor and persists it.
+    failure_criteria: >
+      Requiring or reintroducing filename-diff discovery, including a rule that
+      binding must refuse when multiple new DB files appear.
+
+  - title: "Model ids and display labels are not interchangeable"
+    compliance_label: true
+    objective: >
+      `agy models` prints `id<TAB>Human Label`. Only the id is a valid --model
+      argument; the label is for display.
+    success_criteria: >
+      ACP receives the id as modelId/value and the label as name. Ids from a client
+      are validated against the list agy reported, and a stored `id<TAB>label`
+      string is repaired to the id.
+    failure_criteria: >
+      Passing a label, or a tab-joined id+label string, to --model. Treating a
+      whole line of `agy models` output as a model name.
+
+  - title: "Turn outcomes are reported honestly"
+    compliance_label: true
+    objective: >
+      An ACP client must be able to tell a completed turn from a failed one, and a
+      failure from a refusal.
+    success_criteria: >
+      A nonzero exit, a result status of ERROR, or a stream ending without its
+      terminal result event all produce an error response -- whether or not output
+      was streamed first. A tool call the user refused ends with stopReason
+      "refusal"; a cancelled turn with "cancelled".
+    failure_criteria: >
+      Gating the error response on whether updates were emitted, treating EOF
+      without a result event as success, or reporting a user's refusal as a
+      provider error.
+
+  - title: "Provider data is parsed with checked arithmetic"
+    compliance_label: true
+    objective: >
+      The protobuf walkers read conversation DBs this adapter does not write. A
+      corrupted or hostile row must not be able to panic the process.
+    success_criteria: >
+      Length and offset arithmetic in protobuf.rs uses checked_add/try_from, and
+      malformed input yields None or partial results.
+    failure_criteria: >
+      Unchecked `i + len` before slicing, or casting a provider-supplied u64 length
+      straight to usize. A length of u64::MAX wraps and turns a bounds check into a
+      pass.
+
+  - title: "This is a hard fork of hicder/agy-acp"
+    compliance_label: false
+    objective: >
+      The fork has no upstream remote and files no pull requests upstream. Upstream
+      work is taken deliberately, recorded by .upstream-watermark.
+    success_criteria: >
+      Changes target kgrizz-git/agy-acp. Upstream code is read by fetching a URL,
+      not by adding a remote. The watermark moves in a human commit.
+    failure_criteria: >
+      Re-adding an upstream remote, targeting a PR at hicder/agy-acp, or advancing
+      the watermark automatically.
