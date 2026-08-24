@@ -1,1 +1,8 @@
 target
+
+# Scratch space for review notes, probe output and anything else not meant to be
+# history. `git add -A` would otherwise sweep it into a commit.
+tmp/
+
+# macOS writes these into every directory it opens.
+.DS_Store
