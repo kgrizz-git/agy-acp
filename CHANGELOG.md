@@ -30,8 +30,9 @@ of its own yet, so everything below is unreleased.
   received `gemini-3.7-flash-high\tGemini 3.7 Flash (High)`. ACP now gets the id
   as `modelId` and the label as `name`, ids from a client are checked against
   what agy offers, and a tab-joined value left in an old `sessions.json` is
-  repaired on restore. Upstream splits the tab but keeps the label, which is the
-  same defect from the other end.
+  repaired on restore. Upstream splits the tab but keeps the label
+  (`parse_model_line`, `hicder/agy-acp` at 858041c, `src/adapter.rs:702-706`),
+  which is the same defect from the other end.
 - A failed turn could report success. The error response was gated on no updates
   having been emitted, so a turn that streamed one chunk and then failed returned
   `stopReason: "end_turn"`. A stream reaching EOF without its terminal `result`
@@ -46,9 +47,20 @@ of its own yet, so everything below is unreleased.
 - The protobuf walkers could panic on a corrupted or hostile conversation DB. A
   length field of `u64::MAX` wrapped `i + len`, turning the bounds check into a
   pass and panicking on the slice. All offset arithmetic is checked.
-- The README's Zed example told users they must set
-  `--dangerously-skip-permissions`, steering them around this fork's own
-  permission bridge.
+- The README's Zed example recommends `--permission-prompts`. The instruction it
+  replaces -- that you **must** set `AGY_EXTRA_ARGS="--dangerously-skip-permissions"`
+  -- came in with upstream's README in this same change and never described this
+  fork, which has had the bridge all along. The bypass is still documented, as an
+  opt-in with a warning.
+
+### Known issues
+
+- `test_read_response_from_db` fails under `cargo test -- --include-ignored`. It
+  is upstream's test and upstream's implementation, `#[ignore]`d since it was
+  written, so it has not run in either lineage in months: it expects
+  `max_step_idx == 1` where the code returns `2`, having advanced the cursor over
+  a trailing user-message row. The helper it tests is `#[cfg(test)]`-only, so
+  nothing in production depends on the answer. Tracked in TODO.md.
 
 ### Maintenance
 

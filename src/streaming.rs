@@ -159,6 +159,30 @@ impl StreamProcessor {
             return Vec::new();
         };
         if self.emitted_agent_text {
+            // The result repeats the text already streamed as deltas, so emitting
+            // it again would duplicate the answer. Measured against agy 1.1.12,
+            // including a tool-using turn: result.response was byte-identical to
+            // the concatenated deltas. Re-emitting through emit_agent_delta would
+            // not fix a divergence either -- that appends before diffing, so a
+            // full response would be duplicated wholesale. If the assumption ever
+            // breaks, say so rather than dropping text silently.
+            let streamed: String = {
+                let mut keys: Vec<&i64> = self.agent_text.keys().collect();
+                keys.sort();
+                keys.iter()
+                    .filter_map(|k| self.agent_text.get(k))
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join("")
+            };
+            if streamed.trim() != response.trim() {
+                eprintln!(
+                    "[agy-acp] WARN: result.response ({} chars) differs from the {} chars \
+                     streamed as deltas; the difference is not shown to the client",
+                    response.len(),
+                    streamed.len()
+                );
+            }
             return Vec::new();
         }
         self.emit_agent_delta(session_id, self.last_step_idx.max(0), &response)

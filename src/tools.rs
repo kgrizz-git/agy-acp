@@ -1,5 +1,9 @@
 use serde_json::{json, Value};
 
+/// Maps an agy tool name to an ACP tool kind. Matching is substring-based over
+/// names agy controls and does not document, so it is best-effort by design: a
+/// name that merely contains "read" is classified as a read. Kind only drives how
+/// a host labels the call, so a wrong guess is cosmetic.
 pub fn tool_kind(tool_name: &str) -> &'static str {
     let lower = tool_name.to_lowercase();
     if lower.contains("write") || lower.contains("edit") || lower.contains("patch") {

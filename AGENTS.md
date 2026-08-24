@@ -60,7 +60,7 @@ code works today. Completed work is recorded in [CHANGELOG.md](CHANGELOG.md).
 ## Quirks
 
 - State persistence uses write-to-tmp-then-rename pattern under an exclusive file lock (`fs2`).
-- Streaming writes JSON-RPC notifications directly to stdout from the `agy` stdout reader (not through the main channel). The main loop may still write concurrently if other requests arrive during a prompt.
+- Streaming writes JSON-RPC notifications directly to stdout from the `agy` stdout reader, not through the main channel, and the main loop writes there too if another request arrives mid-prompt. Removing the SQLite poller did not fix this — it replaced one of the two writers. Still open; see "One stdout owner" in [TODO.md](TODO.md).
 - `handle_session_load` returns a `Vec<String>`: the replayed history as `session/update` notifications, then the response. Replay reads agy's SQLite conversation DB, which is the only place past turns exist — streaming never touches SQLite.
 - Conversation binding: the `init` / `result` stream-json events include `conversation_id`, which is persisted and passed back as `--conversation` on subsequent prompts.
 - `fetch_available_models()` runs `agy models` synchronously during `Adapter::new()`. If `agy` isn't installed, models list is empty (no error).

@@ -2140,3 +2140,48 @@ fn test_stream_json_tracks_whether_the_result_event_arrived() {
     );
     assert!(processor.saw_result, "the result event completes the turn");
 }
+
+/// `result.response` repeats what was streamed, so it is dropped rather than
+/// shown twice. Probed against agy 1.1.12: identical, byte for byte, on both a
+/// plain and a tool-using turn. This pins the dedup and the empty-result case;
+/// divergence is reported on stderr rather than silently swallowed.
+#[test]
+fn test_stream_json_drops_the_result_text_it_already_streamed() {
+    let mut processor = crate::streaming::StreamProcessor::new(false);
+    let streamed = processor.process_line(
+        r#"{"event":"step_update","step_update":{"conversation_id":"c1","step_index":0,"text_delta":"The answer is 42.\n"}}"#,
+        "s1",
+    );
+    assert_eq!(streamed.len(), 1, "the delta reaches the client once");
+
+    let from_result = processor.process_line(
+        r#"{"event":"result","result":{"conversation_id":"c1","status":"SUCCESS","response":"The answer is 42.\n"}}"#,
+        "s1",
+    );
+    assert!(
+        from_result.is_empty(),
+        "the same text must not be sent a second time"
+    );
+    assert!(processor.saw_result);
+}
+
+/// A turn whose text arrives only in the result -- no deltas -- must still show
+/// it, and an empty result must not produce an empty chunk.
+#[test]
+fn test_stream_json_emits_result_text_when_nothing_was_streamed() {
+    let mut processor = crate::streaming::StreamProcessor::new(false);
+    let updates = processor.process_line(
+        r#"{"event":"result","result":{"conversation_id":"c1","status":"SUCCESS","response":"Answer: 42"}}"#,
+        "s1",
+    );
+    assert_eq!(updates.len(), 1, "the only copy of the text must be sent");
+    assert!(updates[0].contains("Answer: 42"));
+
+    let mut empty = crate::streaming::StreamProcessor::new(false);
+    let updates = empty.process_line(
+        r#"{"event":"result","result":{"conversation_id":"c1","status":"SUCCESS","response":""}}"#,
+        "s1",
+    );
+    assert!(updates.is_empty(), "an empty result is not a message");
+    assert!(empty.saw_result, "an empty result still completes the turn");
+}
