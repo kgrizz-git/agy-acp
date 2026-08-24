@@ -20,6 +20,8 @@ The few things worth picking up next. Each is a pointer; the detail lives below.
   after anyone else installs it.
 - [Relative-path auto-allow escape](#relative-path-auto-allow-escape) — the
   permission boundary this fork exists to provide.
+- [A stdout read error can hang the prompt](#a-stdout-read-error-can-hang-the-prompt)
+  — one undecodable line deadlocks the turn.
 
 ## Active
 
@@ -86,6 +88,19 @@ also writes there. Large writes can interleave and corrupt line-delimited JSON-
 RPC. Route every notification through the main output channel and add a
 concurrent-streaming framing test. The stream-json port removed the final-drain
 writer but not the shared-stdout problem.
+
+#### A stdout read error can hang the prompt
+
+The stream reader is `while let Ok(Some(line)) = lines.next_line().await`, so any
+error — invalid UTF-8 in agy's output is the realistic one — ends the loop. The
+child is still running and still writing, so its stdout pipe fills, its next write
+blocks, and `child.wait()` never returns: the prompt hangs until the print
+timeout. Retrying instead of stopping is not the fix either, since `Lines` keeps
+returning the same error and the loop would spin. Read bytes rather than lines so
+an undecodable line can be discarded, and kill the child if draining cannot
+continue. Note the turn is at least reported honestly today — the reader stops
+before the terminal `result`, so `saw_result` stays false and the turn fails
+rather than claiming success.
 
 #### Cancellation map race
 

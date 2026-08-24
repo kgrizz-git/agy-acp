@@ -5,9 +5,14 @@ pub fn read_varint(buf: &[u8]) -> Option<(u64, usize)> {
     let mut result: u64 = 0;
     let mut shift = 0;
     for (i, &byte) in buf.iter().enumerate() {
-        // A varint wider than ten 7-bit groups cannot be a u64. Same acceptance as
-        // the previous `>= 70` bound, stated in terms of the width it protects.
+        // A varint wider than ten 7-bit groups cannot be a u64.
         if shift >= 64 {
+            return None;
+        }
+        // The tenth group has one bit left to spend: 9 * 7 = 63. Anything above
+        // 0x01 there overflows a u64, and shifting it would silently truncate the
+        // payload rather than reject it -- a tenth byte of 0x02 used to parse as 0.
+        if shift == 63 && byte & 0x7F > 0x01 {
             return None;
         }
         result |= ((byte & 0x7F) as u64) << shift;

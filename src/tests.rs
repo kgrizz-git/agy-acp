@@ -2185,3 +2185,22 @@ fn test_stream_json_emits_result_text_when_nothing_was_streamed() {
     assert!(updates.is_empty(), "an empty result is not a message");
     assert!(empty.saw_result, "an empty result still completes the turn");
 }
+
+/// Ten groups is the widest a u64 varint can be, and the tenth carries a single
+/// bit (9 * 7 = 63). A larger tenth group overflows: before this was rejected,
+/// nine continuation bytes followed by `0x02` parsed as 0 rather than failing.
+#[test]
+fn test_read_varint_rejects_an_overflowing_tenth_group() {
+    let mut overflowing = vec![0x80u8; 9];
+    overflowing.push(0x02);
+    assert_eq!(read_varint(&overflowing), None);
+
+    let mut widest = vec![0x80u8; 9];
+    widest.push(0x01);
+    assert_eq!(widest.len(), 10);
+    assert_eq!(read_varint(&widest), Some((1u64 << 63, 10)));
+
+    let mut too_long = vec![0x80u8; 10];
+    too_long.push(0x01);
+    assert_eq!(read_varint(&too_long), None);
+}
