@@ -2,7 +2,6 @@ use fs2::FileExt;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::fs;
-use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -32,6 +31,28 @@ pub(crate) async fn read_until_newline<R: AsyncBufReadExt + Unpin>(
     buf.clear();
     let n = reader.read_until(b'\n', buf).await?;
     Ok(n != 0)
+}
+
+/// Processes one stream-json frame and publishes its `session/update`
+/// notifications on `notify_tx`.
+///
+/// Split out of the stdout drain task so it can be unit-tested without spawning
+/// a real `agy` process. `processor` is the per-turn `StreamProcessor` and is
+/// mutated in place, since stream-json is a sequence of events that carry state
+/// (conversation binding, step indices, de-duplicated text).
+///
+/// Only ever sends `Some(..)`. `None` is the main loop's "pending prompt
+/// finished" sentinel, so sending it here would corrupt `pending_prompts` and
+/// make the process exit early.
+pub(crate) fn publish_stream_notifications(
+    processor: &mut StreamProcessor,
+    notify_tx: &tokio::sync::mpsc::UnboundedSender<Option<String>>,
+    line: &str,
+    session_id: &str,
+) {
+    for notification in processor.process_line(line, session_id) {
+        let _ = notify_tx.send(Some(notification));
+    }
 }
 
 pub struct Adapter {
@@ -732,11 +753,15 @@ impl Adapter {
         }
     }
 
+    /// `notify_tx` carries `session/update` notifications to the main loop, which
+    /// is the only writer of stdout. A second writer would interleave mid-line and
+    /// corrupt the JSON-RPC stream, so the stream reader never touches the fd.
     pub async fn handle_session_prompt(
         &mut self,
         id: Value,
         params: &Value,
         cancelled: Arc<AtomicBool>,
+        notify_tx: tokio::sync::mpsc::UnboundedSender<Option<String>>,
     ) -> Vec<String> {
         let session_id = params
             .get("sessionId")
@@ -839,7 +864,6 @@ impl Adapter {
             let mut processor = StreamProcessor::new(skip_naration);
             if let Some(stdout) = stdout {
                 let mut reader = BufReader::new(stdout);
-                let mut out = io::stdout();
                 let mut read_error: Option<String> = None;
                 let mut buf = Vec::new();
                 loop {
@@ -852,10 +876,12 @@ impl Adapter {
                             let line = String::from_utf8_lossy(&buf)
                                 .trim_end_matches(['\n', '\r'])
                                 .to_string();
-                            for notification in processor.process_line(&line, &poll_session_id) {
-                                let _ = writeln!(out, "{}", notification);
-                            }
-                            let _ = out.flush();
+                            publish_stream_notifications(
+                                &mut processor,
+                                &notify_tx,
+                                &line,
+                                &poll_session_id,
+                            );
                         }
                         Ok(false) => break, // EOF
                         Err(e) => {

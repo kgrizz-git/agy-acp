@@ -2497,3 +2497,45 @@ async fn read_until_newline_yields_events_after_invalid_utf8_line() {
         "valid events after the bad line are still emitted"
     );
 }
+
+#[tokio::test]
+async fn stream_notifications_go_through_the_output_channel() {
+    use tokio::sync::mpsc::unbounded_channel;
+
+    let (notify_tx, mut notify_rx) = unbounded_channel::<Option<String>>();
+    let mut processor = StreamProcessor::new(false);
+
+    let frames = [
+        r#"{"event":"init","conversation_id":"conv-abc","init":{"cwd":"/tmp"}}"#,
+        r#"{"event":"step_update","step_update":{"conversation_id":"conv-abc","step_index":1,"state":"ACTIVE","step_type":"agent_response","text_delta":"OK"}}"#,
+        r#"{"event":"step_update","step_update":{"conversation_id":"conv-abc","step_index":3,"state":"ACTIVE","step_type":"tool","tool_name":"run_command","tool_info":{"name":"run_command","parameters":{"CommandLine":"echo hello"}}}}"#,
+        r#"{"event":"result","result":{"conversation_id":"conv-abc","status":"SUCCESS","response":"OK"}}"#,
+    ];
+
+    for frame in frames {
+        crate::adapter::publish_stream_notifications(
+            &mut processor,
+            &notify_tx,
+            frame,
+            "sess-1",
+        );
+    }
+    drop(notify_tx);
+
+    let mut count = 0;
+    while let Some(value) = notify_rx.recv().await {
+        // (a) the drain task must never send the pending-prompt sentinel.
+        assert!(
+            value.is_some(),
+            "notification channel received None, which corrupts pending_prompts"
+        );
+        let notification = value.unwrap();
+        // (b) every value is a complete JSON-RPC session/update notification.
+        let parsed: Value = serde_json::from_str(&notification)
+            .unwrap_or_else(|e| panic!("notification is not valid JSON: {e}: {notification}"));
+        assert_eq!(parsed["method"], "session/update");
+        assert!(parsed["params"]["update"].is_object());
+        count += 1;
+    }
+    assert!(count >= 1, "at least one notification was emitted");
+}

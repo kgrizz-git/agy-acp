@@ -245,11 +245,14 @@ async fn main() {
                 let adapter = Arc::clone(&adapter);
                 let active_cancellations = Arc::clone(&active_cancellations);
                 let out_tx = out_tx.clone();
+                let adapter_notify_tx = out_tx.clone();
                 pending_prompts += 1;
                 tokio::spawn(async move {
                     let output = {
                         let mut adapter = adapter.lock().await;
-                        adapter.handle_session_prompt(id, &params, cancelled).await
+                        adapter
+                            .handle_session_prompt(id, &params, cancelled, adapter_notify_tx)
+                            .await
                     };
                     if !session_id.is_empty() {
                         active_cancellations.lock().unwrap().remove(&session_id);
