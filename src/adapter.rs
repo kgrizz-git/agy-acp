@@ -18,6 +18,22 @@ use crate::permission::{PermissionBridge, SOCKET_ENV};
 use crate::streaming::StreamProcessor;
 use crate::types::*;
 
+/// Reads a single newline-terminated frame from `reader` into `buf`.
+///
+/// Returns `Ok(true)` when a frame (including its trailing `\n`) was read,
+/// `Ok(false)` at EOF with nothing more to read, or `Err` on an underlying I/O
+/// error. `buf` is cleared first so each call yields exactly one frame. Split
+/// out from the stdout drain task so the byte-oriented loop can be unit-tested
+/// without spawning a real `agy` process.
+pub(crate) async fn read_until_newline<R: AsyncBufReadExt + Unpin>(
+    reader: &mut R,
+    buf: &mut Vec<u8>,
+) -> std::io::Result<bool> {
+    buf.clear();
+    let n = reader.read_until(b'\n', buf).await?;
+    Ok(n != 0)
+}
+
 pub struct Adapter {
     pub sessions: HashMap<String, Session>,
     pub working_dir: String,
@@ -470,7 +486,8 @@ impl Adapter {
             .get(session_id)
             .and_then(|session| session.conversation_id.clone());
         if let Some(conv_id) = replay_conv_id {
-            if let Some((updates, max_step_idx)) = self.read_replay_updates_from_db_inner(&conv_id) {
+            if let Some((updates, max_step_idx)) = self.read_replay_updates_from_db_inner(&conv_id)
+            {
                 for update in updates {
                     let notification = serde_json::to_string(&JsonRpcNotification {
                         jsonrpc: "2.0",
@@ -821,13 +838,37 @@ impl Adapter {
         let stdout_reader = tokio::spawn(async move {
             let mut processor = StreamProcessor::new(skip_naration);
             if let Some(stdout) = stdout {
-                let mut lines = BufReader::new(stdout).lines();
+                let mut reader = BufReader::new(stdout);
                 let mut out = io::stdout();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    for notification in processor.process_line(&line, &poll_session_id) {
-                        let _ = writeln!(out, "{}", notification);
+                let mut read_error: Option<String> = None;
+                let mut buf = Vec::new();
+                loop {
+                    match read_until_newline(&mut reader, &mut buf).await {
+                        Ok(true) => {
+                            // from_utf8_lossy, not from_utf8: a malformed byte must
+                            // not be able to end this drain, or the pipe stops being
+                            // read, fills, and wedges child.wait() forever. At worst
+                            // one event fails to parse and is skipped below.
+                            let line = String::from_utf8_lossy(&buf)
+                                .trim_end_matches(['\n', '\r'])
+                                .to_string();
+                            for notification in processor.process_line(&line, &poll_session_id) {
+                                let _ = writeln!(out, "{}", notification);
+                            }
+                            let _ = out.flush();
+                        }
+                        Ok(false) => break, // EOF
+                        Err(e) => {
+                            read_error = Some(e.to_string());
+                            // The child may still have bytes queued; drain them so its
+                            // stdout pipe never blocks and child.wait() can return.
+                            let _ = tokio::io::copy(&mut reader, &mut tokio::io::sink()).await;
+                            break;
+                        }
                     }
-                    let _ = out.flush();
+                }
+                if let Some(e) = read_error {
+                    eprintln!("agy-acp: error reading agy stdout: {e}");
                 }
             }
             processor

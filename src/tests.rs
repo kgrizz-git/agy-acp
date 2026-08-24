@@ -1215,7 +1215,10 @@ fn test_read_response_multi_step_no_skip_no_duplicate() {
     drop(conn);
 
     let result = crate::db::read_delta_from_db(&conv_dir, "multi", -1).unwrap();
-    assert_eq!(result.text, Some("hello\nworld\nline1\nline2\nline3".to_string()));
+    assert_eq!(
+        result.text,
+        Some("hello\nworld\nline1\nline2\nline3".to_string())
+    );
     assert_eq!(result.max_step_idx, 5);
 
     let result = crate::db::read_delta_from_db(&conv_dir, "multi", 2).unwrap();
@@ -1981,8 +1984,14 @@ fn test_session_models_json_never_emits_a_label_as_an_id() {
     adapter.available_models = Adapter::parse_models_output(AGY_MODELS_STDOUT);
     let models = adapter.session_models_json(None);
     let available = models["availableModels"].as_array().unwrap();
-    assert_eq!(available[0]["modelId"].as_str(), Some("gemini-3.7-flash-high"));
-    assert_eq!(available[0]["name"].as_str(), Some("Gemini 3.7 Flash (High)"));
+    assert_eq!(
+        available[0]["modelId"].as_str(),
+        Some("gemini-3.7-flash-high")
+    );
+    assert_eq!(
+        available[0]["name"].as_str(),
+        Some("Gemini 3.7 Flash (High)")
+    );
     for entry in available {
         assert!(!entry["modelId"].as_str().unwrap().contains('\t'));
     }
@@ -2094,7 +2103,9 @@ mod harden_check {
     };
 
     fn lcg(seed: &mut u64) -> u8 {
-        *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        *seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         (*seed >> 33) as u8
     }
 
@@ -2239,7 +2250,11 @@ fn persist_session_prunes_unbindable_entries_first() {
     };
     for i in 0..300 {
         // Most entries can never be resumed; they must be the first to go.
-        let conv = if i == 50 { Some(format!("conv-bound-{i}")) } else { None };
+        let conv = if i == 50 {
+            Some(format!("conv-bound-{i}"))
+        } else {
+            None
+        };
         adapter.persist_session(&format!("sess-{i}"), conv.as_deref(), 0, None);
     }
 
@@ -2255,7 +2270,11 @@ fn persist_session_prunes_unbindable_entries_first() {
         "the bound entry must survive the prune"
     );
     assert_eq!(
-        store.sessions.values().filter(|s| s.conversation_id.is_some()).count(),
+        store
+            .sessions
+            .values()
+            .filter(|s| s.conversation_id.is_some())
+            .count(),
         1,
         "the single bound entry must be kept while null entries are dropped first"
     );
@@ -2285,7 +2304,12 @@ fn persist_session_keeps_the_entry_it_just_wrote() {
         session_tick: 0,
     };
     for i in 0..400 {
-        adapter.persist_session(&format!("old-{i}"), Some(format!("conv-{i}").as_str()), 0, None);
+        adapter.persist_session(
+            &format!("old-{i}"),
+            Some(format!("conv-{i}").as_str()),
+            0,
+            None,
+        );
     }
     adapter.persist_session("just-written", Some("conv-just"), 0, None);
 
@@ -2312,7 +2336,11 @@ fn stored_sessions_without_updated_at_load_as_oldest() {
             "sess-b": { "conversation_id": "conv-b", "last_step_idx": 2 },
         }
     });
-    fs::write(root.join("sessions.json"), serde_json::to_string_pretty(&json).unwrap()).unwrap();
+    fs::write(
+        root.join("sessions.json"),
+        serde_json::to_string_pretty(&json).unwrap(),
+    )
+    .unwrap();
 
     let adapter = Adapter {
         sessions: HashMap::new(),
@@ -2328,10 +2356,7 @@ fn stored_sessions_without_updated_at_load_as_oldest() {
     let store = adapter.load_store();
     assert_eq!(store.sessions.len(), 2, "both legacy entries should load");
     assert!(
-        store
-            .sessions
-            .values()
-            .all(|s| s.updated_at == 0),
+        store.sessions.values().all(|s| s.updated_at == 0),
         "missing updated_at must default to 0"
     );
 
@@ -2390,5 +2415,85 @@ fn evict_if_needed_drops_the_least_recently_used_session() {
     assert!(
         !adapter.sessions.contains_key("sess-0"),
         "the untouched, oldest-used session is the one evicted"
+    );
+}
+
+#[test]
+fn stream_processor_survives_invalid_utf8_in_a_line() {
+    use crate::streaming::StreamProcessor;
+
+    // A byte slice with an invalid UTF-8 byte (0xff) decodes to U+FFFD via
+    // from_utf8_lossy, so one bad line must not stop the stream.
+    let bad_bytes = b"{\"event\":\"result\",\"result\":{\"status\":\"\xff\"}}";
+    let bad_line = String::from_utf8_lossy(bad_bytes);
+    assert!(
+        bad_line.contains('\u{fffd}'),
+        "precondition: line carries a replacement char"
+    );
+
+    let mut processor = StreamProcessor::new(false);
+    let from_bad = processor.process_line(&bad_line, "sess-1");
+    assert!(
+        from_bad.is_empty(),
+        "a malformed line yields no notifications"
+    );
+
+    // A valid event fed right after must still be processed normally.
+    let good = r#"{"event":"result","result":{"conversation_id":"conv-x","status":"SUCCESS","response":"OK"}}"#;
+    let from_good = processor.process_line(good, "sess-1");
+    assert_eq!(
+        from_good.len(),
+        1,
+        "the valid event after the bad one is processed"
+    );
+    assert!(
+        processor.saw_result,
+        "result event is still tracked after a bad line"
+    );
+}
+
+#[tokio::test]
+async fn read_until_newline_yields_events_after_invalid_utf8_line() {
+    use crate::adapter::read_until_newline;
+
+    // A stream that starts with a line containing an invalid UTF-8 byte, then
+    // two valid NDJSON events. We exercise the byte-oriented frame reader
+    // directly to prove the later events are still delivered.
+    let mut payload: Vec<u8> = Vec::new();
+    payload.extend_from_slice(b"{\"event\":\"init\",\"conversation_id\":\"conv-x\"}\xff\n");
+    payload.extend_from_slice(b"{\"event\":\"result\",\"result\":{\"conversation_id\":\"conv-x\",\"status\":\"SUCCESS\",\"response\":\"OK\"}}\n");
+    payload.extend_from_slice(b"{\"event\":\"step_update\",\"step_update\":{\"step_index\":1,\"state\":\"DONE\",\"step_type\":\"checkpoint\"}}\n");
+
+    let mut reader = tokio::io::BufReader::new(std::io::Cursor::new(payload));
+    let mut frames: Vec<Vec<u8>> = Vec::new();
+    let mut buf = Vec::new();
+    while read_until_newline(&mut reader, &mut buf).await.unwrap() {
+        frames.push(buf.clone());
+    }
+
+    assert_eq!(
+        frames.len(),
+        3,
+        "three frames read despite the invalid byte"
+    );
+    // Each frame is decoded lossily and still parses as JSON after trimming.
+    let mut processor = crate::streaming::StreamProcessor::new(false);
+    let mut total = 0;
+    for frame in &frames {
+        let line = String::from_utf8_lossy(frame)
+            .trim_end_matches(['\n', '\r'])
+            .to_string();
+        if line.trim().is_empty() {
+            continue;
+        }
+        total += processor.process_line(&line, "sess-1").len();
+    }
+    assert!(
+        processor.saw_result,
+        "result frame survived the invalid byte"
+    );
+    assert!(
+        total >= 1,
+        "valid events after the bad line are still emitted"
     );
 }
