@@ -10,6 +10,9 @@ of its own yet, so everything below is unreleased.
 
 ## Unreleased
 
+The stream-json port merged as `bf6e81b` (PR #1). It has not been installed
+anywhere yet; see "Verify the port under Paseo" in [TODO.md](TODO.md).
+
 ### Added
 
 - `--permission-prompts` routes agy's tool permission checks to the ACP host.

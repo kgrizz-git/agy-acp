@@ -10,31 +10,42 @@ carries no work items.
 
 The few things worth picking up next. Each is a pointer; the detail lives below.
 
-- [Land the stream-json port](#land-the-stream-json-port) — the open PR, and what
-  is still unverified about it.
-- [`sessions.json` grows without bound](#sessionsjson-grows-without-bound) —
-  affects every turn today, and gets worse.
-- [One stdout owner](#one-stdout-owner) — two writers on the ACP transport can
-  corrupt a frame.
+- [Reliability and boundary fixes](#reliability-and-boundary-fixes) — the branch
+  in flight: five fixes, ordered so each is separately revertible.
+- [Verify the port under Paseo](#verify-the-port-under-paseo) — merged and
+  installed nowhere yet; only a scripted client has exercised it.
+- [Build and test in CI](#build-and-test-in-ci) — there is none, which is why an
+  ignored test rotted for months.
 - [Rename the binary and crate](#rename-the-binary-and-crate) — cheaper now than
   after anyone else installs it.
-- [Relative-path auto-allow escape](#relative-path-auto-allow-escape) — the
-  permission boundary this fork exists to provide.
-- [A stdout read error can hang the prompt](#a-stdout-read-error-can-hang-the-prompt)
-  — one undecodable line deadlocks the turn.
 
 ## Active
 
-### Land the stream-json port
+### Reliability and boundary fixes
 
-[PR #1](https://github.com/kgrizz-git/agy-acp/pull/1) takes upstream's stream-json
-rewrite and ports the permission bridge onto it. Merging is a judgement call, not
-a blocked task: the permission flows, session/load replay and the test suite are
-verified, but nothing has run under Paseo itself — only a scripted ACP client.
-Cancellation (upstream's new `child.kill()` path), concurrent sessions and
-subagent events are untested. Remaining: merge, install to `~/.local/bin` with a
-`codesign -f -s -` and a daemon restart, then exercise one real agent through a
-permission prompt and a reopened thread.
+Branch `fix/next-up`. Five entries below, taken in this order so each commit is
+separately revertible and the risky one lands with the transport already sane:
+
+1. [`sessions.json` grows without bound](#sessionsjson-grows-without-bound)
+2. [A stdout read error can hang the prompt](#a-stdout-read-error-can-hang-the-prompt)
+3. [One stdout owner](#one-stdout-owner)
+4. [Cancellation map race](#cancellation-map-race)
+5. [Relative-path auto-allow escape](#relative-path-auto-allow-escape) and
+   [Always allow bypasses safety checks](#always-allow-bypasses-safety-checks)
+
+The two permission items are one commit because they are the same defect seen
+twice: a check that is skipped rather than enforced. Split the branch if review
+gets unwieldy; nothing in it depends on anything else in it except 3 on 2.
+
+### Verify the port under Paseo
+
+The stream-json port merged as `bf6e81b`. Everything verified so far was driven by
+a scripted ACP client: the four permission scenarios, load replay across
+processes, and the test suite. Nothing has run under Paseo itself, and
+cancellation (upstream's `child.kill()` path), concurrent sessions and subagent
+events are untested anywhere. Install the built binary to `~/.local/bin` with
+`codesign -f -s -`, restart the daemon, then drive one real agent through a
+permission prompt, a reopened thread, and a cancellation.
 
 ### Security and permission boundaries
 
@@ -149,6 +160,17 @@ session ever created. Entries carry no timestamp, so pruning needs one added
 first; decide between a cap, a TTL, and dropping unbound entries. Note also that
 `evict_if_needed` removes an arbitrary `HashMap` key, not the least recently
 used, so it can evict a live session while keeping a dead one.
+
+#### Build and test in CI
+
+There is no build or test workflow — only `upstream-watch.yml`. That absence is
+why `test_read_response_from_db` rotted unnoticed: it is `#[ignore]`d, and nobody
+runs `--include-ignored` by hand. A workflow should run `cargo build`,
+`cargo test`, and `cargo test -- --include-ignored` with the four e2e tests
+skipped, since those need `agy` and auth. Gate e2e behind a `GEMINI_API_KEY`
+secret so they skip rather than fail when it is absent. Do not add a bare
+`cargo fmt --check`: this tree is not rustfmt-clean and it would reflow files no
+change touched.
 
 #### Rename the binary and crate
 
