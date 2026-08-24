@@ -115,7 +115,7 @@ Set the `AGY_EXTRA_ARGS` environment variable to pass additional arguments to ev
 }
 ```
 
-Tool calls then arrive as ACP `session/request_permission` requests, with **Allow** / **Always allow** / **Reject** / **Always reject** options. "Always" answers are remembered per tool for the rest of the session.
+Tool calls then arrive as ACP `session/request_permission` requests, with **Allow** / **Always allow** / **Reject** / **Always reject** options. See [What "Always" remembers](#what-always-remembers) — it is coarser than it looks.
 
 This works by installing a `PreToolUse` hook for `agy` in a private directory of the adapter's own — nothing is written to your workspace or to your global `agy` config, so plain `agy` use in a terminal is unaffected.
 
@@ -134,9 +134,29 @@ Opt in with `AGY_ACP_AUTO_ALLOW`, which takes tool names and the groups `reads` 
 
 Whatever is enabled, three limits still apply:
 
-- **Only inside the workspace** — an absolute path outside the workspace root is still prompted.
+- **Only inside the workspace** — a path leaving the workspace root is still prompted, whether it is absolute, `~/...`, or `../` traversal. A path inside a shell command string is not seen; see below.
 - **No network reads** — `read_url_content` and `search_web` are outside both groups. They only read, but a URL carries data out.
 - **Credential-looking paths are still prompted** — `.env`, `.pem`/`.key`/`id_rsa`, `.ssh`/`.aws`/`.gnupg`/`.kube`, `.netrc`/`.npmrc`/`.git-credentials`, and names containing `token`, `secret`, `password` or `credential`. Extend with `AGY_ACP_SENSITIVE_PATTERNS`. This list cannot be complete and is not what makes the feature safe — the narrow default is.
+
+### What "Always" remembers
+
+An "Always allow" or "Always reject" is remembered for **the rest of the session**, keyed by the *tool* — not by the file, the command, or the arguments you were shown when you answered.
+
+That distinction matters most for `run_command`. Approving `run_command` once with **Always allow** approves *every* later command in that session — `rm -rf build` included — without asking again. The prompt shows you one command; the answer covers the tool.
+
+Two checks still apply to a remembered **allow**, and will bring the prompt back:
+
+- the path is outside the workspace, or
+- the path looks credential-bearing (the list above).
+
+But those checks read the tool's arguments as *paths*, and a shell command is a single opaque string. `cat /etc/shadow` is not recognised as naming `/etc/shadow`, so under a remembered allow it runs unprompted. The neighbouring `cat /etc/passwd` *is* caught — but only because `passwd` happens to be a sensitive substring, which is luck, not containment. The adapter does not parse commands.
+
+> [!WARNING]
+> Prefer **Allow** over **Always allow** for `run_command`. Reserve "Always" for narrow read tools where the two checks above are meaningful. This is a known limitation, not a design goal — see `TODO.md`.
+
+A remembered **reject** always applies immediately, with no such escape.
+
+There is no way to revoke an "Always" answer short of starting a new session.
 
 ## Configuration & Environment
 
@@ -146,7 +166,7 @@ Whatever is enabled, three limits still apply:
 | `GEMINI_API_KEY` | API key for Gemini (passed through to `agy`) |
 | `AGY_EXTRA_ARGS` | Space-separated extra args passed to every `agy` invocation |
 | `AGY_ACP_AUTO_ALLOW` | What may run without asking. Tool names plus the groups `reads`, `searches`, `none`. Default `ask_question` |
-| `AGY_ACP_SENSITIVE_PATTERNS` | Extra comma-separated substrings marking a path as too sensitive to read without asking |
+| `AGY_ACP_SENSITIVE_PATTERNS` | Extra comma-separated substrings marking a path as too sensitive to read without asking. Matched against every string argument, so it also catches substrings of a command line |
 | `AGY_ACP_PERMISSION_TIMEOUT_SECS` | How long a permission request waits for an answer before denying. Default `540` |
 
 ## Session Persistence

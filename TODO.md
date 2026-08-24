@@ -10,32 +10,16 @@ carries no work items.
 
 The few things worth picking up next. Each is a pointer; the detail lives below.
 
-- [Reliability and boundary fixes](#reliability-and-boundary-fixes) — the branch
-  in flight: five fixes, ordered so each is separately revertible.
 - [Verify the port under Paseo](#verify-the-port-under-paseo) — merged and
   installed nowhere yet; only a scripted client has exercised it.
+- [Permission decisions ignore what a command actually does](#permission-decisions-ignore-what-a-command-actually-does)
+  — one "Always allow" on `run_command` covers every later command.
 - [Build and test in CI](#build-and-test-in-ci) — there is none, which is why an
   ignored test rotted for months.
 - [Rename the binary and crate](#rename-the-binary-and-crate) — cheaper now than
   after anyone else installs it.
 
 ## Active
-
-### Reliability and boundary fixes
-
-Branch `fix/next-up`. Five entries below, taken in this order so each commit is
-separately revertible and the risky one lands with the transport already sane:
-
-1. [`sessions.json` grows without bound](#sessionsjson-grows-without-bound)
-2. [A stdout read error can hang the prompt](#a-stdout-read-error-can-hang-the-prompt)
-3. [One stdout owner](#one-stdout-owner)
-4. [Cancellation map race](#cancellation-map-race)
-5. [Relative-path auto-allow escape](#relative-path-auto-allow-escape) and
-   [Always allow bypasses safety checks](#always-allow-bypasses-safety-checks)
-
-The two permission items are one commit because they are the same defect seen
-twice: a check that is skipped rather than enforced. Split the branch if review
-gets unwieldy; nothing in it depends on anything else in it except 3 on 2.
 
 ### Verify the port under Paseo
 
@@ -49,22 +33,39 @@ permission prompt, a reopened thread, and a cancellation.
 
 ### Security and permission boundaries
 
-#### Relative-path auto-allow escape
+#### Permission decisions ignore what a command actually does
 
-`outside_workspace()` only evaluates strings beginning with `/`, while `reads`
-and `searches` may accept a relative path such as `../../some-readable-file`.
-Confirm how each `agy` read/search tool resolves relative paths; if it resolves
-them from the workspace, normalize relative path arguments against that root
-before auto-allowing, and prompt on any escape. Do not rely on the sensitive-
-name denylist for containment.
+Remembered answers are keyed by `(session, tool name)`, so one "Always allow" on
+`run_command` approves every later command in that session. The containment and
+sensitive-path checks do still run on a remembered allow, but they read arguments
+as paths and a command line is a single opaque string: `cat /etc/shadow` is not
+recognised as naming `/etc/shadow` at all. `cat /etc/passwd` is caught only
+because `passwd` is a sensitive substring — luck, not containment. Both halves are
+pinned by tests that assert today's behaviour deliberately
+(`always_allow_is_remembered_per_tool_not_per_command` and
+`a_path_inside_a_command_string_is_invisible_to_the_containment_check`), so
+closing the gap turns them red and forces the README to be updated with it.
 
-#### Always allow bypasses safety checks
+Documented in the README under "What 'Always' remembers", with a warning to
+prefer **Allow** over **Always allow** for `run_command`. Three ways out, roughly
+in order of value:
 
-remembered choices are keyed only by `(session, tool name)` and are evaluated
-after the hook-root check but without workspace or sensitive-path checks. Verify
-whether a benign "Always allow view_file" can later read an external or
-credential-looking path. If so, retain a per-tool preference but keep path
-containment and sensitive-path checks non-bypassable.
+1. Do not offer "Always allow" for command-executing tools at all, or key the
+   sticky answer by `(session, tool, normalized command)` so approving
+   `cat README.md` does not approve `cat` on anything. The first is a few lines
+   and closes it completely; the second is friendlier and invites normalization
+   bugs. Either makes the prompt mean what a user reads it as meaning.
+2. Extract paths from a command line so containment applies to `run_command` at
+   all — tokenize the string and treat `/`-, `~`- and `../`-bearing tokens as
+   paths. Shell quoting, expansion and substitution mean this can only ever be
+   best-effort; it must fail toward prompting, never toward allowing.
+3. Refuse destructive commands outright (`rm -rf`, `dd`, `mkfs`, `curl | sh`) and
+   widen the sensitive-path list. Cheapest, and the weakest: a denylist over a
+   string the shell will re-interpret is evaded by `cat .en"v"` or
+   `cat $HOME/.env`. Worth doing as depth, never as the boundary.
+
+Also: an "Always" answer cannot be revoked short of a new session. Consider
+exposing them, or expiring them with the turn.
 
 #### Workspace-supplied hooks
 
@@ -91,34 +92,6 @@ never recursively delete a merely prefix-matching stale directory without
 proving it was created by this adapter.
 
 ### Reliability and lifecycle
-
-#### One stdout owner
-
-the stream-reader task writes JSON-RPC directly to stdout while the main loop
-also writes there. Large writes can interleave and corrupt line-delimited JSON-
-RPC. Route every notification through the main output channel and add a
-concurrent-streaming framing test. The stream-json port removed the final-drain
-writer but not the shared-stdout problem.
-
-#### A stdout read error can hang the prompt
-
-The stream reader is `while let Ok(Some(line)) = lines.next_line().await`, so any
-error — invalid UTF-8 in agy's output is the realistic one — ends the loop. The
-child is still running and still writing, so its stdout pipe fills, its next write
-blocks, and `child.wait()` never returns: the prompt hangs until the print
-timeout. Retrying instead of stopping is not the fix either, since `Lines` keeps
-returning the same error and the loop would spin. Read bytes rather than lines so
-an undecodable line can be discarded, and kill the child if draining cannot
-continue. Note the turn is at least reported honestly today — the reader stops
-before the terminal `result`, so `saw_result` stays false and the turn fails
-rather than claiming success.
-
-#### Cancellation map race
-
-a second `session/prompt` for the same session overwrites the first cancellation
-token before the global adapter lock admits it; the first task can then remove
-the second token. Define whether concurrent prompts are rejected, queued, or
-supersede one another, and test cancellation in each state.
 
 #### Global prompt serialization
 
@@ -149,17 +122,6 @@ carries `status` and `error`, and the adapter now reads both — and consider a
 configurable `agy` binary path.
 
 ### Fork maintenance
-
-#### sessions.json grows without bound
-
-`evict_if_needed` caps the in-memory map at 64, but nothing caps the file: it
-holds 910 entries / 150 KB on one developer machine, 553 of them with no
-`conversation_id` (sessions created and never prompted). Every `persist_session`
-rewrites the whole file under the lock, so the cost of a turn grows with every
-session ever created. Entries carry no timestamp, so pruning needs one added
-first; decide between a cap, a TTL, and dropping unbound entries. Note also that
-`evict_if_needed` removes an arbitrary `HashMap` key, not the least recently
-used, so it can evict a live session while keeping a dead one.
 
 #### Build and test in CI
 

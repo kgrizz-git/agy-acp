@@ -63,6 +63,12 @@ impl Decision {
 }
 
 /// Remembered "always" answers, keyed by session and tool name.
+///
+/// Tool name, not arguments: one "always allow" on `run_command` covers every
+/// later command in the session. Containment and sensitive-path checks still run
+/// on a remembered allow, but they read arguments as paths and a command line is
+/// one opaque string, so they do not constrain it. Documented in the README and
+/// tracked in TODO.md.
 type AlwaysKey = (String, String);
 
 #[derive(Default)]
@@ -1068,6 +1074,24 @@ mod tests {
     }
 
     /// Builds a bridge wired to a session, a workspace and an explicit policy.
+    /// Waits for the bridge to ask the user, failing fast if it never does.
+    ///
+    /// A missing prompt is the interesting failure here -- it means a check was
+    /// bypassed -- and without a timeout that shows up as the whole suite
+    /// hanging rather than as a red test.
+    async fn expect_permission_request(
+        rx: &mut mpsc::UnboundedReceiver<Option<String>>,
+    ) -> Value {
+        let raw = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+            .await
+            .expect("the bridge must ask the user, not decide on its own")
+            .unwrap()
+            .unwrap();
+        let request: Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(request["method"], "session/request_permission");
+        request
+    }
+
     async fn test_bridge(
         workspace: &str,
         auto_allow: &[&str],
@@ -1341,18 +1365,20 @@ mod tests {
     async fn always_allow_does_not_bypass_the_sensitive_path_check() {
         let workspace = std::env::temp_dir().join("agy-acp-always-sensitive-test");
         std::fs::create_dir_all(&workspace).unwrap();
-        let (bridge, mut rx) = test_bridge(&workspace.display().to_string(), READ_TOOLS).await;
+        // Nothing auto-allowed, so the first call reaches the user and the sticky
+        // answer is actually recorded. Both calls use the same tool: the sticky
+        // key is (session, tool), so a second call to a different tool would
+        // never consult the remembered answer and would prove nothing.
+        let (bridge, mut rx) = test_bridge(&workspace.display().to_string(), &[]).await;
+        let ordinary = workspace.join("notes.md").display().to_string();
 
-        // First call: `run_command` is not auto-allowed, so the user actually gets
-        // the prompt and can pick "always allow". (A view_file would be waved
-        // through silently and never record the sticky answer.)
         let first = {
             let bridge = bridge.clone();
             tokio::spawn(async move {
                 bridge
                     .decide(&json!({
                         "conversationId": "conv-1",
-                        "toolCall": { "name": "run_command", "args": { "CommandLine": "ls" } },
+                        "toolCall": { "name": "view_file", "args": { "AbsolutePath": ordinary } },
                     }))
                     .await
             })
@@ -1367,7 +1393,7 @@ mod tests {
             .await;
         assert_eq!(first.await.unwrap().0, Decision::Allow);
 
-        // Second call: a sensitive file must still prompt despite the remembered allow.
+        // Same tool, sensitive path: the remembered allow must not cover it.
         let second = {
             let bridge = bridge.clone();
             tokio::spawn(async move {
@@ -1379,9 +1405,7 @@ mod tests {
                     .await
             })
         };
-        let raw = rx.recv().await.unwrap().unwrap();
-        let request: Value = serde_json::from_str(&raw).unwrap();
-        assert_eq!(request["method"], "session/request_permission");
+        let request = expect_permission_request(&mut rx).await;
         bridge
             .resolve_response(
                 &request["id"],
@@ -1395,16 +1419,16 @@ mod tests {
     async fn always_allow_does_not_bypass_the_workspace_check() {
         let workspace = std::env::temp_dir().join("agy-acp-always-workspace-test");
         std::fs::create_dir_all(&workspace).unwrap();
-        let (bridge, mut rx) = test_bridge(&workspace.display().to_string(), READ_TOOLS).await;
+        let (bridge, mut rx) = test_bridge(&workspace.display().to_string(), &[]).await;
+        let ordinary = workspace.join("notes.md").display().to_string();
 
-        // First call must prompt, so use a non-auto-allowed tool.
         let first = {
             let bridge = bridge.clone();
             tokio::spawn(async move {
                 bridge
                     .decide(&json!({
                         "conversationId": "conv-1",
-                        "toolCall": { "name": "run_command", "args": { "CommandLine": "ls" } },
+                        "toolCall": { "name": "view_file", "args": { "AbsolutePath": ordinary } },
                     }))
                     .await
             })
@@ -1419,7 +1443,7 @@ mod tests {
             .await;
         assert_eq!(first.await.unwrap().0, Decision::Allow);
 
-        // Second call: a path escaping the workspace must still prompt.
+        // Same tool, path outside the workspace: still the user's call.
         let second = {
             let bridge = bridge.clone();
             tokio::spawn(async move {
@@ -1431,9 +1455,7 @@ mod tests {
                     .await
             })
         };
-        let raw = rx.recv().await.unwrap().unwrap();
-        let request: Value = serde_json::from_str(&raw).unwrap();
-        assert_eq!(request["method"], "session/request_permission");
+        let request = expect_permission_request(&mut rx).await;
         bridge
             .resolve_response(
                 &request["id"],
@@ -1484,6 +1506,112 @@ mod tests {
             rx.try_recv().is_err(),
             "the remembered reject must not prompt again"
         );
+    }
+
+    /// Records a remembered "Always allow" for `run_command` and returns the bridge.
+    async fn bridge_with_run_command_always_allowed(
+        workspace: &str,
+    ) -> (PermissionBridge, mpsc::UnboundedReceiver<Option<String>>) {
+        let (bridge, mut rx) = test_bridge(workspace, &[]).await;
+        let first = {
+            let bridge = bridge.clone();
+            tokio::spawn(async move {
+                bridge
+                    .decide(&json!({
+                        "conversationId": "conv-1",
+                        "toolCall": { "name": "run_command", "args": { "CommandLine": "ls" } },
+                    }))
+                    .await
+            })
+        };
+        let request = expect_permission_request(&mut rx).await;
+        bridge
+            .resolve_response(
+                &request["id"],
+                Some(json!({ "outcome": { "outcome": "selected", "optionId": "allow_always" } })),
+            )
+            .await;
+        assert_eq!(first.await.unwrap().0, Decision::Allow);
+        (bridge, rx)
+    }
+
+    /// Pins a known gap, tracked in TODO.md: sticky answers are keyed by tool
+    /// name, so approving one command approves every later command. This test
+    /// asserts today's behaviour deliberately -- when the gap is closed it will
+    /// fail, which is the point: the fix must come with a doc change.
+    #[tokio::test]
+    async fn always_allow_is_remembered_per_tool_not_per_command() {
+        let workspace = std::env::temp_dir().join("agy-acp-always-per-tool-test");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let (bridge, mut rx) =
+            bridge_with_run_command_always_allowed(&workspace.display().to_string()).await;
+
+        // A completely different, destructive command. "Always allow" was never
+        // asked about this one, and the user is not consulted.
+        let (decision, reason) = bridge
+            .decide(&json!({
+                "conversationId": "conv-1",
+                "toolCall": { "name": "run_command", "args": { "CommandLine": "rm -rf build" } },
+            }))
+            .await;
+        assert_eq!(decision, Decision::Allow, "{reason}");
+        assert!(
+            rx.try_recv().is_err(),
+            "today the user is not asked again -- this is the gap, not the goal"
+        );
+    }
+
+    /// Pins the other half of the same gap: a command is one opaque string, so
+    /// the containment check never sees the path inside it. `absolute_paths`
+    /// keeps strings that *start with* `/`, and "cat /etc/shadow" does not.
+    #[tokio::test]
+    async fn a_path_inside_a_command_string_is_invisible_to_the_containment_check() {
+        let workspace = std::env::temp_dir().join("agy-acp-command-path-test");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let (bridge, mut rx) =
+            bridge_with_run_command_always_allowed(&workspace.display().to_string()).await;
+
+        let outside = json!({
+            "conversationId": "conv-1",
+            "toolCall": { "name": "run_command", "args": { "CommandLine": "cat /etc/shadow" } },
+        });
+        assert!(
+            outside_workspace(
+                &outside["toolCall"]["args"],
+                &[PathBuf::from(&workspace)]
+            )
+            .is_none(),
+            "the embedded path is not recognised as a path at all"
+        );
+
+        let (decision, reason) = bridge.decide(&outside).await;
+        assert_eq!(decision, Decision::Allow, "{reason}");
+        assert!(rx.try_recv().is_err(), "and so the user is not asked");
+
+        // The denylist is what happens to catch the neighbouring case, by
+        // substring and not by containment -- a second line, not the defence.
+        let asking = {
+            let bridge = bridge.clone();
+            tokio::spawn(async move {
+                bridge
+                    .decide(&json!({
+                        "conversationId": "conv-1",
+                        "toolCall": {
+                            "name": "run_command",
+                            "args": { "CommandLine": "cat /etc/passwd" },
+                        },
+                    }))
+                    .await
+            })
+        };
+        let request = expect_permission_request(&mut rx).await;
+        bridge
+            .resolve_response(
+                &request["id"],
+                Some(json!({ "outcome": { "outcome": "selected", "optionId": "reject_once" } })),
+            )
+            .await;
+        assert_eq!(asking.await.unwrap().0, Decision::Deny);
     }
 
     /// Network tools read without writing, so they are the ones most likely to be

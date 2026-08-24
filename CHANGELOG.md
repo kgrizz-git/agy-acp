@@ -28,6 +28,38 @@ anywhere yet; see "Verify the port under Paseo" in [TODO.md](TODO.md).
 
 ### Fixed
 
+- Two paths reached around the permission boundary. `outside_workspace()` only
+  looked at arguments beginning with `/`, so `../../secret` and `~/.ssh/id_rsa`
+  were never judged against the workspace and were auto-allowed; relative and
+  home-relative arguments are now normalized lexically against each root. And a
+  remembered "Always allow" was consulted before any containment or
+  sensitive-path check, so one approval of `view_file` opened `.env` for the rest
+  of the session; a sticky allow now falls through to asking when the call leaves
+  the workspace or names something sensitive. A sticky reject still applies
+  immediately.
+- A remembered "Always reject" deadlocked the bridge. The branch holding it took
+  the state mutex in an `if let` scrutinee, whose guard lives to the end of the
+  body, and the body awaited the same mutex. It had no test until now, so it went
+  unnoticed since the feature landed.
+- A single malformed byte on agy's stdout hung the turn. The drain loop ended on
+  the first read error -- and invalid UTF-8 is a read error -- after which nothing
+  read the pipe, so the child blocked writing and `child.wait()` never returned.
+  Frames are read as bytes and decoded lossily, and a genuine I/O error drains
+  the remainder before giving up.
+- `session/update` notifications could corrupt a response. The stream reader held
+  its own `io::stdout()` handle while the main loop wrote the same fd, so two
+  writers could interleave mid-line. Every notification now goes through the
+  main loop's output channel, as the permission bridge already did.
+- Cancelling a turn could cancel the wrong one. The cancellation map held one
+  token per session, so a second prompt for that session overwrote the first's
+  token and a cancel flipped the wrong flag; whichever turn finished first
+  removed the other's token entirely. Tokens are now per turn, removed by
+  identity, and a cancel stops every turn in the session.
+- `sessions.json` grew without bound -- 910 entries on one machine, 553 never
+  bound to a conversation -- and every turn rewrote the whole file. It is capped
+  at 256 entries, dropping unresumable ones first and oldest first within each
+  group. In-memory eviction also picked an arbitrary `HashMap` key, so it could
+  drop a live session and keep a dead one; it is now least-recently-used.
 - Model selection sent agy a model name it rejects. `agy models` prints
   `id<TAB>Human Label`; the whole line was being used as the id, so `--model`
   received `gemini-3.7-flash-high\tGemini 3.7 Flash (High)`. ACP now gets the id
@@ -58,6 +90,13 @@ anywhere yet; see "Verify the port under Paseo" in [TODO.md](TODO.md).
 
 ### Known issues
 
+- An "Always allow" answer is keyed by tool name, not by arguments, so approving
+  `run_command` once approves every later command in that session -- `rm -rf` and
+  all. The containment and sensitive-path checks still run on a remembered allow,
+  but they read arguments as paths and a command line is one opaque string, so
+  `cat /etc/shadow` is not recognised as naming a path at all. Documented in the
+  README under "What 'Always' remembers", pinned by two tests that assert the
+  current behaviour on purpose, and tracked in TODO.md.
 - `test_read_response_from_db` fails under `cargo test -- --include-ignored`. It
   is upstream's test and upstream's implementation, `#[ignore]`d since it was
   written, so it has not run in either lineage in months: it expects
