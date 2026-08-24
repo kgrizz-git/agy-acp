@@ -33,11 +33,17 @@ pub struct Adapter {
     pub permission_bridge: Option<PermissionBridge>,
     /// Private workspace root supplying the `PreToolUse` hook to agy.
     pub hook_root_dir: Option<PathBuf>,
+    /// Monotonic recency counter handed out by `touch_session`. A counter rather
+    /// than wall-clock time so eviction order survives a clock that jumps.
+    pub session_tick: u64,
 }
 
 /// Print-mode timeout used when permission prompts are on. Must outlast the
 /// bridge's own wait so an unanswered prompt ends as a deny, not a failed turn.
 const PERMISSION_PRINT_TIMEOUT: &str = "60m";
+/// Hard cap on persisted sessions in sessions.json. The file is fully rewritten
+/// on every turn, so keeping it bounded is what stops it growing without limit.
+const MAX_PERSISTED_SESSIONS: usize = 256;
 
 impl Adapter {
     pub const MODEL_CONFIG_ID: &'static str = "model";
@@ -66,6 +72,7 @@ impl Adapter {
             skip_naration,
             permission_bridge: None,
             hook_root_dir: None,
+            session_tick: 0,
         }
     }
 
@@ -248,6 +255,10 @@ impl Adapter {
         let Some(_lock) = self.lock_state_file() else {
             return;
         };
+        let updated_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
         let mut store = self.load_store_inner();
         store.sessions.insert(
             session_id.to_string(),
@@ -255,12 +266,45 @@ impl Adapter {
                 conversation_id: conversation_id.map(String::from),
                 last_step_idx,
                 model_id: model_id.map(String::from),
+                updated_at,
             },
         );
+        // The just-written entry must survive pruning even if it is old; its
+        // caller still needs it on the next turn.
+        Self::prune_store(&mut store, session_id);
         let tmp = self.state_file.with_extension("tmp");
         if let Ok(file) = fs::File::create(&tmp) {
             if serde_json::to_writer_pretty(&file, &store).is_ok() {
                 let _ = fs::rename(&tmp, &self.state_file);
+            }
+        }
+    }
+
+    /// Drop persisted sessions past the cap. Unbindable entries (no
+    /// conversation_id, so they can never be resumed) are removed before bound
+    /// ones, and within each group the oldest `updated_at` goes first. The entry
+    /// just written is never removed, even if the order would pick it.
+    fn prune_store(store: &mut SessionStore, just_written: &str) {
+        while store.sessions.len() > MAX_PERSISTED_SESSIONS {
+            let victim = store
+                .sessions
+                .iter()
+                .filter(|(id, _s)| *id != just_written)
+                .filter(|(_, s)| s.conversation_id.is_none())
+                .min_by_key(|(_, s)| s.updated_at)
+                .or_else(|| {
+                    store
+                        .sessions
+                        .iter()
+                        .filter(|(id, _s)| *id != just_written)
+                        .min_by_key(|(_, s)| s.updated_at)
+                })
+                .map(|(id, _)| id.clone());
+            match victim {
+                Some(id) => {
+                    store.sessions.remove(&id);
+                }
+                None => break,
             }
         }
     }
@@ -284,12 +328,49 @@ impl Adapter {
         })
     }
 
-    fn evict_if_needed(&mut self) {
+    /// Advance the recency clock and stamp the named session, if present, with
+    /// the new tick. Callers use this before serving any request so the session
+    /// they are about to use is never the one evicted.
+    fn touch_session(&mut self, session_id: &str) {
+        self.session_tick += 1;
+        if let Some(session) = self.sessions.get_mut(session_id) {
+            session.last_used = self.session_tick;
+        }
+    }
+
+    pub(crate) fn evict_if_needed(&mut self) {
         const MAX_SESSIONS: usize = 64;
         while self.sessions.len() >= MAX_SESSIONS {
-            if let Some(key) = self.sessions.keys().next().cloned() {
-                self.sessions.remove(&key);
+            // Drop the entry least recently used, not whichever HashMap key the
+            // iterator happens to land on first — that could evict a live turn.
+            let victim = self
+                .sessions
+                .iter()
+                .min_by_key(|(_, s)| s.last_used)
+                .map(|(id, _)| id.clone());
+            match victim {
+                Some(key) => {
+                    self.sessions.remove(&key);
+                }
+                None => break,
             }
+        }
+    }
+
+    /// Build a `Session` stamped with the current recency tick. Every insert goes
+    /// through here so no session can be created without one.
+    fn make_session(
+        &mut self,
+        conversation_id: Option<String>,
+        last_step_idx: i64,
+        model_id: Option<String>,
+    ) -> Session {
+        self.session_tick += 1;
+        Session {
+            conversation_id,
+            last_step_idx,
+            model_id,
+            last_used: self.session_tick,
         }
     }
 
@@ -301,17 +382,13 @@ impl Adapter {
         if !self.sessions.contains_key(session_id) {
             self.evict_if_needed();
         }
-        self.sessions.insert(
-            session_id.to_string(),
-            Session {
-                conversation_id: Some(conversation_id),
-                last_step_idx,
-                // Sessions written before the parser was fixed hold an id with the
-                // display label glued on; agy rejects that outright, so repair it
-                // here rather than failing every resumed thread.
-                model_id: model_id.as_deref().map(Self::sanitize_model_id),
-            },
+        // Built before the insert so the recency tick does not alias the map borrow.
+        let session = self.make_session(
+            Some(conversation_id),
+            last_step_idx,
+            model_id.as_deref().map(Self::sanitize_model_id),
         );
+        self.sessions.insert(session_id.to_string(), session);
         true
     }
 
@@ -335,14 +412,8 @@ impl Adapter {
     pub fn handle_session_new(&mut self, id: Value) -> JsonRpcResponse {
         let session_id = Uuid::new_v4().to_string();
         self.evict_if_needed();
-        self.sessions.insert(
-            session_id.clone(),
-            Session {
-                conversation_id: None,
-                last_step_idx: -1,
-                model_id: None,
-            },
-        );
+        let session = self.make_session(None, -1, None);
+        self.sessions.insert(session_id.clone(), session);
         let result = self.session_config_result_json(&session_id, None);
         JsonRpcResponse {
             jsonrpc: "2.0",
@@ -375,6 +446,7 @@ impl Adapter {
             .unwrap()];
         }
 
+        self.touch_session(session_id);
         if !self.sessions.contains_key(session_id) && !self.restore_session_state(session_id) {
             return vec![serde_json::to_string(&JsonRpcResponse {
                 jsonrpc: "2.0",
@@ -460,6 +532,7 @@ impl Adapter {
             };
         }
 
+        self.touch_session(session_id);
         if self.sessions.contains_key(session_id) || self.restore_session_state(session_id) {
             let model_id = self
                 .sessions
@@ -501,6 +574,7 @@ impl Adapter {
             };
         }
 
+        self.touch_session(session_id);
         if !self.sessions.contains_key(session_id) {
             let _ = self.restore_session_state(session_id);
         }
@@ -589,6 +663,7 @@ impl Adapter {
             };
         }
 
+        self.touch_session(session_id);
         if !self.sessions.contains_key(session_id) {
             let _ = self.restore_session_state(session_id);
         }
@@ -651,6 +726,7 @@ impl Adapter {
             .and_then(|v| v.as_str())
             .unwrap_or("");
 
+        self.touch_session(session_id);
         if !session_id.is_empty() && !self.sessions.contains_key(session_id) {
             let _ = self.restore_session_state(session_id);
         }

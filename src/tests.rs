@@ -627,6 +627,7 @@ fn test_session_load_restores_persisted_session() {
         skip_naration: false,
         permission_bridge: None,
         hook_root_dir: None,
+        session_tick: 0,
     };
     adapter.persist_session("sess-1", Some("conv-abc"), 5, None);
 
@@ -663,6 +664,7 @@ fn test_session_load_rejects_unknown_session() {
         skip_naration: false,
         permission_bridge: None,
         hook_root_dir: None,
+        session_tick: 0,
     };
 
     let output = adapter.handle_session_load(json!(9), &json!({"sessionId": "missing"}));
@@ -772,6 +774,7 @@ fn test_session_load_replays_conversation_history() {
         skip_naration: false,
         permission_bridge: None,
         hook_root_dir: None,
+        session_tick: 0,
     };
     adapter.persist_session("sess-replay", Some("conv-replay"), 8, None);
 
@@ -897,6 +900,7 @@ fn test_session_resume_restores_persisted_session() {
         skip_naration: false,
         permission_bridge: None,
         hook_root_dir: None,
+        session_tick: 0,
     };
     adapter.persist_session("sess-r1", Some("conv-xyz"), 3, None);
 
@@ -940,6 +944,7 @@ fn test_session_resume_rejects_unknown_session() {
         skip_naration: false,
         permission_bridge: None,
         hook_root_dir: None,
+        session_tick: 0,
     };
 
     let response = adapter.handle_session_resume(json!(11), &json!({"sessionId": "nope"}));
@@ -982,6 +987,7 @@ fn test_session_resume_accepts_in_memory_session() {
         skip_naration: false,
         permission_bridge: None,
         hook_root_dir: None,
+        session_tick: 0,
     };
     adapter.sessions.insert(
         "sess-memory".to_string(),
@@ -989,6 +995,7 @@ fn test_session_resume_accepts_in_memory_session() {
             conversation_id: None,
             last_step_idx: -1,
             model_id: None,
+            last_used: 0,
         },
     );
 
@@ -1016,6 +1023,7 @@ fn test_session_load_accepts_in_memory_session_without_replay() {
         skip_naration: false,
         permission_bridge: None,
         hook_root_dir: None,
+        session_tick: 0,
     };
     adapter.sessions.insert(
         "sess-memory-load".to_string(),
@@ -1023,6 +1031,7 @@ fn test_session_load_accepts_in_memory_session_without_replay() {
             conversation_id: None,
             last_step_idx: -1,
             model_id: None,
+            last_used: 0,
         },
     );
 
@@ -1049,6 +1058,7 @@ fn test_session_resume_does_not_replay_history() {
         skip_naration: false,
         permission_bridge: None,
         hook_root_dir: None,
+        session_tick: 0,
     };
     adapter.persist_session("sess-nr", Some("conv-nr"), 10, None);
 
@@ -1256,6 +1266,7 @@ fn test_persist_and_restore_session() {
         skip_naration: false,
         permission_bridge: None,
         hook_root_dir: None,
+        session_tick: 0,
     };
 
     adapter.persist_session("sess-1", Some("conv-abc"), 7, None);
@@ -1805,6 +1816,7 @@ fn test_session_set_model_persists() {
         skip_naration: false,
         permission_bridge: None,
         hook_root_dir: None,
+        session_tick: 0,
     };
 
     adapter.persist_session("sess-m1", Some("conv-m1"), 0, None);
@@ -1824,6 +1836,7 @@ fn test_session_set_model_persists() {
         skip_naration: false,
         permission_bridge: None,
         hook_root_dir: None,
+        session_tick: 0,
     };
     let restored = adapter2.restore_session("sess-m1");
     assert_eq!(
@@ -1847,6 +1860,7 @@ fn test_session_load_returns_models() {
             conversation_id: None,
             last_step_idx: -1,
             model_id: Some("Gemini 3.1 Pro (High)".to_string()),
+            last_used: 0,
         },
     );
     adapter.persist_session(
@@ -2203,4 +2217,178 @@ fn test_read_varint_rejects_an_overflowing_tenth_group() {
     let mut too_long = vec![0x80u8; 10];
     too_long.push(0x01);
     assert_eq!(read_varint(&too_long), None);
+}
+
+/// The binding that matters survives a prune that drops the unbindable entries
+/// first, so a live conversation is never lost to make room for dead ones.
+#[test]
+fn persist_session_prunes_unbindable_entries_first() {
+    let root = std::env::temp_dir().join(format!("agy-acp-prune-{}", Uuid::new_v4()));
+    let _ = fs::create_dir_all(&root);
+
+    let adapter = Adapter {
+        sessions: HashMap::new(),
+        working_dir: root.to_string_lossy().to_string(),
+        state_file: root.join("sessions.json"),
+        conversations_dir: root.join("conversations"),
+        available_models: vec![],
+        skip_naration: false,
+        permission_bridge: None,
+        hook_root_dir: None,
+        session_tick: 0,
+    };
+    for i in 0..300 {
+        // Most entries can never be resumed; they must be the first to go.
+        let conv = if i == 50 { Some(format!("conv-bound-{i}")) } else { None };
+        adapter.persist_session(&format!("sess-{i}"), conv.as_deref(), 0, None);
+    }
+
+    let file = fs::read_to_string(root.join("sessions.json")).unwrap();
+    let store: crate::types::SessionStore = serde_json::from_str(&file).unwrap();
+    assert!(
+        store.sessions.len() <= 256,
+        "persisted sessions must stay under the cap, got {}",
+        store.sessions.len()
+    );
+    assert!(
+        store.sessions.contains_key("sess-50"),
+        "the bound entry must survive the prune"
+    );
+    assert_eq!(
+        store.sessions.values().filter(|s| s.conversation_id.is_some()).count(),
+        1,
+        "the single bound entry must be kept while null entries are dropped first"
+    );
+    assert!(
+        store.sessions.len() < 300,
+        "null-conversation entries must have been dropped to meet the cap"
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+/// The entry just written must not be evicted even when the store is over cap.
+#[test]
+fn persist_session_keeps_the_entry_it_just_wrote() {
+    let root = std::env::temp_dir().join(format!("agy-acp-keep-{}", Uuid::new_v4()));
+    let _ = fs::create_dir_all(&root);
+
+    let adapter = Adapter {
+        sessions: HashMap::new(),
+        working_dir: root.to_string_lossy().to_string(),
+        state_file: root.join("sessions.json"),
+        conversations_dir: root.join("conversations"),
+        available_models: vec![],
+        skip_naration: false,
+        permission_bridge: None,
+        hook_root_dir: None,
+        session_tick: 0,
+    };
+    for i in 0..400 {
+        adapter.persist_session(&format!("old-{i}"), Some(format!("conv-{i}").as_str()), 0, None);
+    }
+    adapter.persist_session("just-written", Some("conv-just"), 0, None);
+
+    let store: crate::types::SessionStore =
+        serde_json::from_str(&fs::read_to_string(root.join("sessions.json")).unwrap()).unwrap();
+    assert!(
+        store.sessions.contains_key("just-written"),
+        "the session written last must still be present after pruning"
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+/// Entries written before `updated_at` existed deserialize as 0 and are thus the
+/// elders when pruning — backwards compatibility without a migration step.
+#[test]
+fn stored_sessions_without_updated_at_load_as_oldest() {
+    let root = std::env::temp_dir().join(format!("agy-acp-legacy-{}", Uuid::new_v4()));
+    let _ = fs::create_dir_all(&root);
+
+    let json = json!({
+        "sessions": {
+            "sess-a": { "conversation_id": "conv-a", "last_step_idx": 1 },
+            "sess-b": { "conversation_id": "conv-b", "last_step_idx": 2 },
+        }
+    });
+    fs::write(root.join("sessions.json"), serde_json::to_string_pretty(&json).unwrap()).unwrap();
+
+    let adapter = Adapter {
+        sessions: HashMap::new(),
+        working_dir: root.to_string_lossy().to_string(),
+        state_file: root.join("sessions.json"),
+        conversations_dir: root.join("conversations"),
+        available_models: vec![],
+        skip_naration: false,
+        permission_bridge: None,
+        hook_root_dir: None,
+        session_tick: 0,
+    };
+    let store = adapter.load_store();
+    assert_eq!(store.sessions.len(), 2, "both legacy entries should load");
+    assert!(
+        store
+            .sessions
+            .values()
+            .all(|s| s.updated_at == 0),
+        "missing updated_at must default to 0"
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+/// Eviction drops the least-recently-used session, leaving a freshly touched one
+/// alive even when it was inserted before the victim.
+#[test]
+fn evict_if_needed_drops_the_least_recently_used_session() {
+    use crate::types::Session;
+
+    let mut adapter = Adapter {
+        sessions: HashMap::new(),
+        working_dir: "/tmp".to_string(),
+        state_file: PathBuf::from("/tmp/nonexistent-agy-acp-sessions.json"),
+        conversations_dir: PathBuf::from("/tmp/conversations"),
+        available_models: vec![],
+        skip_naration: false,
+        permission_bridge: None,
+        hook_root_dir: None,
+        session_tick: 0,
+    };
+    for i in 0..64 {
+        adapter.sessions.insert(
+            format!("sess-{i}"),
+            Session {
+                conversation_id: None,
+                last_step_idx: -1,
+                model_id: None,
+                last_used: i as u64,
+            },
+        );
+    }
+    // Mark one of the earliest as most-recently-used.
+    adapter.sessions.get_mut("sess-1").unwrap().last_used = 1000;
+    adapter.sessions.insert(
+        "sess-new".to_string(),
+        Session {
+            conversation_id: None,
+            last_step_idx: -1,
+            model_id: None,
+            last_used: 1001,
+        },
+    );
+    adapter.evict_if_needed();
+
+    assert!(
+        adapter.sessions.contains_key("sess-1"),
+        "a touched (recently used) session must survive eviction"
+    );
+    assert!(
+        adapter.sessions.contains_key("sess-new"),
+        "the newest session must survive eviction"
+    );
+    assert!(
+        !adapter.sessions.contains_key("sess-0"),
+        "the untouched, oldest-used session is the one evicted"
+    );
 }

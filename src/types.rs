@@ -41,6 +41,10 @@ pub struct StoredSession {
     /// Selected model ID for this session.
     #[serde(default)]
     pub model_id: Option<String>,
+    /// Unix seconds when this entry was last written. Entries written before
+    /// this field existed default to 0 and are pruned first.
+    #[serde(default)]
+    pub updated_at: u64,
 }
 
 /// Result of a test-only delta read from a conversation DB.
@@ -64,4 +68,7 @@ pub struct Session {
     pub last_step_idx: i64,
     /// Selected model ID for this session.
     pub model_id: Option<String>,
+    /// Monotonic tick of the most recent handler that touched this session.
+    /// Used to evict the least-recently-used session instead of an arbitrary one.
+    pub last_used: u64,
 }
