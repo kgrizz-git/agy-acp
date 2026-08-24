@@ -85,11 +85,17 @@ struct BridgeState {
     /// What may be approved without asking. Empty by default, so tests and any
     /// path that forgets to set it prompt for everything.
     policy: AutoAllowPolicy,
-    /// Whether this bridge denied a tool call during the running prompt. agy
-    /// reports a denial as a failed turn, which is indistinguishable from a real
-    /// provider failure by the time the adapter sees it — this is how the two are
-    /// told apart. Cleared when a prompt starts.
-    denied_during_prompt: bool,
+    /// Whether the *user* refused a tool call during the running prompt: they
+    /// picked a reject option, dismissed the request, or were asked and did not
+    /// answer. agy reports a refusal as a failed turn, indistinguishable from a
+    /// real provider failure by the time the adapter sees it, and this is how the
+    /// two are told apart. Cleared when a prompt starts.
+    ///
+    /// Deliberately not set by the bridge's own fail-closed denials — no session
+    /// to ask, client gone, the adapter's hook directory. Those are policy, and
+    /// treating them as a refusal would let one hide a genuine provider failure
+    /// later in the same turn.
+    refused_during_prompt: bool,
 }
 
 /// Shared handle to the permission bridge.
@@ -166,13 +172,17 @@ impl PermissionBridge {
         let mut state = self.state.lock().await;
         state.active_session = session_id.map(str::to_string);
         if state.active_session.is_some() {
-            state.denied_during_prompt = false;
+            state.refused_during_prompt = false;
         }
     }
 
-    /// Whether a tool call was denied during the prompt that just ran.
-    pub async fn denied_during_prompt(&self) -> bool {
-        self.state.lock().await.denied_during_prompt
+    /// Whether the user refused a tool call during the prompt that just ran.
+    pub async fn refused_during_prompt(&self) -> bool {
+        self.state.lock().await.refused_during_prompt
+    }
+
+    async fn mark_user_refusal(&self) {
+        self.state.lock().await.refused_during_prompt = true;
     }
 
     /// Routes an incoming JSON-RPC response back to the waiting hook. Returns
@@ -202,9 +212,6 @@ impl PermissionBridge {
         };
 
         let (decision, reason) = self.decide(&payload).await;
-        if decision == Decision::Deny {
-            self.state.lock().await.denied_during_prompt = true;
-        }
         let response = decision.as_hook_json(&reason).to_string();
         let _ = write_half.write_all(response.as_bytes()).await;
         let _ = write_half.write_all(b"\n").await;
@@ -273,6 +280,9 @@ impl PermissionBridge {
                 Decision::Allow => format!("Always allowed `{tool_name}` in this session."),
                 Decision::Deny => format!("Always rejected `{tool_name}` in this session."),
             };
+            if decision == Decision::Deny {
+                self.mark_user_refusal().await;
+            }
             return (decision, reason);
         }
 
@@ -312,6 +322,7 @@ impl PermissionBridge {
             Ok(Ok(value)) => value,
             _ => {
                 self.state.lock().await.pending.remove(&request_id);
+                self.mark_user_refusal().await;
                 return (
                     Decision::Deny,
                     "agy-acp: timed out waiting for a permission decision".to_string(),
@@ -366,6 +377,7 @@ impl PermissionBridge {
             .and_then(|v| v.as_str())
             .unwrap_or("cancelled");
         if kind != "selected" {
+            self.mark_user_refusal().await;
             return (
                 Decision::Deny,
                 "Permission request was cancelled.".to_string(),
@@ -391,6 +403,10 @@ impl PermissionBridge {
             ),
             _ => (Decision::Deny, false, "Declined by user.".to_string()),
         };
+
+        if decision == Decision::Deny {
+            self.mark_user_refusal().await;
+        }
 
         if sticky {
             self.state.lock().await.always.insert(always_key, decision);
@@ -772,6 +788,69 @@ mod tests {
 
         assert_eq!(decision, Decision::Deny);
         assert!(reason.contains("no ACP session"));
+    }
+
+    /// The adapter turns "the user refused" into stopReason refusal instead of a
+    /// provider error. A deny the bridge issued on its own must not claim that,
+    /// or it would suppress the error for a genuine failure later in the turn.
+    #[tokio::test]
+    async fn only_the_users_own_refusal_counts_as_a_refusal() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let bridge = PermissionBridge {
+            state: Arc::new(Mutex::new(BridgeState::default())),
+            out_tx: tx,
+            socket_path: Arc::new(PathBuf::from("/tmp/unused.sock")),
+        };
+        bridge.set_active_session(Some("session-1")).await;
+
+        // Fail-closed deny: no session is registered for this conversation and
+        // there is no active one to fall back to.
+        bridge.set_active_session(None).await;
+        let (decision, _) = bridge
+            .decide(&json!({
+                "conversationId": "conv-unknown",
+                "toolCall": { "name": "run_command", "args": { "CommandLine": "ls" } },
+            }))
+            .await;
+        assert_eq!(decision, Decision::Deny);
+        assert!(
+            !bridge.refused_during_prompt().await,
+            "a fail-closed deny is not the user refusing"
+        );
+
+        // The user's own answer.
+        bridge.set_active_session(Some("session-1")).await;
+        bridge.register_conversation("conv-1", "session-1").await;
+        let asking = {
+            let bridge = bridge.clone();
+            tokio::spawn(async move {
+                bridge
+                    .decide(&json!({
+                        "conversationId": "conv-1",
+                        "toolCall": { "name": "run_command", "args": { "CommandLine": "ls" } },
+                    }))
+                    .await
+            })
+        };
+        let raw = rx.recv().await.unwrap().unwrap();
+        let request: Value = serde_json::from_str(&raw).unwrap();
+        assert!(
+            bridge
+                .resolve_response(
+                    &request["id"],
+                    Some(json!({ "outcome": { "outcome": "selected", "optionId": "reject_once" } })),
+                )
+                .await
+        );
+        assert_eq!(asking.await.unwrap().0, Decision::Deny);
+        assert!(
+            bridge.refused_during_prompt().await,
+            "a selected reject option is the user refusing"
+        );
+
+        // A new prompt starts clean.
+        bridge.set_active_session(Some("session-1")).await;
+        assert!(!bridge.refused_during_prompt().await);
     }
 
     #[tokio::test]

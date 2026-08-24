@@ -807,10 +807,12 @@ impl Adapter {
 
         // Read before the active session is cleared: agy reports a refused tool
         // call as a failed turn, and only the bridge knows the refusal was the
-        // user's own answer rather than the provider breaking.
+        // user's own answer rather than the provider breaking. The bridge's own
+        // fail-closed denials do not count, or one of them could mask a real
+        // failure later in the same turn.
         let mut denied_by_user = false;
         if let Some(bridge) = self.permission_bridge.clone() {
-            denied_by_user = bridge.denied_during_prompt().await;
+            denied_by_user = bridge.refused_during_prompt().await;
             if let Some(conv_id) = bound_conv_id.as_deref() {
                 bridge.register_conversation(conv_id, session_id).await;
             }

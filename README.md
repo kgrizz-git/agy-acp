@@ -48,7 +48,6 @@ Add `agy-acp` as a custom agent server in your Zed settings (`~/.config/zed/sett
     "agy": {
       "type": "custom",
       "command": "agy-acp",
-      "args": [],
       "args": ["--permission-prompts"],
       "env": {}
     }
