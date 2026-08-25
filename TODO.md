@@ -50,15 +50,27 @@ Documented in the README under "What 'Always' remembers", with a warning to
 prefer **Allow** over **Always allow** for `run_command`. Three ways out, roughly
 in order of value:
 
-1. Do not offer "Always allow" for command-executing tools at all, or key the
-   sticky answer by `(session, tool, normalized command)` so approving
-   `cat README.md` does not approve `cat` on anything. The first is a few lines
-   and closes it completely; the second is friendlier and invites normalization
-   bugs. Either makes the prompt mean what a user reads it as meaning.
+1. Make the key as specific as the prompt. Either do not offer "Always allow"
+   for command-executing tools at all, or key the sticky answer by
+   `(session, tool, command string)` so approving `cat README.md` does not
+   approve `cat` on anything else. Note this is *not* the parsing problem in (2):
+   it needs only an equivalence test, and the minimum version is exact string
+   equality — no tokenization, no shell semantics. Normalization beyond
+   whitespace is an optional ergonomic layer and each step of it merges commands
+   that are not identical, which is how the current bug arose (keying on the tool
+   name is the degenerate case of normalizing everything away). Under-normalizing
+   costs a prompt; over-normalizing is a hole. The general rule: the sticky key
+   should be as specific as the checks that still apply to a remembered allow.
+   Tool-level keying is defensible for path-argument tools like `view_file`,
+   where containment and the sensitive-path list do constrain it; for command
+   tools those checks are inert, so the key must carry the command.
 2. Extract paths from a command line so containment applies to `run_command` at
    all — tokenize the string and treat `/`-, `~`- and `../`-bearing tokens as
-   paths. Shell quoting, expansion and substitution mean this can only ever be
-   best-effort; it must fail toward prompting, never toward allowing.
+   paths. This one really is parsing, and a harder job than (1): it has to find
+   every path the command touches, through pipes, `$VAR`, `$(...)`, subcommands
+   and attached flag values, and a path it fails to extract is a path that gets
+   allowed. It can never be complete, because the shell re-interprets the string
+   afterwards. Best-effort only, and it must fail toward prompting.
 3. Refuse destructive commands outright (`rm -rf`, `dd`, `mkfs`, `curl | sh`) and
    widen the sensitive-path list. Cheapest, and the weakest: a denylist over a
    string the shell will re-interpret is evaded by `cat .en"v"` or
