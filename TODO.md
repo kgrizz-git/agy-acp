@@ -76,8 +76,14 @@ in order of value:
    string the shell will re-interpret is evaded by `cat .en"v"` or
    `cat $HOME/.env`. Worth doing as depth, never as the boundary.
 
-Also: an "Always" answer cannot be revoked short of a new session. Consider
-exposing them, or expiring them with the turn.
+Two smaller things about the same map, worth fixing alongside whichever option
+is taken. An "Always" answer cannot be revoked within a session — consider
+exposing the remembered set, or expiring answers with the turn. And nothing ever
+removes an entry when a session ends, so `BridgeState.always` accumulates one per
+`(session, tool)` for the life of the process. It is bounded by how many sessions
+a single adapter serves and each entry is tiny, so this is untidiness rather than
+a leak that will bite; the fix is to drop a session's answers when its last turn
+finishes, which is also what would make "expire with the turn" cheap.
 
 #### Workspace-supplied hooks
 
