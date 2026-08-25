@@ -115,7 +115,7 @@ Set the `AGY_EXTRA_ARGS` environment variable to pass additional arguments to ev
 }
 ```
 
-Tool calls then arrive as ACP `session/request_permission` requests, with **Allow** / **Always allow** / **Reject** / **Always reject** options. See [What "Always" remembers](#what-always-remembers) — it is coarser than it looks.
+Tool calls then arrive as ACP `session/request_permission` requests, with **Allow once** / **Always allow \<tool\> this session** / **Reject** / **Always reject \<tool\> this session** options. The "always" labels name the tool deliberately: the answer covers every later call to it, not the file or command you were shown. See [What "Always" remembers](#what-always-remembers).
 
 This works by installing a `PreToolUse` hook for `agy` in a private directory of the adapter's own — nothing is written to your workspace or to your global `agy` config, so plain `agy` use in a terminal is unaffected.
 

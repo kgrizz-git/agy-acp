@@ -26,6 +26,14 @@ anywhere yet; see "Verify the port under Paseo" in [TODO.md](TODO.md).
   writes them, and the conversation id comes from the stream rather than from
   diffing DB filenames.
 
+### Changed
+
+- Permission prompt options say what they cover: "Always allow run_command this
+  session" rather than "Always allow". The answer applies to every later call to
+  that tool for the rest of the session, and the prompt -- which shows one
+  command -- is where someone decides. The ACP `kind` values are unchanged, so
+  hosts style and bind them as before.
+
 ### Fixed
 
 - Two paths reached around the permission boundary. `outside_workspace()` only

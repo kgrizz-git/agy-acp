@@ -328,7 +328,7 @@ impl PermissionBridge {
                     "kind": tool_kind(&tool_name),
                     "rawInput": args,
                 },
-                "options": permission_options(),
+                "options": permission_options(&tool_name),
             },
         });
 
@@ -459,12 +459,26 @@ const OPTION_ALLOW_ALWAYS: &str = "allow_always";
 const OPTION_REJECT_ONCE: &str = "reject_once";
 const OPTION_REJECT_ALWAYS: &str = "reject_always";
 
-fn permission_options() -> Value {
+/// The four answers offered with every prompt.
+///
+/// `kind` is the ACP enum the host styles on; `name` is free display text and is
+/// ours to word. The "always" labels name the tool and say "this session"
+/// because that is what the answer covers -- every later call to that tool, for
+/// this session only -- and the prompt is where someone decides, not the README.
+fn permission_options(tool_name: &str) -> Value {
     json!([
-        { "optionId": OPTION_ALLOW_ONCE, "name": "Allow", "kind": "allow_once" },
-        { "optionId": OPTION_ALLOW_ALWAYS, "name": "Always allow", "kind": "allow_always" },
+        { "optionId": OPTION_ALLOW_ONCE, "name": "Allow once", "kind": "allow_once" },
+        {
+            "optionId": OPTION_ALLOW_ALWAYS,
+            "name": format!("Always allow {tool_name} this session"),
+            "kind": "allow_always",
+        },
         { "optionId": OPTION_REJECT_ONCE, "name": "Reject", "kind": "reject_once" },
-        { "optionId": OPTION_REJECT_ALWAYS, "name": "Always reject", "kind": "reject_always" },
+        {
+            "optionId": OPTION_REJECT_ALWAYS,
+            "name": format!("Always reject {tool_name} this session"),
+            "kind": "reject_always",
+        },
     ])
 }
 
@@ -1542,6 +1556,53 @@ mod tests {
     /// name, so approving one command approves every later command. This test
     /// asserts today's behaviour deliberately -- when the gap is closed it will
     /// fail, which is the point: the fix must come with a doc change.
+    #[tokio::test]
+    async fn the_always_options_say_what_they_cover() {
+        let workspace = std::env::temp_dir().join("agy-acp-option-label-test");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let (bridge, mut rx) = test_bridge(&workspace.display().to_string(), &[]).await;
+
+        let asking = {
+            let bridge = bridge.clone();
+            tokio::spawn(async move {
+                bridge
+                    .decide(&json!({
+                        "conversationId": "conv-1",
+                        "toolCall": { "name": "run_command", "args": { "CommandLine": "ls" } },
+                    }))
+                    .await
+            })
+        };
+        let request = expect_permission_request(&mut rx).await;
+        let options = request["params"]["options"].as_array().unwrap().clone();
+
+        let named = |kind: &str| -> String {
+            options
+                .iter()
+                .find(|o| o["kind"] == kind)
+                .unwrap()["name"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        // The answer covers the tool for the session, so the label has to say so:
+        // this prompt is where someone decides, and it shows only one command.
+        assert_eq!(named("allow_always"), "Always allow run_command this session");
+        assert_eq!(named("reject_always"), "Always reject run_command this session");
+        // The ACP kinds stay standard so hosts can still style and bind them.
+        for kind in ["allow_once", "allow_always", "reject_once", "reject_always"] {
+            assert!(options.iter().any(|o| o["kind"] == kind), "missing {kind}");
+        }
+
+        bridge
+            .resolve_response(
+                &request["id"],
+                Some(json!({ "outcome": { "outcome": "selected", "optionId": "reject_once" } })),
+            )
+            .await;
+        assert_eq!(asking.await.unwrap().0, Decision::Deny);
+    }
+
     #[tokio::test]
     async fn always_allow_is_remembered_per_tool_not_per_command() {
         let workspace = std::env::temp_dir().join("agy-acp-always-per-tool-test");
