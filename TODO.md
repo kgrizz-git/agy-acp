@@ -77,13 +77,29 @@ in order of value:
    `cat $HOME/.env`. Worth doing as depth, never as the boundary.
 
 Two smaller things about the same map, worth fixing alongside whichever option
-is taken. An "Always" answer cannot be revoked within a session — consider
-exposing the remembered set, or expiring answers with the turn. And nothing ever
-removes an entry when a session ends, so `BridgeState.always` accumulates one per
-`(session, tool)` for the life of the process. It is bounded by how many sessions
-a single adapter serves and each entry is tiny, so this is untidiness rather than
-a leak that will bite; the fix is to drop a session's answers when its last turn
-finishes, which is also what would make "expire with the turn" cheap.
+is taken.
+
+An "Always" answer cannot be revoked within a session — consider exposing the
+remembered set, or expiring answers with the turn.
+
+And nothing ever removes an entry: `BridgeState.always` and
+`BridgeState.conversations` both accumulate for the life of the process, and only
+`pending` is ever cleaned up. There is no session-end hook to hang a cleanup on —
+ACP sends no close, and this adapter handles no session-end method, so a session
+simply stops being used and "its last turn" is not knowable. Each entry is two
+short strings, and the count is bounded by the sessions one adapter process
+serves, so this is untidiness rather than a leak that will bite.
+
+The cheap fix, if it is worth doing at all, is to hang it off the in-memory
+session map instead: `evict_if_needed` already drops the least recently used
+`Session`, so have it tell the bridge to forget that session's answers too. That
+bounds the bridge by the same 64 and gives "this session" a defensible meaning —
+answers last as long as the session is live in memory. A session restored from
+`sessions.json` afterwards would prompt again, which is the safe direction.
+
+Note the same absence has a visible consequence today: a session reloaded in the
+same process inherits the "Always" answers it was given earlier. That is within
+what the README promises, but it is worth deciding rather than inheriting.
 
 #### Workspace-supplied hooks
 
