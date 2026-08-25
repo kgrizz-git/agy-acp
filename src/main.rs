@@ -13,7 +13,7 @@ mod tests;
 
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
-use std::sync::{atomic::AtomicBool, Arc};
+use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use adapter::Adapter;
@@ -224,17 +224,11 @@ async fn main() {
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
-                // A prompt with no session id cannot be cancelled by id, so it
-                // gets an unregistered token rather than none at all -- the turn
-                // still runs and still reports its own error.
-                let registered = if session_id.is_empty() {
-                    None
-                } else {
-                    Some(active_cancellations.register(&session_id))
-                };
-                let cancelled = registered
-                    .clone()
-                    .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
+                // A prompt with no session id is malformed, but it still spawns a
+                // real agy turn, so it is registered under the id it was given --
+                // the empty one. A `session/cancel` naming that same id then
+                // reaches it, rather than it being the one turn nothing can stop.
+                let token = active_cancellations.register(&session_id);
                 let adapter = Arc::clone(&adapter);
                 let active_cancellations = active_cancellations.clone();
                 let out_tx = out_tx.clone();
@@ -244,12 +238,15 @@ async fn main() {
                     let output = {
                         let mut adapter = adapter.lock().await;
                         adapter
-                            .handle_session_prompt(id, &params, cancelled, adapter_notify_tx)
+                            .handle_session_prompt(
+                                id,
+                                &params,
+                                Arc::clone(&token),
+                                adapter_notify_tx,
+                            )
                             .await
                     };
-                    if let Some(token) = registered {
-                        active_cancellations.unregister(&session_id, &token);
-                    }
+                    active_cancellations.unregister(&session_id, &token);
                     for line in output {
                         let _ = out_tx.send(Some(line));
                     }
