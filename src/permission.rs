@@ -355,14 +355,6 @@ impl PermissionBridge {
         self.apply_outcome(&outcome, always_key, &tool_name).await
     }
 
-    /// Decides whether a tool call is dull enough to approve without asking,
-    /// returning the reason it was waved through.
-    ///
-    /// Two things keep this narrow. Reading is only harmless when it stays inside
-    /// the workspace — `view_file` will otherwise happily read `~/.ssh/id_rsa`, and
-    /// agy's own gate is off — so anything naming a path outside is still asked
-    /// about. And tools that reach the network are excluded even though they only
-    /// read: a URL is an exfiltration channel, not just a fetch.
     /// True when `args` leaves the workspace or names something sensitive — the
     /// two conditions that, whatever the policy, still require a prompt.
     async fn escapes_containment(&self, args: &Value) -> bool {
@@ -374,6 +366,14 @@ impl PermissionBridge {
             || string_args(args).iter().any(|arg| policy.is_sensitive(arg))
     }
 
+    /// Decides whether a tool call is dull enough to approve without asking,
+    /// returning the reason it was waved through.
+    ///
+    /// Two things keep this narrow. Reading is only harmless when it stays inside
+    /// the workspace — `view_file` will otherwise happily read `~/.ssh/id_rsa`, and
+    /// agy's own gate is off — so anything naming a path outside is still asked
+    /// about. And tools that reach the network are excluded even though they only
+    /// read: a URL is an exfiltration channel, not just a fetch.
     async fn auto_allow_reason(&self, tool_name: &str, args: &Value) -> Option<String> {
         let policy = {
             let state = self.state.lock().await;
@@ -957,8 +957,7 @@ mod tests {
                     .await
             })
         };
-        let raw = rx.recv().await.unwrap().unwrap();
-        let request: Value = serde_json::from_str(&raw).unwrap();
+        let request = expect_permission_request(&mut rx).await;
         assert!(
             bridge
                 .resolve_response(
@@ -1002,9 +1001,7 @@ mod tests {
             })
         };
 
-        let raw = rx.recv().await.unwrap().unwrap();
-        let request: Value = serde_json::from_str(&raw).unwrap();
-        assert_eq!(request["method"], "session/request_permission");
+        let request = expect_permission_request(&mut rx).await;
         assert_eq!(request["params"]["sessionId"], "session-1");
         assert_eq!(request["params"]["toolCall"]["title"], "Run `ls`");
 
@@ -1042,8 +1039,7 @@ mod tests {
             let payload = payload.clone();
             tokio::spawn(async move { bridge.decide(&payload).await })
         };
-        let raw = rx.recv().await.unwrap().unwrap();
-        let request: Value = serde_json::from_str(&raw).unwrap();
+        let request = expect_permission_request(&mut rx).await;
         bridge
             .resolve_response(
                 &request["id"],
@@ -1107,7 +1103,6 @@ mod tests {
         assert!(rx.try_recv().is_err(), "the user must not be prompted");
     }
 
-    /// Builds a bridge wired to a session, a workspace and an explicit policy.
     /// Waits for the bridge to ask the user, failing fast if it never does.
     ///
     /// A missing prompt is the interesting failure here -- it means a check was
@@ -1136,6 +1131,7 @@ mod tests {
             .expect("the bridge must decide on its own, not ask the user")
     }
 
+    /// Builds a bridge wired to a session, a workspace and an explicit policy.
     async fn test_bridge(
         workspace: &str,
         auto_allow: &[&str],
@@ -1223,9 +1219,7 @@ mod tests {
             })
         };
 
-        let raw = rx.recv().await.unwrap().unwrap();
-        let request: Value = serde_json::from_str(&raw).unwrap();
-        assert_eq!(request["method"], "session/request_permission");
+        let request = expect_permission_request(&mut rx).await;
         bridge
             .resolve_response(
                 &request["id"],
@@ -1290,9 +1284,7 @@ mod tests {
             })
         };
 
-        let raw = rx.recv().await.unwrap().unwrap();
-        let request: Value = serde_json::from_str(&raw).unwrap();
-        assert_eq!(request["method"], "session/request_permission");
+        let request = expect_permission_request(&mut rx).await;
 
         bridge
             .resolve_response(
@@ -1321,9 +1313,7 @@ mod tests {
             })
         };
 
-        let raw = rx.recv().await.unwrap().unwrap();
-        let request: Value = serde_json::from_str(&raw).unwrap();
-        assert_eq!(request["method"], "session/request_permission");
+        let request = expect_permission_request(&mut rx).await;
         bridge
             .resolve_response(
                 &request["id"],
@@ -1351,9 +1341,7 @@ mod tests {
             })
         };
 
-        let raw = rx.recv().await.unwrap().unwrap();
-        let request: Value = serde_json::from_str(&raw).unwrap();
-        assert_eq!(request["method"], "session/request_permission");
+        let request = expect_permission_request(&mut rx).await;
         bridge
             .resolve_response(
                 &request["id"],
@@ -1542,8 +1530,7 @@ mod tests {
                     .await
             })
         };
-        let raw = rx.recv().await.unwrap().unwrap();
-        let request: Value = serde_json::from_str(&raw).unwrap();
+        let request = expect_permission_request(&mut rx).await;
         bridge
             .resolve_response(
                 &request["id"],
@@ -1592,8 +1579,7 @@ mod tests {
                     .await
             })
         };
-        let raw = rx.recv().await.unwrap().unwrap();
-        let request: Value = serde_json::from_str(&raw).unwrap();
+        let request = expect_permission_request(&mut rx).await;
         bridge
             .resolve_response(
                 &request["id"],
@@ -1642,8 +1628,7 @@ mod tests {
                     .await
             })
         };
-        let raw = rx.recv().await.unwrap().unwrap();
-        let request: Value = serde_json::from_str(&raw).unwrap();
+        let request = expect_permission_request(&mut rx).await;
         bridge
             .resolve_response(
                 &request["id"],
@@ -1694,10 +1679,6 @@ mod tests {
         (bridge, rx)
     }
 
-    /// Pins a known gap, tracked in TODO.md: sticky answers are keyed by tool
-    /// name, so approving one command approves every later command. This test
-    /// asserts today's behaviour deliberately -- when the gap is closed it will
-    /// fail, which is the point: the fix must come with a doc change.
     #[tokio::test]
     async fn the_always_options_say_what_they_cover() {
         let workspace = std::env::temp_dir().join("agy-acp-option-label-test");
@@ -1745,6 +1726,10 @@ mod tests {
         assert_eq!(asking.await.unwrap().0, Decision::Deny);
     }
 
+    /// Pins a known gap, tracked in TODO.md: sticky answers are keyed by tool
+    /// name, so approving one command approves every later command. This test
+    /// asserts today's behaviour deliberately -- when the gap is closed it will
+    /// fail, which is the point: the fix must come with a doc change.
     #[tokio::test]
     async fn always_allow_is_remembered_per_tool_not_per_command() {
         let workspace = std::env::temp_dir().join("agy-acp-always-per-tool-test");
@@ -1877,8 +1862,7 @@ mod tests {
             })
         };
 
-        let raw = rx.recv().await.unwrap().unwrap();
-        let request: Value = serde_json::from_str(&raw).unwrap();
+        let request = expect_permission_request(&mut rx).await;
         bridge
             .resolve_response(
                 &request["id"],

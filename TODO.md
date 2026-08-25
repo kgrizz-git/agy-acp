@@ -101,6 +101,26 @@ Note the same absence has a visible consequence today: a session reloaded in the
 same process inherits the "Always" answers it was given earlier. That is within
 what the README promises, but it is worth deciding rather than inheriting.
 
+#### A relative argument with no `..` is never judged a path
+
+`outside_workspace()` treats a string as a path when it starts with `/` or `~`,
+or carries a `..` component — everything else is left alone so an ordinary search
+query does not start prompting. That leaves a shape uncovered: `link/secret.txt`,
+where `link` is a symlink inside the workspace pointing out of it, matches none
+of the three tests and is never judged against the roots. The absolute spelling
+of the same path is caught, because `is_inside` resolves it.
+
+Closing it means resolving every relative-looking string, and the cost is
+prompts on strings that were never paths. Two things make it narrower than it
+sounds: only auto-allowed tools reach this at all, and a resolve that lands
+inside the workspace is silent, so the false-positive rate is the rate at which
+queries happen to name real files outside the workspace. Worth measuring against
+real agy traffic before choosing, since the alternative — a per-tool list of
+which argument fields are paths — trades generality for knowing agy's schema.
+
+Raised in review on the symlink fix; the README's containment bullet describes
+what is checked, so it moves with any change here.
+
 #### Workspace-supplied hooks
 
 the adapter passes the user workspace as an `--add-dir`, and `agy` discovers
