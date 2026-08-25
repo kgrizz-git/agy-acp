@@ -649,12 +649,19 @@ fn outside_workspace(args: &Value, roots: &[PathBuf]) -> Option<String> {
 
 /// True if `path` normalizes (resolving `.` and `..` textually) inside any root.
 ///
+/// A relative path is relative to the workspace, so it is joined to each root
+/// before being judged: `sub/../file.txt` stays inside, `../secret` does not.
+///
 /// Lexical only: the file need not exist, and symlinks are deliberately not
 /// resolved — `is_inside` handles symlinks for the absolute paths that have them.
 fn is_inside_lexical(path: &str, roots: &[PathBuf]) -> bool {
-    let normalized = lexical_normalize(path);
     roots.iter().any(|root| {
         let root_norm = lexical_normalize(&root.display().to_string());
+        let normalized = if path.starts_with('/') {
+            lexical_normalize(path)
+        } else {
+            lexical_normalize(&format!("{root_norm}/{path}"))
+        };
         normalized == root_norm || normalized.starts_with(&format!("{root_norm}/"))
     })
 }
@@ -1109,6 +1116,16 @@ mod tests {
         request
     }
 
+    /// Waits for a decision the bridge reaches on its own, failing fast if it
+    /// asks instead. The mirror of `expect_permission_request`: an unwanted
+    /// prompt goes unanswered here and would otherwise block for the whole
+    /// nine-minute response timeout, reading as a hung suite, not a red test.
+    async fn expect_auto_decision(bridge: &PermissionBridge, payload: Value) -> (Decision, String) {
+        tokio::time::timeout(std::time::Duration::from_secs(5), bridge.decide(&payload))
+            .await
+            .expect("the bridge must decide on its own, not ask the user")
+    }
+
     async fn test_bridge(
         workspace: &str,
         auto_allow: &[&str],
@@ -1343,17 +1360,46 @@ mod tests {
         let (bridge, mut rx) = test_bridge(&workspace.display().to_string(), READ_TOOLS).await;
 
         let target = format!("{}/sub/../file.txt", workspace.display());
-        let (decision, reason) = bridge
-            .decide(&json!({
+        let (decision, reason) = expect_auto_decision(
+            &bridge,
+            json!({
                 "conversationId": "conv-1",
                 "toolCall": { "name": "view_file", "args": { "AbsolutePath": target } },
-            }))
-            .await;
+            }),
+        )
+        .await;
 
         assert_eq!(
             decision,
             Decision::Allow,
             "a `..` that stays inside must auto-allow"
+        );
+        assert!(reason.contains("Auto-allowed"), "{reason}");
+        assert!(rx.try_recv().is_err(), "the user must not be prompted");
+    }
+
+    #[tokio::test]
+    async fn a_relative_dot_dot_that_stays_inside_the_workspace_is_still_inside() {
+        let workspace = std::env::temp_dir().join("agy-acp-relative-dotdot-test");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let (bridge, mut rx) = test_bridge(&workspace.display().to_string(), READ_TOOLS).await;
+
+        // Relative to the workspace this is just `file.txt`. Normalizing it without
+        // the workspace leaves a rootless `file.txt`, which matches no root and
+        // would prompt for a read that never leaves the workspace.
+        let (decision, reason) = expect_auto_decision(
+            &bridge,
+            json!({
+                "conversationId": "conv-1",
+                "toolCall": { "name": "view_file", "args": { "AbsolutePath": "sub/../file.txt" } },
+            }),
+        )
+        .await;
+
+        assert_eq!(
+            decision,
+            Decision::Allow,
+            "a workspace-relative `..` that stays inside must auto-allow"
         );
         assert!(reason.contains("Auto-allowed"), "{reason}");
         assert!(rx.try_recv().is_err(), "the user must not be prompted");

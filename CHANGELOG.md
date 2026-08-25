@@ -39,7 +39,8 @@ anywhere yet; see "Verify the port under Paseo" in [TODO.md](TODO.md).
 - Two paths reached around the permission boundary. `outside_workspace()` only
   looked at arguments beginning with `/`, so `../../secret` and `~/.ssh/id_rsa`
   were never judged against the workspace and were auto-allowed; relative and
-  home-relative arguments are now normalized lexically against each root. And a
+  home-relative arguments are now resolved from each root and normalized
+  lexically, so `sub/../file.txt` is judged inside and `../secret` outside. And a
   remembered "Always allow" was consulted before any containment or
   sensitive-path check, so one approval of `view_file` opened `.env` for the rest
   of the session; a sticky allow now falls through to asking when the call leaves
@@ -105,6 +106,12 @@ anywhere yet; see "Verify the port under Paseo" in [TODO.md](TODO.md).
   `cat /etc/shadow` is not recognised as naming a path at all. Documented in the
   README under "What 'Always' remembers", pinned by two tests that assert the
   current behaviour on purpose, and tracked in TODO.md.
+- The output channel is unbounded. Every notification now goes through one
+  `mpsc` to the single stdout writer, so a host that reads its end of the pipe
+  more slowly than agy produces events makes that queue grow without a ceiling.
+  Bounding it would push the backpressure onto agy, which is the right shape but
+  couples a stalled host to agy's progress, so it is measured and decided rather
+  than swapped in. Tracked in TODO.md.
 - `test_read_response_from_db` fails under `cargo test -- --include-ignored`. It
   is upstream's test and upstream's implementation, `#[ignore]`d since it was
   written, so it has not run in either lineage in months: it expects
