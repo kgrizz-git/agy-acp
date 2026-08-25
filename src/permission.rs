@@ -64,6 +64,9 @@ impl Decision {
 
 /// Remembered "always" answers, keyed by session and tool name.
 ///
+/// In memory only, and never cleared: they are scoped to one session id and die
+/// with the process, so a reloaded session in a fresh process asks again.
+///
 /// Tool name, not arguments: one "always allow" on `run_command` covers every
 /// later command in the session. Containment and sensitive-path checks still run
 /// on a remembered allow, but they read arguments as paths and a command line is

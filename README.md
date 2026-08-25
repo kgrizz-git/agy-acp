@@ -142,6 +142,8 @@ Whatever is enabled, three limits still apply:
 
 An "Always allow" or "Always reject" is remembered for **the rest of the session**, keyed by the *tool* — not by the file, the command, or the arguments you were shown when you answered.
 
+It is a preference held in memory, not a stored grant: answers are scoped to one session id, are never written to disk, and are forgotten when the adapter process exits. Restart or reconnect your host — even reopening the same thread — and you will be asked again.
+
 That distinction matters most for `run_command`. Approving `run_command` once with **Always allow** approves *every* later command in that session — `rm -rf build` included — without asking again. The prompt shows you one command; the answer covers the tool.
 
 Two checks still apply to a remembered **allow**, and will bring the prompt back:
@@ -156,7 +158,7 @@ But those checks read the tool's arguments as *paths*, and a shell command is a 
 
 A remembered **reject** always applies immediately, with no such escape.
 
-There is no way to revoke an "Always" answer short of starting a new session.
+There is no way to revoke an "Always" answer within a session; starting a new one, or restarting the host, clears it.
 
 ## Configuration & Environment
 
