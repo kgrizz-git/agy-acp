@@ -645,12 +645,13 @@ fn outside_workspace(args: &Value, roots: &[PathBuf]) -> Option<String> {
         return home_relative;
     }
 
-    // A `..` component can escape; judge it by lexical normalization only, since
-    // the target may not exist on disk and `canonicalize` would fail.
+    // A `..` component can escape, and does so through symlinks as well as
+    // textually, so this goes through the same resolving check as an absolute
+    // path rather than trusting normalization.
     string_args(args)
         .into_iter()
         .filter(|s| has_parent_component(s))
-        .find(|s| !is_inside_lexical(s, roots))
+        .find(|s| !roots.iter().any(|root| is_inside_from(s, root)))
 }
 
 /// True if `path` has a `..` component, rather than merely the two characters
@@ -659,23 +660,17 @@ fn has_parent_component(path: &str) -> bool {
     path.split('/').any(|component| component == "..")
 }
 
-/// True if `path` normalizes (resolving `.` and `..` textually) inside any root.
+/// True if `path` is inside `root`, taking a relative path as relative to it.
 ///
-/// A relative path is relative to the workspace, so it is joined to each root
-/// before being judged: `sub/../file.txt` stays inside, `../secret` does not.
-///
-/// Lexical only: the file need not exist, and symlinks are deliberately not
-/// resolved — `is_inside` handles symlinks for the absolute paths that have them.
-fn is_inside_lexical(path: &str, roots: &[PathBuf]) -> bool {
-    roots.iter().any(|root| {
-        let root_norm = lexical_normalize(&root.display().to_string());
-        let normalized = if path.starts_with('/') {
-            lexical_normalize(path)
-        } else {
-            lexical_normalize(&format!("{root_norm}/{path}"))
-        };
-        normalized == root_norm || normalized.starts_with(&format!("{root_norm}/"))
-    })
+/// The adapter runs with the workspace as its working directory, so that is what
+/// a relative argument is relative to: `sub/../file.txt` stays inside, `../secret`
+/// does not.
+fn is_inside_from(path: &str, root: &Path) -> bool {
+    if path.starts_with('/') {
+        return is_inside(path, root);
+    }
+    let root_norm = lexical_normalize(&root.display().to_string());
+    is_inside(&format!("{root_norm}/{path}"), root)
 }
 
 /// Resolves `.` and `..` components textually without touching the filesystem.
@@ -706,16 +701,19 @@ fn lexical_normalize(path: &str) -> String {
 }
 
 fn is_inside(path: &str, root: &Path) -> bool {
-    let candidates = [Some(PathBuf::from(path)), resolve(Path::new(path))];
+    // One candidate, and the resolved one wherever it exists. Accepting the path
+    // as written too would call `<root>/link/../secret` contained on the strength
+    // of its first component, even where `link` points out of the workspace and
+    // the kernel follows it there. Where nothing can be resolved -- a file not
+    // created yet -- normalizing at least cancels the `..` that `starts_with`
+    // would otherwise ignore.
+    let candidate =
+        resolve(Path::new(path)).unwrap_or_else(|| PathBuf::from(lexical_normalize(path)));
     let roots = [Some(root.to_path_buf()), resolve(root)];
-    for candidate in candidates.iter().flatten() {
-        for root in roots.iter().flatten() {
-            if candidate == root || candidate.starts_with(root) {
-                return true;
-            }
-        }
-    }
-    false
+    roots
+        .iter()
+        .flatten()
+        .any(|root| candidate == *root || candidate.starts_with(root))
 }
 
 /// Resolves a path, falling back to resolving the nearest existing ancestor so
@@ -1444,6 +1442,49 @@ mod tests {
             None,
             "a query is not a path, with or without a root"
         );
+    }
+
+    /// A symlink is the case lexical normalization cannot see: `link/..` cancels
+    /// on paper, but the kernel resolves `link` first and `..` then leaves from
+    /// wherever it landed.
+    #[test]
+    fn a_symlink_out_of_the_workspace_is_not_contained() {
+        let base = std::env::temp_dir().join(format!("agy-acp-symlink-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let workspace = base.join("work");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), "s").unwrap();
+        std::fs::write(workspace.join("file.txt"), "f").unwrap();
+        std::os::unix::fs::symlink(&outside, workspace.join("link")).unwrap();
+
+        let roots = vec![workspace.clone()];
+        let escaping = format!("{}/link/../outside/secret.txt", workspace.display());
+
+        assert_eq!(
+            outside_workspace(&json!({ "AbsolutePath": escaping }), &roots).as_deref(),
+            Some(escaping.as_str()),
+            "an absolute path that leaves through a symlink is outside"
+        );
+        assert!(
+            outside_workspace(
+                &json!({ "AbsolutePath": "link/../outside/secret.txt" }),
+                &roots
+            )
+            .is_some(),
+            "and so is the same path written relative to the workspace"
+        );
+        assert_eq!(
+            outside_workspace(
+                &json!({ "AbsolutePath": format!("{}/sub/../file.txt", workspace.display()) }),
+                &roots
+            ),
+            None,
+            "a `..` over a directory that does not exist still resolves inside"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

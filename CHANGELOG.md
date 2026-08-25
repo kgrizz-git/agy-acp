@@ -52,6 +52,12 @@ anywhere yet; see "Verify the port under Paseo" in [TODO.md](TODO.md).
   detected by searching for the two characters `..`, so an ordinary query like
   `foo..bar` was read as a path leaving the workspace; it must now be a path
   component.
+- A symlink out of the workspace was contained. `is_inside()` accepted a path
+  either as written or resolved, and the as-written form matched on its first
+  component: `<workspace>/link/../secret` looked inside even where `link` points
+  out of the workspace and the kernel follows it there. Only the resolved form
+  counts now, falling back to lexical normalization for a file that does not
+  exist yet -- which at least cancels the `..` that `starts_with` ignores.
 - A failed drain could still hang the turn. When a stdout read error was
   followed by a fallback `tokio::io::copy` that also failed, nothing was reading
   agy's stdout and `child.wait()` waited on a child blocked writing to a full

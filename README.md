@@ -134,7 +134,7 @@ Opt in with `AGY_ACP_AUTO_ALLOW`, which takes tool names and the groups `reads` 
 
 Whatever is enabled, three limits still apply:
 
-- **Only inside the workspace** — a path leaving the workspace root is still prompted, whether it is absolute, `~/...`, or `../` traversal. A path inside a shell command string is not seen; see below.
+- **Only inside the workspace** — a path leaving the workspace root is still prompted, whether it is absolute, `~/...`, or `../` traversal, and whether it leaves textually or by following a symlink out. A path inside a shell command string is not seen; see below.
 - **No network reads** — `read_url_content` and `search_web` are outside both groups. They only read, but a URL carries data out.
 - **Credential-looking paths are still prompted** — `.env`, `.pem`/`.key`/`id_rsa`, `.ssh`/`.aws`/`.gnupg`/`.kube`, `.netrc`/`.npmrc`/`.git-credentials`, and names containing `token`, `secret`, `password` or `credential`. Extend with `AGY_ACP_SENSITIVE_PATTERNS`. This list cannot be complete and is not what makes the feature safe — the narrow default is.
 
