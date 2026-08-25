@@ -142,6 +142,16 @@ json lines are not size- or count-bounded. Establish host limits and add
 practical frame and queue safeguards to prevent a malformed client or provider
 data from exhausting memory.
 
+The output channel is the concrete case. Every notification now goes through one
+unbounded `mpsc` to the single stdout writer, so if a host reads its side of the
+pipe more slowly than agy emits events, the writer blocks in `writeln!` and the
+queue grows with no ceiling. A bounded channel is the obvious answer and is not
+a free swap: a full queue would stop the drain task reading agy's stdout, which
+is the backpressure we want, but it puts a blocked host in the same call graph
+as agy's own progress, so the deadlock risk has to be reasoned through before
+the bound goes in. Measure a realistic burst first — these are small strings and
+the ceiling may not be worth the coupling.
+
 #### Permission-denial race
 
 verify whether a late successful provider row can overwrite or visually
