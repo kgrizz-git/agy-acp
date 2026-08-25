@@ -860,6 +860,11 @@ impl Adapter {
         let stdout = child.stdout.take();
         let skip_naration = self.skip_naration;
         let poll_session_id = session_id.to_string();
+        // Set when nothing can read agy's stdout any more. The child would then
+        // block on a full pipe and `child.wait()` would never return, so this
+        // ends the turn the same way a cancel does -- by killing the child.
+        let undrainable = Arc::new(AtomicBool::new(false));
+        let drain_failed = Arc::clone(&undrainable);
         let stdout_reader = tokio::spawn(async move {
             let mut processor = StreamProcessor::new(skip_naration);
             if let Some(stdout) = stdout {
@@ -888,7 +893,15 @@ impl Adapter {
                             read_error = Some(e.to_string());
                             // The child may still have bytes queued; drain them so its
                             // stdout pipe never blocks and child.wait() can return.
-                            let _ = tokio::io::copy(&mut reader, &mut tokio::io::sink()).await;
+                            // If even that fails the pipe is unreadable, and waiting
+                            // on a child that cannot write is the hang this whole
+                            // loop exists to avoid.
+                            if tokio::io::copy(&mut reader, &mut tokio::io::sink())
+                                .await
+                                .is_err()
+                            {
+                                drain_failed.store(true, Ordering::SeqCst);
+                            }
                             break;
                         }
                     }
@@ -913,11 +926,13 @@ impl Adapter {
         let result = tokio::select! {
             result = child.wait() => result,
             _ = async {
-                while !cancelled.load(Ordering::SeqCst) {
+                while !cancelled.load(Ordering::SeqCst) && !undrainable.load(Ordering::SeqCst) {
                     tokio::time::sleep(Duration::from_millis(50)).await;
                 }
             } => {
-                was_cancelled = true;
+                // An undrainable pipe kills the child too, but it is not a cancel:
+                // the turn failed, and reporting it as cancelled would hide that.
+                was_cancelled = cancelled.load(Ordering::SeqCst);
                 let _ = child.kill().await;
                 child.wait().await
             }
