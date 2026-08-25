@@ -41,8 +41,10 @@ pub struct StoredSession {
     /// Selected model ID for this session.
     #[serde(default)]
     pub model_id: Option<String>,
-    /// Unix seconds when this entry was last written. Entries written before
-    /// this field existed default to 0 and are pruned first.
+    /// Unix milliseconds when this entry was last written. Milliseconds, not
+    /// seconds, because this is the sole pruning key: several sessions written
+    /// in one second would tie and be evicted in `HashMap` order. Entries
+    /// written before this field existed default to 0 and are pruned first.
     #[serde(default)]
     pub updated_at: u64,
 }

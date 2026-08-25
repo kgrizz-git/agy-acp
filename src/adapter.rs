@@ -294,7 +294,7 @@ impl Adapter {
         };
         let updated_at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
+            .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
         let mut store = self.load_store_inner();
         store.sessions.insert(
