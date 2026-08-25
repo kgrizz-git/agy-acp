@@ -7,8 +7,8 @@ Single Rust crate. ACP (Agent Client Protocol) stdio adapter for Google Antigrav
 ```bash
 cargo build                    # debug build
 cargo build --release          # release build (required for e2e tests)
-cargo test                     # unit tests only (fast, no I/O)
-cargo test -- --include-ignored  # all tests including filesystem I/O tests
+cargo test                     # unit tests (fast; some use a scratch dir in $TMPDIR)
+cargo test -- --include-ignored  # adds session persist/restore and DB tests
 cargo test e2e -- --ignored --nocapture  # e2e only (needs agy binary + auth)
 ```
 
@@ -39,8 +39,12 @@ code works today. Completed work is recorded in [CHANGELOG.md](CHANGELOG.md).
 
 ## Test tiers
 
-1. **Unit tests** (`cargo test`) — stream-json parsing, narration filtering, JSON-RPC response shape. No filesystem or network I/O.
-2. **Ignored I/O tests** (`-- --include-ignored`) — session persist/restore. Create temp dirs in `$TMPDIR`.
+1. **Unit tests** (`cargo test`) — stream-json parsing, narration filtering,
+   JSON-RPC response shape, permission decisions. No network and no reads of the
+   real `$HOME`; several do create a scratch directory under `$TMPDIR`.
+2. **Ignored I/O tests** (`-- --include-ignored`) — session persist/restore and
+   conversation-DB reads. They are `#[ignore]`d by inheritance, not because they
+   touch anything tier 1 does not; the split is worth revisiting when CI lands.
 3. **E2E tests** (`e2e -- --ignored`) — spawn the release binary, send JSON-RPC over stdin, verify responses. Requires:
    - `agy` in `PATH` (install from `google-antigravity/antigravity-cli` releases)
    - Auth via `GEMINI_API_KEY` env var or macOS Keychain (`~/.gemini/antigravity-cli/settings.json`)

@@ -46,6 +46,26 @@ anywhere yet; see "Verify the port under Paseo" in [TODO.md](TODO.md).
   of the session; a sticky allow now falls through to asking when the call leaves
   the workspace or names something sensitive. A sticky reject still applies
   immediately.
+- Containment had two more holes of the same kind. With no workspace root
+  registered the check looked only at absolute arguments, so `~/.ssh/id_rsa`
+  counted as contained; an unset root now contains nothing. And traversal was
+  detected by searching for the two characters `..`, so an ordinary query like
+  `foo..bar` was read as a path leaving the workspace; it must now be a path
+  component.
+- A failed drain could still hang the turn. When a stdout read error was
+  followed by a fallback `tokio::io::copy` that also failed, nothing was reading
+  agy's stdout and `child.wait()` waited on a child blocked writing to a full
+  pipe -- the exact hang the byte-framed read was added to prevent. An
+  undrainable pipe now kills the child, and is reported as a failed turn rather
+  than a cancelled one.
+- Persisted sessions were pruned on a whole-second timestamp, so entries written
+  within the same second tied and were evicted in `HashMap` order, which could
+  drop a just-refreshed resumable session and keep an older one. `updated_at` is
+  milliseconds.
+- A prompt carrying no `sessionId` could not be cancelled at all: its token was
+  deliberately left out of the registry, while the turn itself ran a full agy
+  process. It is now registered under the id it was given -- the empty one -- so
+  a cancel naming that id reaches it.
 - A remembered "Always reject" deadlocked the bridge. The branch holding it took
   the state mutex in an `if let` scrutinee, whose guard lives to the end of the
   body, and the body awaited the same mutex. It had no test until now, so it went
@@ -133,3 +153,9 @@ anywhere yet; see "Verify the port under Paseo" in [TODO.md](TODO.md).
   stream-json port replaced.
 - Fork notes folded from `AGENTS.fork.md` into `AGENTS.md`; work items moved to
   `TODO.md`.
+- `AGENTS.md` claimed `cargo test` does no filesystem I/O and that the `#[ignore]`d
+  tier is what touches disk. Neither has been true for a while: tier-1 permission
+  and persistence tests create scratch directories under `$TMPDIR`, and the
+  ignored set is ignored by inheritance. The compliance checklist's record of
+  known permission gaps is likewise updated, since one of the two it listed is
+  closed by this branch.
