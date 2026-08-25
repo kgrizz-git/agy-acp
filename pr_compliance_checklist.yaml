@@ -20,11 +20,14 @@ pr_compliances:
       inside the adapter's private hook root -- deny. Changes must not widen what
       is approved without asking.
 
-      Two gaps in this are known and tracked in TODO.md rather than claimed as
-      solved: `outside_workspace()` only evaluates absolute paths, so a relative
-      path may escape the workspace check, and a remembered "always allow" is
-      keyed by tool name alone and skips the containment and sensitive-path
-      checks. Closing either is a fix, not a regression.
+      One gap is known and tracked in TODO.md rather than claimed as solved: a
+      remembered "always allow" is keyed by tool name alone, and while the
+      containment and sensitive-path checks do re-run on it, they read arguments
+      as paths and a command line is one opaque string, so they are inert for
+      `run_command`. Closing that is a fix, not a regression. The other gap this
+      file used to record is closed: `outside_workspace()` no longer looks only
+      at absolute paths -- home-relative and `..`-bearing arguments are judged
+      against the workspace roots, and an unset root contains nothing.
     failure_criteria: >
       A hook response with no decision field (agy then hangs until print-mode
       timeout), a default-allow branch, or an "always allow" answer that bypasses

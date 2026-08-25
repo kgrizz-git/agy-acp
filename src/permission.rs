@@ -621,8 +621,14 @@ fn outside_workspace(args: &Value, roots: &[PathBuf]) -> Option<String> {
     let absolute = absolute_paths(args);
 
     if roots.is_empty() {
-        // Without a known workspace nothing can be judged inside it.
-        return absolute.into_iter().next();
+        // Without a known workspace nothing can be judged inside it, and that has
+        // to cover all three shapes: `~/.ssh/id_rsa` is no more contained for the
+        // roots being unset than it is with them set.
+        return absolute.into_iter().next().or_else(|| {
+            string_args(args)
+                .into_iter()
+                .find(|s| s.starts_with('~') || has_parent_component(s))
+        });
     }
 
     // Absolute paths that escape are the common case.
@@ -643,8 +649,14 @@ fn outside_workspace(args: &Value, roots: &[PathBuf]) -> Option<String> {
     // the target may not exist on disk and `canonicalize` would fail.
     string_args(args)
         .into_iter()
-        .filter(|s| s.contains(".."))
+        .filter(|s| has_parent_component(s))
         .find(|s| !is_inside_lexical(s, roots))
+}
+
+/// True if `path` has a `..` component, rather than merely the two characters
+/// somewhere in it: `sub/../x` is a traversal, `foo..bar` is an ordinary name.
+fn has_parent_component(path: &str) -> bool {
+    path.split('/').any(|component| component == "..")
 }
 
 /// True if `path` normalizes (resolving `.` and `..` textually) inside any root.
@@ -1403,6 +1415,49 @@ mod tests {
         );
         assert!(reason.contains("Auto-allowed"), "{reason}");
         assert!(rx.try_recv().is_err(), "the user must not be prompted");
+    }
+
+    /// `outside_workspace` is pure, so these go straight at it: they cover the
+    /// shapes that never reach a bridge test because they are decided before the
+    /// prompt.
+    #[test]
+    fn without_a_workspace_root_nothing_is_contained() {
+        let none: &[PathBuf] = &[];
+        let outside = |args| outside_workspace(&args, none);
+
+        assert_eq!(
+            outside(json!({ "AbsolutePath": "/etc/passwd" })).as_deref(),
+            Some("/etc/passwd")
+        );
+        // These two used to slip through: the empty-roots branch looked only at
+        // arguments starting with `/`, so an unset workspace made them contained.
+        assert_eq!(
+            outside(json!({ "AbsolutePath": "~/.ssh/id_rsa" })).as_deref(),
+            Some("~/.ssh/id_rsa")
+        );
+        assert_eq!(
+            outside(json!({ "AbsolutePath": "../../secret" })).as_deref(),
+            Some("../../secret")
+        );
+        assert_eq!(
+            outside(json!({ "Query": "foo..bar" })),
+            None,
+            "a query is not a path, with or without a root"
+        );
+    }
+
+    #[test]
+    fn a_double_dot_inside_a_name_is_not_a_traversal() {
+        let roots = vec![PathBuf::from("/work")];
+        assert_eq!(
+            outside_workspace(&json!({ "Query": "foo..bar" }), &roots),
+            None,
+            "`..` must be a path component to count, not two characters"
+        );
+        assert_eq!(
+            outside_workspace(&json!({ "AbsolutePath": "../secret" }), &roots).as_deref(),
+            Some("../secret")
+        );
     }
 
     #[tokio::test]
