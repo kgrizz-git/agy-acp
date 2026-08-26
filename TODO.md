@@ -18,6 +18,8 @@ The few things worth picking up next. Each is a pointer; the detail lives below.
   — a path field this fork has not seen is judged only by how its value looks.
 - [Rename the binary and crate](#rename-the-binary-and-crate) — cheaper now than
   after anyone else installs it.
+- [Configure the protected e2e environment](#configure-the-protected-e2e-environment)
+  — key-backed PR e2e is intentionally deferred; deterministic CI already runs.
 
 ## Active
 
@@ -30,6 +32,25 @@ cancellation (upstream's `child.kill()` path), concurrent sessions and subagent
 events are untested anywhere. Install the built binary to `~/.local/bin` with
 `codesign -f -s -`, restart the daemon, then drive one real agent through a
 permission prompt, a reopened thread, and a cancellation.
+
+### Configure the protected e2e environment
+
+`e2e.yml` deliberately reads its key only from the approval-gated GitHub
+environment named `e2e`; the environment has not been created yet, so the e2e
+job currently skips after its secret gate. This does not weaken the deterministic
+CI jobs or expose a repository secret to pull-request code.
+
+When it becomes useful to run paid e2e on pull requests:
+
+1. Create the `e2e` GitHub environment and require reviewer approval before a
+   job can use it.
+2. Add `E2E_GEMINI_API_KEY` as an environment secret. Do not use a
+   repository-level e2e key; the job checks out pull-request code.
+3. If the existing repository-level `GEMINI_API_KEY` is only for this workflow,
+   remove it after the environment secret works.
+4. Re-run e2e on a same-repository PR or use `workflow_dispatch`, and confirm
+   the gate proceeds, the pinned agy archive verifies, and all four e2e tests
+   run.
 
 ### Security and permission boundaries
 
