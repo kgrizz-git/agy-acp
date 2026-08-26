@@ -110,13 +110,24 @@ where `link` is a symlink inside the workspace pointing out of it, matches none
 of the three tests and is never judged against the roots. The absolute spelling
 of the same path is caught, because `is_inside` resolves it.
 
-Closing it means resolving every relative-looking string, and the cost is
-prompts on strings that were never paths. Two things make it narrower than it
-sounds: only auto-allowed tools reach this at all, and a resolve that lands
-inside the workspace is silent, so the false-positive rate is the rate at which
-queries happen to name real files outside the workspace. Worth measuring against
-real agy traffic before choosing, since the alternative — a per-tool list of
-which argument fields are paths — trades generality for knowing agy's schema.
+Two ways to close it, and the second is the better one.
+
+Resolve every relative-looking string. General, and it pays for that generality
+in prompts on strings that were never paths. Narrower than it sounds — only
+auto-allowed tools reach this, and a resolve landing inside the workspace is
+silent, so the false-positive rate is the rate at which queries happen to name
+real files outside the workspace — but it is still guesswork about which strings
+are paths.
+
+Judge by field name instead. agy's tool arguments are a known schema, and
+`tool_title()` already relies on it: `TargetFile`, `AbsolutePath` and
+`DirectoryPath` are paths whatever they look like, `Query` and `SearchTerm`
+never are. Checking the known path fields unconditionally closes the gap for
+every argument that is actually a path, prompts on nothing that isn't, and
+leaves the shape-based tests as the fallback for fields not on the list. The
+cost is a list that has to track agy, and a field it does not know is a field
+that keeps today's behaviour — so it fails toward the current gap, not toward a
+new one. Worth confirming the field names against real agy traffic first.
 
 Raised in review on the symlink fix; the README's containment bullet describes
 what is checked, so it moves with any change here.
