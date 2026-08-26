@@ -17,6 +17,20 @@ No separate lint/typecheck/format commands — just `cargo build` and `cargo tes
 Work items live in [TODO.md](TODO.md), not here — this file describes how the
 code works today. Completed work is recorded in [CHANGELOG.md](CHANGELOG.md).
 
+### Plans and TODO discipline
+
+TODO.md entries are the source of truth for what's next; a *plan* is not
+completion. When a piece of work gets a plan (kept under `plans/`):
+
+- Keep the TODO.md entry and its "Next Up" pointer **on the board until the work
+  actually lands** (PR merged). Do not delete them while planning or implementing.
+- **Link** the plan from the TODO entry (a one-line `Plan: plans/<name>.md`
+  pointer) so the entry and the plan cross-reference.
+- **Delete** the entry as the **final step of implementation** — never during
+  planning. Per TODO.md's own rule, entries are deleted on landing, not ticked.
+- This applies symmetrically: if an entry is removed before its work ships, the
+  work becomes untracked. Premature deletion is the bug to avoid.
+
 > This is a **hard fork** of `hicder/agy-acp`: no upstream remote, no pull requests
 > filed there. Fork-specific context and workflow are in the second half of this
 > file, from "What this fork is" onward.
