@@ -23,3 +23,18 @@ impl HookRoot {
         &self.dir
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::HookRoot;
+    use std::io::ErrorKind;
+
+    #[test]
+    fn create_fails_closed_on_non_unix() {
+        let error = HookRoot::create()
+            .err()
+            .expect("non-Unix platforms must not create a permission hook root");
+
+        assert_eq!(error.kind(), ErrorKind::Unsupported);
+    }
+}
