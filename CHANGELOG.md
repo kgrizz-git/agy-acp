@@ -149,6 +149,10 @@ anywhere yet; see "Verify the port under Paseo" in [TODO.md](TODO.md).
   than swapped in. Tracked in TODO.md.
 ### Maintenance
 
+- CI: `ci.yml` runs `cargo build`, unit tests, and the ignored I/O tier with
+  `--ignored --skip e2e` to exclude the four e2e tests; `e2e.yml` is
+  secret-gated on `GEMINI_API_KEY` (skips for fork PRs) and uses a pinned agy
+  release. No formatting gate — the tree is not rustfmt-clean.
 - Hard fork: the `upstream` remote is removed, `gh repo set-default` points at
   this fork, and `pre-push` refuses any target but `kgrizz-git/agy-acp`. Note
   that `gh pr create` in a fork defaults its base to the parent repo regardless

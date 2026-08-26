@@ -64,6 +64,10 @@ completion. When a piece of work gets a plan (kept under `plans/`):
    - Auth via `GEMINI_API_KEY` env var or macOS Keychain (`~/.gemini/antigravity-cli/settings.json`)
    - `cargo build --release` must have been run first
 
+CI (`ci.yml`) enforces `cargo build`, unit tests, and the ignored I/O tier
+(`cargo test -- --ignored --skip e2e`); Rust 1.70 is the tested MSRV. E2e
+(`e2e.yml`) is secret-gated on `GEMINI_API_KEY` and uses a pinned agy release.
+
 ## Environment variables
 
 | Var | Effect |
@@ -214,4 +218,3 @@ Things worth re-checking after any change, because each one was a real bug:
 
 `AGY_ACP_PERMISSION_TIMEOUT_SECS` exists mainly so the timeout ordering can be
 tested in seconds rather than nine minutes.
-

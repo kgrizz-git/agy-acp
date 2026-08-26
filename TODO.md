@@ -16,9 +16,6 @@ The few things worth picking up next. Each is a pointer; the detail lives below.
   — one "Always allow" on `run_command` covers every later command.
 - [Confirm the path-field list against real agy traffic](#confirm-the-path-field-list-against-real-agy-traffic)
   — a path field this fork has not seen is judged only by how its value looks.
-- [Build and test in CI](#build-and-test-in-ci) — there is none, so ignored I/O
-  coverage is not automated. Plan:
-  [plans/ci-workflow.md](plans/ci-workflow.md).
 - [Rename the binary and crate](#rename-the-binary-and-crate) — cheaper now than
   after anyone else installs it.
 
@@ -182,17 +179,6 @@ carries `status` and `error`, and the adapter now reads both — and consider a
 configurable `agy` binary path.
 
 ### Fork maintenance
-
-#### Build and test in CI
-
-Plan: [plans/ci-workflow.md](plans/ci-workflow.md).
-
-There is no build or test workflow — only `upstream-watch.yml`. A workflow
-should run `cargo build`, `cargo test`, and
-`cargo test -- --ignored --skip e2e`; e2e needs `agy` and auth. Gate e2e behind
-a `GEMINI_API_KEY` secret so they skip rather than fail when it is absent. Do not
-add a bare `cargo fmt --check`: this tree is not rustfmt-clean and it would
-reflow files no change touched.
 
 #### Rename the binary and crate
 

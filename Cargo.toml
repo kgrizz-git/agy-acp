@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 description = "ACP stdio adapter for Google Antigravity CLI (agy)"
+rust-version = "1.70"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }

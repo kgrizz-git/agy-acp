@@ -1,0 +1,74 @@
+# Secret-gated e2e. Repository secrets are intentionally unavailable to pull
+# requests from forks, so those e2e jobs skip rather than fail. Do not replace
+# this with pull_request_target: checking out untrusted PR code with the API key
+# would expose the secret.
+name: e2e
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    outputs:
+      has_key: ${{ steps.key.outputs.has_key }}
+    steps:
+      - id: key
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          if [ -n "$GEMINI_API_KEY" ]; then
+            echo 'has_key=true' >>"$GITHUB_OUTPUT"
+          else
+            echo 'has_key=false' >>"$GITHUB_OUTPUT"
+          fi
+
+  e2e:
+    needs: gate
+    if: needs.gate.outputs.has_key == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          profile: minimal
+      - uses: Swatinem/rust-cache@v2
+      - name: Install agy
+        # Pinned agy release and SHA-256 are deliberate compatibility inputs, as is
+        # the modelProvider: gemini config below. Run the local 1.1.16 preflight
+        # from plans/ci-workflow.md before merging this workflow.
+        run: |
+          AGY_VERSION=1.1.16
+          AGY_ARCHIVE="$RUNNER_TEMP/agy_cli_linux_x64.tar.gz"
+          AGY_SHA256=7742953b7835b457e9102f1357a493913657dfd147435584f609d58356ec085a
+          curl --fail --location --retry 3 \
+            --output "$AGY_ARCHIVE" \
+            "https://github.com/google-antigravity/antigravity-cli/releases/download/${AGY_VERSION}/agy_cli_linux_x64.tar.gz"
+          echo "${AGY_SHA256}  ${AGY_ARCHIVE}" | sha256sum --check --strict
+          AGY_EXTRACT="$RUNNER_TEMP/agy-extract"
+          mkdir -p "$AGY_EXTRACT" "$RUNNER_TEMP/bin"
+          tar -xzf "$AGY_ARCHIVE" -C "$AGY_EXTRACT"
+          AGY_BIN=$(find "$AGY_EXTRACT" -type f -name agy -perm -u+x -print -quit)
+          test -n "$AGY_BIN"
+          install -m 755 "$AGY_BIN" "$RUNNER_TEMP/bin/agy"
+          echo "$RUNNER_TEMP/bin" >>"$GITHUB_PATH"
+          "$RUNNER_TEMP/bin/agy" --version
+      - name: Configure agy for GEMINI_API_KEY
+        run: |
+          mkdir -p "$HOME/.gemini/antigravity-cli"
+          printf '%s\n' '{"modelProvider":"gemini"}' \
+            >"$HOME/.gemini/antigravity-cli/settings.json"
+      - name: Build (release)
+        run: cargo build --release --verbose
+      - name: Run e2e tests
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: cargo test e2e -- --ignored --nocapture
