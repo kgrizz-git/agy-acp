@@ -432,7 +432,12 @@ pub fn message_chunk_update(session_update: &str, text: String) -> Value {
 
 fn parse_tool_run(
     blob: &[u8],
-) -> Option<(Option<String>, Option<String>, Option<Value>, Option<String>)> {
+) -> Option<(
+    Option<String>,
+    Option<String>,
+    Option<Value>,
+    Option<String>,
+)> {
     get_varint_field(blob, 1)?;
     let tool = get_proto_field(blob, 5)?;
     let call = get_proto_field(&tool, 4);
@@ -545,7 +550,12 @@ fn parse_tool_result(blob: &[u8]) -> Option<Value> {
                     "fileSize": get_varint_field(&entry, 4).unwrap_or(0),
                 })
             })
-            .filter(|entry| entry["name"].as_str().map(|s| !s.is_empty()).unwrap_or(false))
+            .filter(|entry| {
+                entry["name"]
+                    .as_str()
+                    .map(|s| !s.is_empty())
+                    .unwrap_or(false)
+            })
             .collect();
         if !entries.is_empty() {
             out["entries"] = Value::Array(entries);
@@ -610,7 +620,11 @@ pub fn extract_tool_update_from_step_payload(
     let content = raw_output
         .as_ref()
         .and_then(|output| tool_content(output, true))
-        .or_else(|| raw_input.as_ref().and_then(|input| tool_content(input, false)));
+        .or_else(|| {
+            raw_input
+                .as_ref()
+                .and_then(|input| tool_content(input, false))
+        });
 
     let mut update = json!({
         "sessionUpdate": "tool_call",

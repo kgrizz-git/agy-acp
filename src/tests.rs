@@ -798,7 +798,10 @@ fn test_session_load_replays_conversation_history() {
 
     let output = adapter.handle_session_load(json!(1), &json!({"sessionId": "sess-replay"}));
     assert_eq!(
-        adapter.sessions.get("sess-replay").map(|session| session.last_step_idx),
+        adapter
+            .sessions
+            .get("sess-replay")
+            .map(|session| session.last_step_idx),
         Some(9)
     );
     let persisted_store: crate::types::SessionStore =
@@ -2369,12 +2372,7 @@ async fn stream_notifications_go_through_the_output_channel() {
     ];
 
     for frame in frames {
-        crate::adapter::publish_stream_notifications(
-            &mut processor,
-            &notify_tx,
-            frame,
-            "sess-1",
-        );
+        crate::adapter::publish_stream_notifications(&mut processor, &notify_tx, frame, "sess-1");
     }
     drop(notify_tx);
 

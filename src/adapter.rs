@@ -113,18 +113,12 @@ impl Adapter {
 
         static NEXT_TEST_ROOT: AtomicUsize = AtomicUsize::new(0);
         let sequence = NEXT_TEST_ROOT.fetch_add(1, Ordering::Relaxed);
-        let home = std::env::temp_dir().join(format!(
-            "agy-acp-test-{}-{sequence}",
-            std::process::id()
-        ));
+        let home =
+            std::env::temp_dir().join(format!("agy-acp-test-{}-{sequence}", std::process::id()));
         Self::new_with_home(home, Vec::new(), false)
     }
 
-    fn new_with_home(
-        home: PathBuf,
-        available_models: Vec<AgyModel>,
-        skip_naration: bool,
-    ) -> Self {
+    fn new_with_home(home: PathBuf, available_models: Vec<AgyModel>, skip_naration: bool) -> Self {
         let state_dir = home.join(".openab/agy-acp");
         Self {
             sessions: HashMap::new(),

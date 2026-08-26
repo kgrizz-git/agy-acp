@@ -1162,9 +1162,7 @@ mod tests {
     /// A missing prompt is the interesting failure here -- it means a check was
     /// bypassed -- and without a timeout that shows up as the whole suite
     /// hanging rather than as a red test.
-    async fn expect_permission_request(
-        rx: &mut mpsc::UnboundedReceiver<Option<String>>,
-    ) -> Value {
+    async fn expect_permission_request(rx: &mut mpsc::UnboundedReceiver<Option<String>>) -> Value {
         let raw = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
             .await
             .expect("the bridge must ask the user, not decide on its own")
@@ -1781,18 +1779,21 @@ mod tests {
         let options = request["params"]["options"].as_array().unwrap().clone();
 
         let named = |kind: &str| -> String {
-            options
-                .iter()
-                .find(|o| o["kind"] == kind)
-                .unwrap()["name"]
+            options.iter().find(|o| o["kind"] == kind).unwrap()["name"]
                 .as_str()
                 .unwrap()
                 .to_string()
         };
         // The answer covers the tool for the session, so the label has to say so:
         // this prompt is where someone decides, and it shows only one command.
-        assert_eq!(named("allow_always"), "Always allow run_command this session");
-        assert_eq!(named("reject_always"), "Always reject run_command this session");
+        assert_eq!(
+            named("allow_always"),
+            "Always allow run_command this session"
+        );
+        assert_eq!(
+            named("reject_always"),
+            "Always reject run_command this session"
+        );
         // The ACP kinds stay standard so hosts can still style and bind them.
         for kind in ["allow_once", "allow_always", "reject_once", "reject_always"] {
             assert!(options.iter().any(|o| o["kind"] == kind), "missing {kind}");
@@ -1848,11 +1849,7 @@ mod tests {
             "toolCall": { "name": "run_command", "args": { "CommandLine": "cat /etc/shadow" } },
         });
         assert!(
-            outside_workspace(
-                &outside["toolCall"]["args"],
-                &[PathBuf::from(&workspace)]
-            )
-            .is_none(),
+            outside_workspace(&outside["toolCall"]["args"], &[PathBuf::from(&workspace)]).is_none(),
             "the embedded path is not recognised as a path at all"
         );
 
