@@ -16,8 +16,8 @@ The few things worth picking up next. Each is a pointer; the detail lives below.
   — one "Always allow" on `run_command` covers every later command.
 - [Confirm the path-field list against real agy traffic](#confirm-the-path-field-list-against-real-agy-traffic)
   — a path field this fork has not seen is judged only by how its value looks.
-- [Build and test in CI](#build-and-test-in-ci) — there is none, which is why an
-  ignored test rotted for months. Plan:
+- [Build and test in CI](#build-and-test-in-ci) — there is none, so ignored I/O
+  coverage is not automated. Plan:
   [plans/ci-workflow.md](plans/ci-workflow.md).
 - [Rename the binary and crate](#rename-the-binary-and-crate) — cheaper now than
   after anyone else installs it.
@@ -187,14 +187,12 @@ configurable `agy` binary path.
 
 Plan: [plans/ci-workflow.md](plans/ci-workflow.md).
 
-There is no build or test workflow — only `upstream-watch.yml`. That absence is
-why `test_read_response_from_db` rotted unnoticed: it is `#[ignore]`d, and nobody
-runs `--include-ignored` by hand. A workflow should run `cargo build`,
-`cargo test`, and `cargo test -- --include-ignored` with the four e2e tests
-skipped, since those need `agy` and auth. Gate e2e behind a `GEMINI_API_KEY`
-secret so they skip rather than fail when it is absent. Do not add a bare
-`cargo fmt --check`: this tree is not rustfmt-clean and it would reflow files no
-change touched.
+There is no build or test workflow — only `upstream-watch.yml`. A workflow
+should run `cargo build`, `cargo test`, and
+`cargo test -- --ignored --skip e2e`; e2e needs `agy` and auth. Gate e2e behind
+a `GEMINI_API_KEY` secret so they skip rather than fail when it is absent. Do not
+add a bare `cargo fmt --check`: this tree is not rustfmt-clean and it would
+reflow files no change touched.
 
 #### Rename the binary and crate
 
@@ -213,18 +211,6 @@ it emits during a turn; persisting those and replaying its own transcript would
 drop `db.rs`/`protobuf.rs` entirely. The gap is history the adapter never
 streamed (older threads, other clients), so any switch needs a fallback or a
 migration.
-
-#### test_read_response_from_db disagrees with the code
-
-Plan: [plans/fix-test-read-response-from-db.md](plans/fix-test-read-response-from-db.md).
-
-The only red test in the suite, and it was red before the stream-json port too,
-so it is not a regression from it. `read_delta_from_db` advances `max_step_idx`
-over every row it read, including the trailing user-message row, and returns 2;
-the test expects 1, the last row it takes text from. As a cursor, 2 looks right
-and the assertion looks stale, but the helper is `#[cfg(test)]`-only now, so
-nothing in production depends on either answer. Decide which semantics were
-meant, then fix the test or the code — do not just change the number to match.
 
 ### Upstream and ecosystem
 

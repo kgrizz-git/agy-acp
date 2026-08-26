@@ -763,6 +763,11 @@ fn test_session_load_replays_conversation_history() {
         rusqlite::params![8i64, make_assistant_payload("second response")],
     )
     .unwrap();
+    conn.execute(
+        "INSERT INTO steps (idx, step_type, step_payload) VALUES (?1, 14, ?2)",
+        rusqlite::params![9i64, make_user_payload("one more question")],
+    )
+    .unwrap();
     drop(conn);
 
     let mut adapter = Adapter {
@@ -779,6 +784,19 @@ fn test_session_load_replays_conversation_history() {
     adapter.persist_session("sess-replay", Some("conv-replay"), 8, None);
 
     let output = adapter.handle_session_load(json!(1), &json!({"sessionId": "sess-replay"}));
+    assert_eq!(
+        adapter.sessions.get("sess-replay").map(|session| session.last_step_idx),
+        Some(9)
+    );
+    let persisted_store: crate::types::SessionStore =
+        serde_json::from_str(&fs::read_to_string(root.join("sessions.json")).unwrap()).unwrap();
+    assert_eq!(
+        persisted_store
+            .sessions
+            .get("sess-replay")
+            .map(|session| session.last_step_idx),
+        Some(9)
+    );
 
     assert!(
         output.len() >= 2,
@@ -822,7 +840,8 @@ fn test_session_load_replays_conversation_history() {
             "tool_call",
             "agent_message_chunk",
             "user_message_chunk",
-            "agent_message_chunk"
+            "agent_message_chunk",
+            "user_message_chunk"
         ]
     );
     let message_updates: Vec<_> = updates
@@ -849,7 +868,8 @@ fn test_session_load_replays_conversation_history() {
             "agent_message_chunk",
             "agent_message_chunk",
             "user_message_chunk",
-            "agent_message_chunk"
+            "agent_message_chunk",
+            "user_message_chunk"
         ]
     );
     let message_texts: Vec<_> = message_updates
@@ -867,7 +887,8 @@ fn test_session_load_replays_conversation_history() {
             "I will inspect the workspace.",
             "hello from agent",
             "how are you?",
-            "second response"
+            "second response",
+            "one more question"
         ]
     );
     assert!(
@@ -1072,184 +1093,6 @@ fn test_session_resume_does_not_replay_history() {
             .and_then(|s| s.as_str()),
         Some("sess-nr")
     );
-
-    let _ = fs::remove_dir_all(root);
-}
-
-#[test]
-#[ignore]
-fn test_read_response_from_db() {
-    let root = std::env::temp_dir().join(format!("agy-acp-sqlite-{}", Uuid::new_v4()));
-    let conv_dir = root.join("conversations");
-    fs::create_dir_all(&conv_dir).unwrap();
-
-    let db_path = conv_dir.join("test-conv.db");
-    let conn = Connection::open(&db_path).unwrap();
-    conn.execute_batch(
-        "CREATE TABLE steps (
-            idx INTEGER PRIMARY KEY,
-            step_type INTEGER NOT NULL DEFAULT 0,
-            status INTEGER NOT NULL DEFAULT 0,
-            has_subtrajectory NUMERIC NOT NULL DEFAULT 0,
-            metadata BLOB,
-            error_details BLOB,
-            permissions BLOB,
-            task_details BLOB,
-            render_info BLOB,
-            step_payload BLOB,
-            step_format INTEGER NOT NULL DEFAULT 0
-        )",
-    )
-    .unwrap();
-
-    let mut inner = Vec::new();
-    inner.push(0x0A);
-    inner.push(11);
-    inner.extend_from_slice(b"hello world");
-    let mut payload = vec![0x08, 0x0F, 0xA2, 0x01, inner.len() as u8];
-    payload.extend_from_slice(&inner);
-
-    conn.execute(
-        "INSERT INTO steps (idx, step_type, step_payload) VALUES (?1, 15, ?2)",
-        rusqlite::params![1i64, payload],
-    )
-    .unwrap();
-
-    conn.execute(
-        "INSERT INTO steps (idx, step_type, step_payload) VALUES (?1, 14, ?2)",
-        rusqlite::params![2i64, vec![0x08u8, 0x0E]],
-    )
-    .unwrap();
-    drop(conn);
-
-    let result = crate::db::read_delta_from_db(&conv_dir, "test-conv", -1);
-    let delta = result.expect("expected a delta for the freshly-inserted rows");
-    assert_eq!(delta.text, Some("hello world".to_string()));
-    assert_eq!(delta.max_step_idx, 1);
-
-    let result = crate::db::read_delta_from_db(&conv_dir, "test-conv", 1);
-    assert!(result.is_none());
-
-    let _ = fs::remove_dir_all(root);
-}
-
-#[test]
-#[ignore]
-fn test_read_response_multi_step_no_skip_no_duplicate() {
-    let root = std::env::temp_dir().join(format!("agy-acp-multi-step-{}", Uuid::new_v4()));
-    let conv_dir = root.join("conversations");
-    fs::create_dir_all(&conv_dir).unwrap();
-
-    let db_path = conv_dir.join("multi.db");
-    let conn = Connection::open(&db_path).unwrap();
-    conn.execute_batch(
-        "CREATE TABLE steps (
-            idx INTEGER PRIMARY KEY,
-            step_type INTEGER NOT NULL DEFAULT 0,
-            status INTEGER NOT NULL DEFAULT 0,
-            has_subtrajectory NUMERIC NOT NULL DEFAULT 0,
-            metadata BLOB,
-            error_details BLOB,
-            permissions BLOB,
-            task_details BLOB,
-            render_info BLOB,
-            step_payload BLOB,
-            step_format INTEGER NOT NULL DEFAULT 0
-        )",
-    )
-    .unwrap();
-
-    fn make_payload(text: &str) -> Vec<u8> {
-        let text_bytes = text.as_bytes();
-        let mut inner = vec![0x0A];
-        let mut len = text_bytes.len();
-        loop {
-            if len < 128 {
-                inner.push(len as u8);
-                break;
-            }
-            inner.push((len as u8 & 0x7F) | 0x80);
-            len >>= 7;
-        }
-        inner.extend_from_slice(text_bytes);
-
-        let mut outer = vec![0xA2, 0x01];
-        let mut ilen = inner.len();
-        loop {
-            if ilen < 128 {
-                outer.push(ilen as u8);
-                break;
-            }
-            outer.push((ilen as u8 & 0x7F) | 0x80);
-            ilen >>= 7;
-        }
-        outer.extend(inner);
-        outer
-    }
-
-    conn.execute(
-        "INSERT INTO steps (idx, step_type, step_payload) VALUES (1, 0, X'0801')",
-        [],
-    )
-    .unwrap();
-    conn.execute(
-        "INSERT INTO steps (idx, step_type, step_payload) VALUES (?1, 15, ?2)",
-        rusqlite::params![2i64, make_payload("hello")],
-    )
-    .unwrap();
-    conn.execute(
-        "INSERT INTO steps (idx, step_type, step_payload) VALUES (3, 0, X'0802')",
-        [],
-    )
-    .unwrap();
-    conn.execute(
-        "INSERT INTO steps (idx, step_type, step_payload) VALUES (?1, 15, ?2)",
-        rusqlite::params![4i64, make_payload("world")],
-    )
-    .unwrap();
-    conn.execute(
-        "INSERT INTO steps (idx, step_type, step_payload) VALUES (?1, 15, ?2)",
-        rusqlite::params![5i64, make_payload("line1\nline2\nline3")],
-    )
-    .unwrap();
-    drop(conn);
-
-    let result = crate::db::read_delta_from_db(&conv_dir, "multi", -1).unwrap();
-    assert_eq!(
-        result.text,
-        Some("hello\nworld\nline1\nline2\nline3".to_string())
-    );
-    assert_eq!(result.max_step_idx, 5);
-
-    let result = crate::db::read_delta_from_db(&conv_dir, "multi", 2).unwrap();
-    assert_eq!(result.text, Some("world\nline1\nline2\nline3".to_string()));
-    assert_eq!(result.max_step_idx, 5);
-
-    let result = crate::db::read_delta_from_db(&conv_dir, "multi", 4).unwrap();
-    assert_eq!(result.text, Some("line1\nline2\nline3".to_string()));
-    assert_eq!(result.max_step_idx, 5);
-
-    let result = crate::db::read_delta_from_db(&conv_dir, "multi", 5);
-    assert!(result.is_none());
-
-    let _ = fs::remove_dir_all(root);
-}
-
-#[test]
-#[ignore]
-fn test_read_response_missing_steps_table() {
-    let root = std::env::temp_dir().join(format!("agy-acp-noschema-{}", Uuid::new_v4()));
-    let conv_dir = root.join("conversations");
-    fs::create_dir_all(&conv_dir).unwrap();
-
-    let db_path = conv_dir.join("empty.db");
-    let conn = Connection::open(&db_path).unwrap();
-    conn.execute_batch("CREATE TABLE other (id INTEGER)")
-        .unwrap();
-    drop(conn);
-
-    let result = crate::db::read_delta_from_db(&conv_dir, "empty", -1);
-    assert!(result.is_none());
 
     let _ = fs::remove_dir_all(root);
 }

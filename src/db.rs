@@ -8,9 +8,8 @@ use crate::protobuf::{
     extract_user_text_from_step_payload, is_tool_step_type, message_chunk_update,
 };
 
-#[cfg(test)]
-use crate::types::ConversationDelta;
-
+/// `after_step_idx` is an exclusive cursor over every `steps.idx` row; an
+/// incremental caller must advance it to the largest returned row index.
 pub fn read_rows_from_db(
     conversations_dir: &Path,
     conversation_id: &str,
@@ -87,52 +86,6 @@ pub fn read_replay_updates_from_db(
         return None;
     }
     Some((updates, max_idx))
-}
-
-#[cfg(test)]
-pub fn read_delta_from_db(
-    conversations_dir: &Path,
-    conversation_id: &str,
-    after_step_idx: i64,
-) -> Option<ConversationDelta> {
-    let rows = read_rows_from_db(conversations_dir, conversation_id, after_step_idx)?;
-
-    let mut max_idx = after_step_idx;
-    let mut response_parts: Vec<String> = Vec::new();
-    for (idx, step_type, payload) in &rows {
-        max_idx = max_idx.max(*idx);
-        if *step_type == 15 {
-            if let Some(text) = extract_text_from_step_payload(payload) {
-                if !text.is_empty() {
-                    response_parts.push(text);
-                }
-            }
-        }
-    }
-    if response_parts.is_empty() {
-        let response_rows: Vec<_> = rows
-            .iter()
-            .filter(|(_, step_type, _)| *step_type == 15)
-            .collect();
-        if !response_rows.is_empty() {
-            let payload_sizes: Vec<usize> = response_rows.iter().map(|(_, _, p)| p.len()).collect();
-            eprintln!(
-                "[agy-acp] WARN: {} new response steps found (payload sizes: {:?}) but none had extractable text \
-                 (field 20.1 missing — schema change?)",
-                response_rows.len(), payload_sizes
-            );
-        }
-        return None;
-    }
-    let text = if response_parts.is_empty() {
-        None
-    } else {
-        Some(response_parts.join("\n"))
-    };
-    Some(ConversationDelta {
-        text,
-        max_step_idx: max_idx,
-    })
 }
 
 fn flush_agent_message(parts: &mut Vec<String>, updates: &mut Vec<Value>, skip_naration: bool) {

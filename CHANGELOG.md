@@ -147,13 +147,6 @@ anywhere yet; see "Verify the port under Paseo" in [TODO.md](TODO.md).
   Bounding it would push the backpressure onto agy, which is the right shape but
   couples a stalled host to agy's progress, so it is measured and decided rather
   than swapped in. Tracked in TODO.md.
-- `test_read_response_from_db` fails under `cargo test -- --include-ignored`. It
-  is upstream's test and upstream's implementation, `#[ignore]`d since it was
-  written, so it has not run in either lineage in months: it expects
-  `max_step_idx == 1` where the code returns `2`, having advanced the cursor over
-  a trailing user-message row. The helper it tests is `#[cfg(test)]`-only, so
-  nothing in production depends on the answer. Tracked in TODO.md.
-
 ### Maintenance
 
 - Hard fork: the `upstream` remote is removed, `gh repo set-default` points at
@@ -174,3 +167,6 @@ anywhere yet; see "Verify the port under Paseo" in [TODO.md](TODO.md).
   ignored set is ignored by inheritance. The compliance checklist's record of
   known permission gaps is likewise updated, since one of the two it listed is
   closed by this branch.
+- Removed the stale test-only conversation-DB delta reader. Load-replay coverage
+  now proves that its persisted all-row watermark advances past a trailing user
+  message.
