@@ -52,6 +52,15 @@ anywhere yet; see "Verify the port under Paseo" in [TODO.md](TODO.md).
   detected by searching for the two characters `..`, so an ordinary query like
   `foo..bar` was read as a path leaving the workspace; it must now be a path
   component.
+- A plain relative argument was never judged a path. Containment looked at a
+  value's shape -- a leading `/` or `~`, or a `..` component -- so that a search
+  query would not be mistaken for a file, which left `link/secret.txt` escaping
+  through an in-workspace symlink without being checked at all. agy's arguments
+  are a fixed schema, so the known path fields (`AbsolutePath`, `TargetFile`,
+  `DirectoryPath`, `SearchPath`, `Cwd`, `Paths`) are now judged whatever their
+  value looks like, and `Query` is still left alone. A field missing from that
+  list keeps the shape tests and nothing else, so an omission costs coverage
+  rather than raising a false prompt.
 - A symlink out of the workspace was contained. `is_inside()` accepted a path
   either as written or resolved, and the as-written form matched on its first
   component: `<workspace>/link/../secret` looked inside even where `link` points
@@ -125,12 +134,6 @@ anywhere yet; see "Verify the port under Paseo" in [TODO.md](TODO.md).
 
 ### Known issues
 
-- An argument is judged against the workspace only when it starts with `/` or
-  `~`, or carries a `..` component, so that a search query is not mistaken for a
-  file. A plain relative argument like `link/secret.txt` is therefore never
-  judged, and escapes if `link` is a symlink out of the workspace. The README's
-  containment bullet says so rather than implying symlink coverage is complete,
-  and TODO.md carries the two ways to close it. Tracked, not fixed.
 - An "Always allow" answer is keyed by tool name, not by arguments, so approving
   `run_command` once approves every later command in that session -- `rm -rf` and
   all. The containment and sensitive-path checks still run on a remembered allow,

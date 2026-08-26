@@ -14,6 +14,8 @@ The few things worth picking up next. Each is a pointer; the detail lives below.
   installed nowhere yet; only a scripted client has exercised it.
 - [Permission decisions ignore what a command actually does](#permission-decisions-ignore-what-a-command-actually-does)
   — one "Always allow" on `run_command` covers every later command.
+- [Confirm the path-field list against real agy traffic](#confirm-the-path-field-list-against-real-agy-traffic)
+  — a path field this fork has not seen is judged only by how its value looks.
 - [Build and test in CI](#build-and-test-in-ci) — there is none, which is why an
   ignored test rotted for months.
 - [Rename the binary and crate](#rename-the-binary-and-crate) — cheaper now than
@@ -101,36 +103,18 @@ Note the same absence has a visible consequence today: a session reloaded in the
 same process inherits the "Always" answers it was given earlier. That is within
 what the README promises, but it is worth deciding rather than inheriting.
 
-#### A relative argument with no `..` is never judged a path
+#### Confirm the path-field list against real agy traffic
 
-`outside_workspace()` treats a string as a path when it starts with `/` or `~`,
-or carries a `..` component — everything else is left alone so an ordinary search
-query does not start prompting. That leaves a shape uncovered: `link/secret.txt`,
-where `link` is a symlink inside the workspace pointing out of it, matches none
-of the three tests and is never judged against the roots. The absolute spelling
-of the same path is caught, because `is_inside` resolves it.
+`PATH_FIELDS` in `permission.rs` decides which arguments are judged as paths
+whatever their value looks like. It was assembled from the field names this
+repository already handles — `AbsolutePath`, `TargetFile`, `DirectoryPath`,
+`SearchPath`, `Cwd`, `Paths` — not from agy's schema, which is not published.
+A field it does not know keeps the shape-based tests and nothing else, so a
+miss costs coverage quietly and never announces itself.
 
-Two ways to close it, and the second is the better one.
-
-Resolve every relative-looking string. General, and it pays for that generality
-in prompts on strings that were never paths. Narrower than it sounds — only
-auto-allowed tools reach this, and a resolve landing inside the workspace is
-silent, so the false-positive rate is the rate at which queries happen to name
-real files outside the workspace — but it is still guesswork about which strings
-are paths.
-
-Judge by field name instead. agy's tool arguments are a known schema, and
-`tool_title()` already relies on it: `TargetFile`, `AbsolutePath` and
-`DirectoryPath` are paths whatever they look like, `Query` and `SearchTerm`
-never are. Checking the known path fields unconditionally closes the gap for
-every argument that is actually a path, prompts on nothing that isn't, and
-leaves the shape-based tests as the fallback for fields not on the list. The
-cost is a list that has to track agy, and a field it does not know is a field
-that keeps today's behaviour — so it fails toward the current gap, not toward a
-new one. Worth confirming the field names against real agy traffic first.
-
-Raised in review on the symlink fix; the README's containment bullet describes
-what is checked, so it moves with any change here.
+Capture the `PreToolUse` payloads from a real session and diff the argument keys
+against the list. Same trip as the Paseo verification above, since both need one
+real agy run.
 
 #### Workspace-supplied hooks
 

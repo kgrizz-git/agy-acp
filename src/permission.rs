@@ -624,11 +624,15 @@ fn outside_workspace(args: &Value, roots: &[PathBuf]) -> Option<String> {
         // Without a known workspace nothing can be judged inside it, and that has
         // to cover all three shapes: `~/.ssh/id_rsa` is no more contained for the
         // roots being unset than it is with them set.
-        return absolute.into_iter().next().or_else(|| {
-            string_args(args)
-                .into_iter()
-                .find(|s| s.starts_with('~') || has_parent_component(s))
-        });
+        return absolute
+            .into_iter()
+            .next()
+            .or_else(|| path_field_args(args).into_iter().next())
+            .or_else(|| {
+                string_args(args)
+                    .into_iter()
+                    .find(|s| s.starts_with('~') || has_parent_component(s))
+            });
     }
 
     // Absolute paths that escape are the common case.
@@ -637,6 +641,16 @@ fn outside_workspace(args: &Value, roots: &[PathBuf]) -> Option<String> {
         .find(|path| !roots.iter().any(|root| is_inside(path, root)))
     {
         return Some(escaped.clone());
+    }
+
+    // A field that names a path names one whatever its value looks like, so a
+    // plain relative value is judged too: `link/secret.txt` carries no `/`, `~`
+    // or `..` and can still leave the workspace through a symlink.
+    if let Some(escaped) = path_field_args(args)
+        .into_iter()
+        .find(|path| !roots.iter().any(|root| is_inside_from(path, root)))
+    {
+        return Some(escaped);
     }
 
     // `~` is home-relative and therefore never inside the workspace.
@@ -725,6 +739,46 @@ fn resolve(path: &Path) -> Option<PathBuf> {
     let parent = path.parent()?;
     let name = path.file_name()?;
     std::fs::canonicalize(parent).ok().map(|p| p.join(name))
+}
+
+/// Argument fields whose value is a path whatever it looks like.
+///
+/// agy's tool arguments are a fixed schema and `tool_title` already leans on it.
+/// Judging these by name is what lets a plain relative path be checked without
+/// having to guess that an arbitrary string is a path -- a `Query` of
+/// `src/main.rs` must not start prompting.
+///
+/// A field missing from this list keeps the shape-based checks and nothing else,
+/// which is what every field had before it existed: an omission costs coverage,
+/// never a false prompt. It has to track agy.
+const PATH_FIELDS: &[&str] = &[
+    "AbsolutePath",
+    "TargetFile",
+    "DirectoryPath",
+    "SearchPath",
+    "Cwd",
+    "Paths",
+];
+
+/// Collects every string sitting under a `PATH_FIELDS` key, at any depth.
+fn path_field_args(args: &Value) -> Vec<String> {
+    fn walk(value: &Value, under_path_field: bool, found: &mut Vec<String>) {
+        match value {
+            Value::String(s) if under_path_field => found.push(s.clone()),
+            Value::Array(items) => items.iter().for_each(|v| walk(v, under_path_field, found)),
+            Value::Object(map) => map.iter().for_each(|(key, v)| {
+                walk(
+                    v,
+                    under_path_field || PATH_FIELDS.contains(&key.as_str()),
+                    found,
+                )
+            }),
+            _ => {}
+        }
+    }
+    let mut found = Vec::new();
+    walk(args, false, &mut found);
+    found
 }
 
 /// Collects every absolute-looking path appearing in the tool arguments.
@@ -1470,6 +1524,33 @@ mod tests {
             ),
             None,
             "a `..` over a directory that does not exist still resolves inside"
+        );
+
+        // The shape-based tests see nothing wrong with this one: no leading `/`,
+        // no `~`, no `..`. It is judged because `AbsolutePath` is a path field.
+        assert_eq!(
+            outside_workspace(&json!({ "AbsolutePath": "link/secret.txt" }), &roots).as_deref(),
+            Some("link/secret.txt"),
+            "a plain relative path field still leaves through the symlink"
+        );
+        assert_eq!(
+            outside_workspace(&json!({ "Query": "link/secret.txt" }), &roots),
+            None,
+            "the same string in a query field is a search term, not a path"
+        );
+        assert_eq!(
+            outside_workspace(&json!({ "TargetFile": "notes.txt" }), &roots),
+            None,
+            "a relative path field inside the workspace stays silent"
+        );
+        assert_eq!(
+            outside_workspace(
+                &json!({ "Paths": ["notes.txt", "link/secret.txt"] }),
+                &roots
+            )
+            .as_deref(),
+            Some("link/secret.txt"),
+            "path fields are judged through arrays too"
         );
 
         let _ = std::fs::remove_dir_all(&base);
