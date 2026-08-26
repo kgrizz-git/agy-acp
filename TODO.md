@@ -17,7 +17,8 @@ The few things worth picking up next. Each is a pointer; the detail lives below.
 - [Confirm the path-field list against real agy traffic](#confirm-the-path-field-list-against-real-agy-traffic)
   — a path field this fork has not seen is judged only by how its value looks.
 - [Build and test in CI](#build-and-test-in-ci) — there is none, which is why an
-  ignored test rotted for months.
+  ignored test rotted for months. Plan:
+  [plans/ci-workflow.md](plans/ci-workflow.md).
 - [Rename the binary and crate](#rename-the-binary-and-crate) — cheaper now than
   after anyone else installs it.
 
@@ -184,6 +185,8 @@ configurable `agy` binary path.
 
 #### Build and test in CI
 
+Plan: [plans/ci-workflow.md](plans/ci-workflow.md).
+
 There is no build or test workflow — only `upstream-watch.yml`. That absence is
 why `test_read_response_from_db` rotted unnoticed: it is `#[ignore]`d, and nobody
 runs `--include-ignored` by hand. A workflow should run `cargo build`,
@@ -212,6 +215,8 @@ streamed (older threads, other clients), so any switch needs a fallback or a
 migration.
 
 #### test_read_response_from_db disagrees with the code
+
+Plan: [plans/fix-test-read-response-from-db.md](plans/fix-test-read-response-from-db.md).
 
 The only red test in the suite, and it was red before the stream-json port too,
 so it is not a regression from it. `read_delta_from_db` advances `max_step_idx`

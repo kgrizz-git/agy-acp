@@ -1,205 +1,181 @@
-# Plan: Add a CI workflow (build + test)
+# Plan: Add build, deterministic test, and secret-gated e2e workflows
 
-> **TODO discipline:** The corresponding TODO.md entry ("Build and test in CI",
-> lines 185–194) and its Next Up bullet (lines 19–20) stay on the board **until
-> this work lands** — a plan is not completion. This plan *links* to them;
-> deletion is the **final step of implementation** (the PR that merges the
-> workflow), never a planning step. Per repo rule, entries are deleted on
-> landing, not ticked.
+> **TODO discipline:** Keep the corresponding `TODO.md` entry and its Next Up
+> pointer until this work lands. They are linked to this plan; delete them only
+> in the landing change.
 
-## Context
+## Decisions
 
-There is **no** build/test CI. Only `upstream-watch.yml` exists
-(`.github/workflows/upstream-watch.yml`). From `TODO.md` (Fork maintenance →
-"Build and test in CI") and `AGENTS.md`:
+- The required CI gate is `cargo build`, unit tests, and ignored I/O tests.
+  E2e is deliberately separate because it uses a paid external service.
+- CI must land after `fix-test-read-response-from-db.md`; the ignored tier is
+  knowingly red until that stale helper is removed.
+- E2e runs for pull requests to `main` when the repository has a
+  `GEMINI_API_KEY` secret and is skipped otherwise. It is also manually
+  dispatchable. This is a secret-enabled PR workflow, not a manual-only gate.
+- Pin agy to `1.1.16`, the current release selected for this workflow. The
+  Ubuntu x64 archive and SHA-256 are recorded below so a release change cannot
+  silently alter the test environment. The integrity value was checked against
+  the public release metadata on 2026-08-26. The version still needs the
+  compatibility preflight below because the bridge behaviours documented in
+  `AGENTS.md` were observed with agy 1.1.12.
+- The repository promises Rust 1.70+. Declare that MSRV in `Cargo.toml` and
+  test it in CI; `rust-version` alone declares a contract but does not verify
+  it.
 
-- The absence is *why* `test_read_response_from_db` rotted unnoticed: it is
-  `#[ignore]`d and nobody runs `--include-ignored` by hand.
-- A workflow should run `cargo build`, `cargo test`, and
-  `cargo test -- --include-ignored`, **skipping the four e2e tests** (they need
-  `agy` + auth).
-- e2e must be gated behind a `GEMINI_API_KEY` secret so it *skips* (not fails)
-  when absent.
-- **Do NOT add `cargo fmt --check`** — the tree is not rustfmt-clean and it would
-  reflow files no change touched (explicitly warned in both TODO.md and
-  AGENTS.md "Local gotchas").
+## `ci.yml`: always-on build and deterministic tests
 
-### Test tiers (from AGENTS.md)
+Create `.github/workflows/ci.yml` with:
 
-1. **Unit** (`cargo test`) — fast, no network, no real `$HOME`.
-2. **Ignored I/O** (`cargo test -- --include-ignored`) — session persist/restore
-   and conversation-DB reads. `#[ignore]`d by inheritance.
-3. **E2E** (`cargo test e2e -- --ignored`) — spawn release binary, need `agy` +
-   auth + `cargo build --release` first. These are the ones to skip in CI.
+- Triggers: `push` to `main`, `pull_request` targeting `main`, and
+  `workflow_dispatch`.
+- Minimal permissions: `contents: read`.
+- Concurrency:
+  ```yaml
+  concurrency:
+    group: ${{ github.workflow }}-${{ github.ref }}
+    cancel-in-progress: true
+  ```
+- A stable `test` job using `actions/checkout@v4`,
+  `dtolnay/rust-toolchain@stable` with `profile: minimal`, and
+  `Swatinem/rust-cache@v2`.
+- A 15-minute job timeout.
+- The following steps, in order:
+  ```sh
+  cargo build --verbose
+  cargo test --verbose
+  cargo test --verbose -- --ignored --skip e2e
+  ```
 
-### e2e gating mechanics
+The last command runs only ignored tests and excludes the four `test_e2e_*`
+tests by their stable shared substring. Add a short workflow comment explaining
+the e2e exclusion and update it if that naming convention changes.
 
-The e2e tests are selected by name (`e2e`). Running plain `cargo test` already
-excludes `#[ignore]`d tests, but the e2e tests are *both* `e2e`-named and
-`#[ignore]`d, so `cargo test -- --include-ignored` would pick them up. To skip
-them in CI without a secret, run `cargo test -- --include-ignored --skip e2e`.
-When `GEMINI_API_KEY` is present, run the e2e subset explicitly:
-`cargo test e2e -- --ignored --nocapture` (after `cargo build --release`).
+Add a separate Ubuntu `msrv` job using `dtolnay/rust-toolchain@1.70` and the
+same checkout/cache setup and a 15-minute timeout. It must run
+`cargo build --verbose` and `cargo test --verbose`. Add `rust-version = "1.70"`
+to the package metadata in
+`Cargo.toml`. If current dependencies cannot meet that toolchain, either pin
+compatible dependency versions or explicitly raise the documented MSRV; do not
+leave the README's existing `1.70+` promise unverified.
 
-## Steps
+Do not add `cargo fmt --check` or a new clippy gate: the repository is not kept
+rustfmt-clean. This is a policy decision, not an accidental omission.
 
-1. **Create `.github/workflows/ci.yml`** (the always-on build/test gate). Triggers:
-   `push: branches: [main]` only, plus `pull_request: branches: [main]` and
-   `workflow_dispatch:`. Do **not** add `push: feat/**`: a `pull_request` to `main`
-   already covers topic branches in this solo fork, and a push ref
-   (`refs/heads/feat/x`) and its PR ref (`refs/pull/N/merge`) form *different*
-   concurrency groups, so `cancel-in-progress` cannot dedupe them — keeping both
-   triggers just double-runs, not saves. (If you later want push-on-branch
-   cancellation without the double-run, normalize the group instead.) Add:
+## `e2e.yml`: secret-gated external integration test
+
+Create `.github/workflows/e2e.yml` with `pull_request` targeting `main` and
+`workflow_dispatch` triggers, top-level `permissions: contents: read`, and this
+two-job shape:
+
+1. `gate` always runs and writes `has_key` to `$GITHUB_OUTPUT` after checking
+   whether `GEMINI_API_KEY` is nonempty. Do this in a step environment; secrets
+   cannot be referenced directly in an `if:` expression. Use this exact shape:
    ```yaml
-   concurrency:
-     group: ${{ github.workflow }}-${{ github.ref }}
-     cancel-in-progress: true
+   gate:
+     runs-on: ubuntu-latest
+     outputs:
+       has_key: ${{ steps.key.outputs.has_key }}
+     steps:
+       - id: key
+         env:
+           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+         run: |
+           if [ -n "$GEMINI_API_KEY" ]; then
+             echo 'has_key=true' >>"$GITHUB_OUTPUT"
+           else
+             echo 'has_key=false' >>"$GITHUB_OUTPUT"
+           fi
    ```
-   Add a top-of-file comment: `# Do NOT add cargo fmt --check or clippy here —
-   the tree is not rustfmt-clean (AGENTS.md "Local gotchas"; TODO.md:194).`
-   Use `ubuntu-latest`.
+2. `e2e` needs `gate` and uses
+   `if: needs.gate.outputs.has_key == 'true'`. It is visibly skipped when the
+   secret is absent. Set `timeout-minutes: 20` and `permissions: contents: read`.
+   Add a workflow comment that repository secrets are intentionally unavailable
+   to pull requests from forks, so those e2e jobs skip. Do not replace this with
+   `pull_request_target`: checking out untrusted PR code with the API key would
+   expose the secret.
 
-2. **Job: `test`.**
-   - `actions/checkout@v4`.
-   - Install Rust stable via `dtolnay/rust-toolchain@stable` with `profile:
-     minimal` (no extra components). Add `Swatinem/rust-cache@v2` (or
-     `actions/cache` on `~/.cargo`) so the cold `cargo build` is not slow/flaky.
-   - `cargo build --verbose` — fails the build on any compile error.
-   - `cargo test --verbose` — tier 1 (unit).
-   - `cargo test --verbose -- --include-ignored --skip e2e` — tier 2 (ignored
-     I/O). The `--skip e2e` substring excludes all four `test_e2e_*` tests
-     (`tests.rs:1305,1494,1546,1599`); note in a workflow comment that the
-     ignored tier needs only `$TMPDIR` (no `agy`, no network), which is why it is
-     safe here, and that `--include-ignored` intentionally re-runs tier-1 too.
+The `e2e` job uses the same checkout, Rust setup, and cache as `ci.yml`, then
+performs these steps:
 
- 3. **e2e is intentionally NOT in `ci.yml`.** `AGENTS.md` treats e2e as local-only
-    (needs `agy` on PATH + `GEMINI_API_KEY`/Keychain + `cargo build --release`),
-    and `TODO.md:191` says gate it so it *skips* rather than fails. Installing
-    `agy` from a GitHub release inside CI is fragile (undocumented asset names,
-    OS/arch detection, version pinning) and contrary to that intent. Instead:
-     - **Create `.github/workflows/e2e.yml`** as an opt-in gate. Triggers:
-       `workflow_dispatch:` and `pull_request: branches: [main]` (scoped to main,
-       same as `ci.yml`; no `push`).
-     - **Gate on the secret with a gate job**, because `secrets` is **not** a
-       valid context in a job-level `if:` (it would fail parsing with
-       "Unrecognized named-value: 'secrets'"). Use:
-       ```yaml
-       permissions:
-         contents: read
-       jobs:
-         gate:
-           runs-on: ubuntu-latest
-           outputs:
-             has_key: ${{ steps.k.outputs.has_key }}
-           steps:
-             - id: k
-               env:
-                 KEY: ${{ secrets.GEMINI_API_KEY }}
-               run: echo "has_key=$([ -n "$KEY" ] && echo true || echo false)" >>"$GITHUB_OUTPUT"
-         e2e:
-           needs: gate
-           if: needs.gate.outputs.has_key == 'true'
-           permissions:
-             contents: read
-           steps:
-             # ... checkout, rust toolchain, cargo build --release, agy install, cargo test e2e ...
-       ```
-       This makes the `e2e` job show as **Skipped** (not Failed, not a parse
-       error) when `GEMINI_API_KEY` is absent. Note in a workflow comment: a
-       `GEMINI_API_KEY`-set run whose `agy` install fails will make the e2e tests
-       *self-skip* rather than fail, so a green opt-in run only proves coverage when
-       `agy` installed correctly.
-     - e2e steps: `actions/checkout@v4`, rust toolchain (as above),
-       `cargo build --release --verbose`, install `agy` from a **pinned**
-       `google-antigravity/antigravity-cli` release (document the exact asset URL +
-       arch handling + `chmod +x` + PATH export, and the maintenance burden, in a
-       workflow comment), set `AGY_EXTRA_ARGS=""`, then
-       `cargo test e2e -- --ignored --nocapture` with `GEMINI_API_KEY` from
-       secrets. This keeps e2e runnable on demand without risking the main gate.
+1. Use one `Install agy` shell step for the download, digest check, extraction,
+   installation, and version check. The shell variables below must stay in that
+   one `run` block; they do not persist between GitHub Actions steps.
+   ```sh
+   AGY_VERSION=1.1.16
+   AGY_ARCHIVE="$RUNNER_TEMP/agy_cli_linux_x64.tar.gz"
+   AGY_SHA256=7742953b7835b457e9102f1357a493913657dfd147435584f609d58356ec085a
+   curl --fail --location --retry 3 \
+     --output "$AGY_ARCHIVE" \
+     "https://github.com/google-antigravity/antigravity-cli/releases/download/${AGY_VERSION}/agy_cli_linux_x64.tar.gz"
+   echo "${AGY_SHA256}  ${AGY_ARCHIVE}" | sha256sum --check --strict
+   AGY_EXTRACT="$RUNNER_TEMP/agy-extract"
+   mkdir -p "$AGY_EXTRACT" "$RUNNER_TEMP/bin"
+   tar -xzf "$AGY_ARCHIVE" -C "$AGY_EXTRACT"
+   AGY_BIN=$(find "$AGY_EXTRACT" -type f -name agy -perm -u+x -print -quit)
+   test -n "$AGY_BIN"
+   install -m 755 "$AGY_BIN" "$RUNNER_TEMP/bin/agy"
+   echo "$RUNNER_TEMP/bin" >>"$GITHUB_PATH"
+   "$RUNNER_TEMP/bin/agy" --version
+   ```
+   Extraction or the version check must fail the job; do not rely on the Rust
+   tests' intentional local-development self-skip when `agy` is unavailable.
+2. Configure a fresh runner for key-based agy authentication before starting the
+   adapter:
+   ```sh
+   mkdir -p "$HOME/.gemini/antigravity-cli"
+   printf '%s\n' '{"modelProvider":"gemini"}' \
+     >"$HOME/.gemini/antigravity-cli/settings.json"
+   ```
+   Pass `GEMINI_API_KEY` only through the environment of the e2e test step.
+   Do not set `AGY_EXTRA_ARGS`; the workflow needs no hidden provider flags.
+3. Run:
+   ```sh
+   cargo build --release --verbose
+   cargo test e2e -- --ignored --nocapture
+   ```
 
- 4. **Permissions.** `permissions: contents: read` for both `ci.yml` and the
-    `e2e.yml` gate/e2e jobs. Scopes omitted from a `permissions:` block default to
-    `none`, which is what we want (CI needs no `issues`/write scope, unlike
-    `upstream-watch.yml` which writes a tracking issue). Matches the minimal style
-    of `upstream-watch.yml`. (Note: `issues: none` *is* valid syntax — the reason
-    to omit it rather than set it is just that omitted scopes are `none` anyway.)
+The pinned release is newer than the first agy release that documented
+`GEMINI_API_KEY`; its key mode requires `modelProvider: "gemini"`. Keep a
+workflow comment beside the pin stating that both the asset digest and this
+configuration are deliberate compatibility inputs.
 
-5. **Deliberately omit** `cargo fmt --check` and any clippy-as-error gate (none
-   currently exist; don't introduce one unasked). The comment added in step 1
-   guards against a future editor re-adding it.
+## Required compatibility preflight
 
-6. **Update docs.**
-   - `TODO.md`: **leave the "Build and test in CI" subsection (lines 185–194) and
-     the "Next Up" bullet (lines 19–20) in place until this work lands.** Both stay
-     on the board as "Next Up" until the PR is merged. The *final* step of
-     implementation (step 7) deletes them — per repo rule, entries are deleted on
-     landing, not ticked. Link each to this plan: add a one-line pointer at the top
-     of the subsection, e.g. "Plan: `plans/ci-workflow.md`." and annotate the Next
-     Up bullet similarly. Do NOT delete them now. (Also do NOT touch the adjacent
-     "test_read_response_from_db disagrees with the code" block at lines 214–222 —
-     that is Plan A's work item.)
-    - `CHANGELOG.md`: under **Maintenance**, add: "Added `.github/workflows/ci.yml`
-      running `cargo build`, `cargo test`, and `cargo test -- --include-ignored`
-      (e2e skipped via `--skip e2e`); added opt-in `.github/workflows/e2e.yml`
-      gated on `GEMINI_API_KEY`. No `cargo fmt --check` (tree is not rustfmt-clean)."
-   - `AGENTS.md`: the "Commands" section already lists the three tiers; add a one
-     -line note that CI enforces tiers 1–2 and e2e is opt-in (GEMINI_API_KEY),
-     so the "no CI" gap is reflected as closed. Keep the warning about not adding
-     `cargo fmt --check`.
+Before merging `e2e.yml`, install or otherwise select agy `1.1.16` locally,
+confirm `agy --version`, set `GEMINI_API_KEY` and `modelProvider: "gemini"`,
+then run:
 
-7. **Commit and open a PR** (only if asked). Stage `.github/workflows/ci.yml`,
-   `.github/workflows/e2e.yml`, `CHANGELOG.md`, `TODO.md`, `AGENTS.md`.
+```sh
+cargo build --release
+cargo test e2e -- --ignored --nocapture
+```
+
+Record the agy version and result in the PR. This proves the release pin works
+with the adapter's normal streaming protocol before CI becomes the first
+compatibility experiment. The four e2e tests do not start the adapter with
+`--permission-prompts`, so this preflight does **not** replace the separate
+real-client permission-bridge verification tracked in `TODO.md`.
+
+## Documentation and landing
+
+- Add one concise `AGENTS.md` note: CI enforces the build/unit/ignored-I/O tiers;
+  Rust 1.70 is the tested MSRV; the e2e workflow is secret-gated and uses a
+  pinned agy release.
+- Add a `CHANGELOG.md` Maintenance entry naming `ci.yml` and `e2e.yml`, the
+  ignored-tier e2e exclusion, and the absence of a formatting gate.
+- Keep both TODO pointers through implementation and review. Delete the CI
+  subsection and its Next Up pointer only in the landing change. Do not touch
+  the DB-test item; its companion plan owns that removal.
 
 ## Verification
 
-- **Enable Actions on the fork first** (AGENTS.md:178: GitHub disables them on new
-  forks). Check `kgrizz-git/agy-acp` Settings → Actions → General. A merged
-  workflow that never fires would recreate the rot this plan fixes.
-- Push the branch / open a PR with `GEMINI_API_KEY` **unset** in the repo → the
-  `test` job goes green, the `e2e` job is **Skipped** (not failed, not a parse
-  error).
-- Confirm the `test` job actually runs the ignored tier: the
-  `test_read_response_from_db` fix (companion plan) should turn it from red to
-  green in CI — that is the concrete proof CI catches what rotted.
-- If a fork maintainer later adds `GEMINI_API_KEY` as a repo secret, the `e2e`
-  job runs; verify it passes against a pinned `agy` version.
-
-## Risks / things the reviewer should challenge
-
-- **e2e install fragility — handled by splitting it out.** `agy` install in CI is
-  fragile and contrary to `TODO.md:191`'s "skip, not fail" intent. Decision: e2e is
-  NOT in `ci.yml`; it lives in opt-in `e2e.yml` (`workflow_dispatch` +
-  `pull_request: [main]`), gated via a **gate job** emitting
-  `has_key` (because `secrets` is not a valid context in a job-level `if:`). The
-  reviewer's alternative ("omit e2e from CI entirely") is partially taken: it is
-  omitted from the always-on gate but kept runnable on demand.
-- **`--skip e2e` correctness — VERIFIED.** Grep of `src/tests.rs` finds exactly
-  four e2e tests, all `test_e2e_`-prefixed:
-  `test_e2e_agy_acp_full_round_trip`, `test_e2e_multi_turn`,
-  `test_e2e_session_load`, `test_e2e_error_paths`. No e2e test lacks the prefix,
-  so `--skip e2e` excludes all four. Substring match is documented as an
-  assumption in the workflow comment.
-- **Job-level `secrets` in `if:` — FIXED (was a hard bug).** A job-level
-  `if: ${{ secrets.GEMINI_API_KEY != '' }}` fails parsing with "Unrecognized
-  named-value: 'secrets'". Replaced with a `gate` job whose step computes
-  `has_key` and the `e2e` job gates on `needs.gate.outputs.has_key == 'true'`, so
-  the job shows as **Skipped**, never a parse error.
-- **Concurrency does NOT dedupe push vs PR.** A branch push ref
-  (`refs/heads/feat/x`) and its PR ref (`refs/pull/N/merge`) are different
-  concurrency groups, so `cancel-in-progress` cannot collapse them. Fixed by
-  dropping `push: feat/**` — `pull_request: [main]` already covers topic branches
-  in this solo fork, so there is no double-run to dedupe. `push: [main]` remains
-  for direct main pushes.
-- **Enable Actions on the fork.** AGENTS.md:178 warns GitHub disables Actions on
-  new forks. A merged workflow that never fires recreates the exact rot this plan
-  exists to fix — so add a verification step: confirm Actions are enabled on
-  `kgrizz-git/agy-acp` (Settings → Actions → General) before declaring the work
-  done. The "open a PR" verification below will reveal it too.
-- **`issues: none` is actually valid syntax.** Earlier drafts called it invalid;
-  it is not. The conclusion (use `contents: read`, omit other scopes) still holds
-  because omitted scopes default to `none`.
-- **Toolchain drift.** No `rust-version` in `Cargo.toml`, so `dtolnay/rust-toolchain@stable`
-  accepts `stable`. Fine.
-- **Double-run cost.** Running `--include-ignored` re-runs unit tests too; that's
-  fine and intended (it's the full tier-2 set) and is noted in a workflow comment.
+1. Confirm GitHub Actions is enabled for `kgrizz-git/agy-acp` before declaring
+   the work complete.
+2. On a PR without `GEMINI_API_KEY`, `test` succeeds and the `e2e` job is
+   skipped—not failed or rejected during workflow parsing.
+3. With a repository secret, verify the e2e job reports the pinned agy version,
+   verifies the SHA-256, and runs all four e2e tests. A missing binary or failed
+   download must fail the job rather than produce a green self-skip.
+4. Verify both the stable `test` job and the Rust 1.70 `msrv` job pass. The MSRV
+   job is the proof behind the README's Rust 1.70+ requirement.
