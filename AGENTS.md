@@ -66,9 +66,11 @@ completion. When a piece of work gets a plan (kept under `plans/`):
 
 CI (`ci.yml`) enforces `cargo build`, unit tests, and the ignored I/O tier
 (`cargo test -- --ignored --skip e2e`); Rust 1.70 is the tested MSRV on Linux
-and Windows. E2e (`e2e.yml`) runs only after approval of the protected `e2e`
-GitHub environment, which holds `E2E_GEMINI_API_KEY`, and uses a pinned agy
-release. Do not use a repository-level e2e key: the workflow checks out PR code.
+and Windows. The Unix-socket `--permission-prompts` bridge is intentionally
+unavailable on Windows and fails closed there. E2e (`e2e.yml`) runs only after
+approval of the protected `e2e` GitHub environment, which holds
+`E2E_GEMINI_API_KEY`, and uses a pinned agy release. Do not use a repository-
+level e2e key: the workflow checks out PR code.
 
 ## Environment variables
 

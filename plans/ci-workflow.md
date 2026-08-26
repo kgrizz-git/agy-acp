@@ -22,7 +22,9 @@
   `AGENTS.md` were observed with agy 1.1.12.
 - The repository promises Rust 1.70+. Declare that MSRV in `Cargo.toml` and
   test it in CI; `rust-version` alone declares a contract but does not verify
-  it.
+  it. The adapter must build and pass unit tests on Windows too. Its optional
+  Unix-socket permission bridge is unavailable there and must fail closed rather
+  than disabling agy's own permission checks.
 
 ## `ci.yml`: always-on build and deterministic tests
 
@@ -164,8 +166,9 @@ real-client permission-bridge verification tracked in `TODO.md`.
 ## Documentation and landing
 
 - Add one concise `AGENTS.md` note: CI enforces the build/unit/ignored-I/O tiers;
-  Rust 1.70 is tested on Linux and Windows; the e2e workflow requires approval
-  of a protected environment and uses a pinned agy release.
+  Rust 1.70 is tested on Linux and Windows; the Unix-socket permission bridge
+  is unavailable on Windows; the e2e workflow requires approval of a protected
+  environment and uses a pinned agy release.
 - Add a `CHANGELOG.md` Maintenance entry naming `ci.yml` and `e2e.yml`, the
   ignored-tier e2e exclusion, and the absence of a formatting gate.
 - Keep both TODO pointers through implementation and review. Delete the CI

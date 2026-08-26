@@ -1,7 +1,15 @@
 mod adapter;
 mod cancel;
 mod db;
+#[cfg(unix)]
 mod hook_root;
+#[cfg(not(unix))]
+#[path = "hook_root_unsupported.rs"]
+mod hook_root;
+#[cfg(unix)]
+mod permission;
+#[cfg(not(unix))]
+#[path = "permission_unsupported.rs"]
 mod permission;
 mod protobuf;
 mod streaming;
