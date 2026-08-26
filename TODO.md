@@ -10,50 +10,111 @@ carries no work items.
 
 The few things worth picking up next. Each is a pointer; the detail lives below.
 
-- [Land the stream-json port](#land-the-stream-json-port) — the open PR, and what
-  is still unverified about it.
-- [`sessions.json` grows without bound](#sessionsjson-grows-without-bound) —
-  affects every turn today, and gets worse.
-- [One stdout owner](#one-stdout-owner) — two writers on the ACP transport can
-  corrupt a frame.
+- [Verify the port under Paseo](#verify-the-port-under-paseo) — merged and
+  installed nowhere yet; only a scripted client has exercised it.
+- [Permission decisions ignore what a command actually does](#permission-decisions-ignore-what-a-command-actually-does)
+  — one "Always allow" on `run_command` covers every later command.
+- [Confirm the path-field list against real agy traffic](#confirm-the-path-field-list-against-real-agy-traffic)
+  — a path field this fork has not seen is judged only by how its value looks.
+- [Build and test in CI](#build-and-test-in-ci) — there is none, which is why an
+  ignored test rotted for months.
 - [Rename the binary and crate](#rename-the-binary-and-crate) — cheaper now than
   after anyone else installs it.
-- [Relative-path auto-allow escape](#relative-path-auto-allow-escape) — the
-  permission boundary this fork exists to provide.
-- [A stdout read error can hang the prompt](#a-stdout-read-error-can-hang-the-prompt)
-  — one undecodable line deadlocks the turn.
 
 ## Active
 
-### Land the stream-json port
+### Verify the port under Paseo
 
-[PR #1](https://github.com/kgrizz-git/agy-acp/pull/1) takes upstream's stream-json
-rewrite and ports the permission bridge onto it. Merging is a judgement call, not
-a blocked task: the permission flows, session/load replay and the test suite are
-verified, but nothing has run under Paseo itself — only a scripted ACP client.
-Cancellation (upstream's new `child.kill()` path), concurrent sessions and
-subagent events are untested. Remaining: merge, install to `~/.local/bin` with a
-`codesign -f -s -` and a daemon restart, then exercise one real agent through a
-permission prompt and a reopened thread.
+The stream-json port merged as `bf6e81b`. Everything verified so far was driven by
+a scripted ACP client: the four permission scenarios, load replay across
+processes, and the test suite. Nothing has run under Paseo itself, and
+cancellation (upstream's `child.kill()` path), concurrent sessions and subagent
+events are untested anywhere. Install the built binary to `~/.local/bin` with
+`codesign -f -s -`, restart the daemon, then drive one real agent through a
+permission prompt, a reopened thread, and a cancellation.
 
 ### Security and permission boundaries
 
-#### Relative-path auto-allow escape
+#### Permission decisions ignore what a command actually does
 
-`outside_workspace()` only evaluates strings beginning with `/`, while `reads`
-and `searches` may accept a relative path such as `../../some-readable-file`.
-Confirm how each `agy` read/search tool resolves relative paths; if it resolves
-them from the workspace, normalize relative path arguments against that root
-before auto-allowing, and prompt on any escape. Do not rely on the sensitive-
-name denylist for containment.
+Remembered answers are keyed by `(session, tool name)`, so one "Always allow" on
+`run_command` approves every later command in that session. The containment and
+sensitive-path checks do still run on a remembered allow, but they read arguments
+as paths and a command line is a single opaque string: `cat /etc/shadow` is not
+recognised as naming `/etc/shadow` at all. `cat /etc/passwd` is caught only
+because `passwd` is a sensitive substring — luck, not containment. Both halves are
+pinned by tests that assert today's behaviour deliberately
+(`always_allow_is_remembered_per_tool_not_per_command` and
+`a_path_inside_a_command_string_is_invisible_to_the_containment_check`), so
+closing the gap turns them red and forces the README to be updated with it.
 
-#### Always allow bypasses safety checks
+Documented in the README under "What 'Always' remembers", with a warning to
+prefer **Allow** over **Always allow** for `run_command`. Three ways out, roughly
+in order of value:
 
-remembered choices are keyed only by `(session, tool name)` and are evaluated
-after the hook-root check but without workspace or sensitive-path checks. Verify
-whether a benign "Always allow view_file" can later read an external or
-credential-looking path. If so, retain a per-tool preference but keep path
-containment and sensitive-path checks non-bypassable.
+1. Make the key as specific as the prompt. Either do not offer "Always allow"
+   for command-executing tools at all, or key the sticky answer by
+   `(session, tool, command string)` so approving `cat README.md` does not
+   approve `cat` on anything else. Note this is *not* the parsing problem in (2):
+   it needs only an equivalence test, and the minimum version is exact string
+   equality — no tokenization, no shell semantics. Normalization beyond
+   whitespace is an optional ergonomic layer and each step of it merges commands
+   that are not identical, which is how the current bug arose (keying on the tool
+   name is the degenerate case of normalizing everything away). Under-normalizing
+   costs a prompt; over-normalizing is a hole. The general rule: the sticky key
+   should be as specific as the checks that still apply to a remembered allow.
+   Tool-level keying is defensible for path-argument tools like `view_file`,
+   where containment and the sensitive-path list do constrain it; for command
+   tools those checks are inert, so the key must carry the command.
+2. Extract paths from a command line so containment applies to `run_command` at
+   all — tokenize the string and treat `/`-, `~`- and `../`-bearing tokens as
+   paths. This one really is parsing, and a harder job than (1): it has to find
+   every path the command touches, through pipes, `$VAR`, `$(...)`, subcommands
+   and attached flag values, and a path it fails to extract is a path that gets
+   allowed. It can never be complete, because the shell re-interprets the string
+   afterwards. Best-effort only, and it must fail toward prompting.
+3. Refuse destructive commands outright (`rm -rf`, `dd`, `mkfs`, `curl | sh`) and
+   widen the sensitive-path list. Cheapest, and the weakest: a denylist over a
+   string the shell will re-interpret is evaded by `cat .en"v"` or
+   `cat $HOME/.env`. Worth doing as depth, never as the boundary.
+
+Two smaller things about the same map, worth fixing alongside whichever option
+is taken.
+
+An "Always" answer cannot be revoked within a session — consider exposing the
+remembered set, or expiring answers with the turn.
+
+And nothing ever removes an entry: `BridgeState.always` and
+`BridgeState.conversations` both accumulate for the life of the process, and only
+`pending` is ever cleaned up. There is no session-end hook to hang a cleanup on —
+ACP sends no close, and this adapter handles no session-end method, so a session
+simply stops being used and "its last turn" is not knowable. Each entry is two
+short strings, and the count is bounded by the sessions one adapter process
+serves, so this is untidiness rather than a leak that will bite.
+
+The cheap fix, if it is worth doing at all, is to hang it off the in-memory
+session map instead: `evict_if_needed` already drops the least recently used
+`Session`, so have it tell the bridge to forget that session's answers too. That
+bounds the bridge by the same 64 and gives "this session" a defensible meaning —
+answers last as long as the session is live in memory. A session restored from
+`sessions.json` afterwards would prompt again, which is the safe direction.
+
+Note the same absence has a visible consequence today: a session reloaded in the
+same process inherits the "Always" answers it was given earlier. That is within
+what the README promises, but it is worth deciding rather than inheriting.
+
+#### Confirm the path-field list against real agy traffic
+
+`PATH_FIELDS` in `permission.rs` decides which arguments are judged as paths
+whatever their value looks like. It was assembled from the field names this
+repository already handles — `AbsolutePath`, `TargetFile`, `DirectoryPath`,
+`SearchPath`, `Cwd`, `Paths` — not from agy's schema, which is not published.
+A field it does not know keeps the shape-based tests and nothing else, so a
+miss costs coverage quietly and never announces itself.
+
+Capture the `PreToolUse` payloads from a real session and diff the argument keys
+against the list. Same trip as the Paseo verification above, since both need one
+real agy run.
 
 #### Workspace-supplied hooks
 
@@ -81,34 +142,6 @@ proving it was created by this adapter.
 
 ### Reliability and lifecycle
 
-#### One stdout owner
-
-the stream-reader task writes JSON-RPC directly to stdout while the main loop
-also writes there. Large writes can interleave and corrupt line-delimited JSON-
-RPC. Route every notification through the main output channel and add a
-concurrent-streaming framing test. The stream-json port removed the final-drain
-writer but not the shared-stdout problem.
-
-#### A stdout read error can hang the prompt
-
-The stream reader is `while let Ok(Some(line)) = lines.next_line().await`, so any
-error — invalid UTF-8 in agy's output is the realistic one — ends the loop. The
-child is still running and still writing, so its stdout pipe fills, its next write
-blocks, and `child.wait()` never returns: the prompt hangs until the print
-timeout. Retrying instead of stopping is not the fix either, since `Lines` keeps
-returning the same error and the loop would spin. Read bytes rather than lines so
-an undecodable line can be discarded, and kill the child if draining cannot
-continue. Note the turn is at least reported honestly today — the reader stops
-before the terminal `result`, so `saw_result` stays false and the turn fails
-rather than claiming success.
-
-#### Cancellation map race
-
-a second `session/prompt` for the same session overwrites the first cancellation
-token before the global adapter lock admits it; the first task can then remove
-the second token. Define whether concurrent prompts are rejected, queued, or
-supersede one another, and test cancellation in each state.
-
 #### Global prompt serialization
 
 `handle_session_prompt()` holds the one adapter mutex through the entire child
@@ -123,6 +156,16 @@ stdin JSON-RPC lines, hook payloads, pending permission requests, and stream-
 json lines are not size- or count-bounded. Establish host limits and add
 practical frame and queue safeguards to prevent a malformed client or provider
 data from exhausting memory.
+
+The output channel is the concrete case. Every notification now goes through one
+unbounded `mpsc` to the single stdout writer, so if a host reads its side of the
+pipe more slowly than agy emits events, the writer blocks in `writeln!` and the
+queue grows with no ceiling. A bounded channel is the obvious answer and is not
+a free swap: a full queue would stop the drain task reading agy's stdout, which
+is the backpressure we want, but it puts a blocked host in the same call graph
+as agy's own progress, so the deadlock risk has to be reasoned through before
+the bound goes in. Measure a realistic burst first — these are small strings and
+the ceiling may not be worth the coupling.
 
 #### Permission-denial race
 
@@ -139,16 +182,16 @@ configurable `agy` binary path.
 
 ### Fork maintenance
 
-#### sessions.json grows without bound
+#### Build and test in CI
 
-`evict_if_needed` caps the in-memory map at 64, but nothing caps the file: it
-holds 910 entries / 150 KB on one developer machine, 553 of them with no
-`conversation_id` (sessions created and never prompted). Every `persist_session`
-rewrites the whole file under the lock, so the cost of a turn grows with every
-session ever created. Entries carry no timestamp, so pruning needs one added
-first; decide between a cap, a TTL, and dropping unbound entries. Note also that
-`evict_if_needed` removes an arbitrary `HashMap` key, not the least recently
-used, so it can evict a live session while keeping a dead one.
+There is no build or test workflow — only `upstream-watch.yml`. That absence is
+why `test_read_response_from_db` rotted unnoticed: it is `#[ignore]`d, and nobody
+runs `--include-ignored` by hand. A workflow should run `cargo build`,
+`cargo test`, and `cargo test -- --include-ignored` with the four e2e tests
+skipped, since those need `agy` and auth. Gate e2e behind a `GEMINI_API_KEY`
+secret so they skip rather than fail when it is absent. Do not add a bare
+`cargo fmt --check`: this tree is not rustfmt-clean and it would reflow files no
+change touched.
 
 #### Rename the binary and crate
 

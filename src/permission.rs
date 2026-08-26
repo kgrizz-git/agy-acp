@@ -63,6 +63,15 @@ impl Decision {
 }
 
 /// Remembered "always" answers, keyed by session and tool name.
+///
+/// In memory only, and never cleared: they are scoped to one session id and die
+/// with the process, so a reloaded session in a fresh process asks again.
+///
+/// Tool name, not arguments: one "always allow" on `run_command` covers every
+/// later command in the session. Containment and sensitive-path checks still run
+/// on a remembered allow, but they read arguments as paths and a command line is
+/// one opaque string, so they do not constrain it. Documented in the README and
+/// tracked in TODO.md.
 type AlwaysKey = (String, String);
 
 #[derive(Default)]
@@ -275,15 +284,28 @@ impl PermissionBridge {
         }
 
         let always_key = (session_id.clone(), tool_name.clone());
-        if let Some(decision) = self.state.lock().await.always.get(&always_key).copied() {
-            let reason = match decision {
-                Decision::Allow => format!("Always allowed `{tool_name}` in this session."),
-                Decision::Deny => format!("Always rejected `{tool_name}` in this session."),
-            };
+        // Copied out before the branch: the body awaits the same mutex, and an
+        // `if let` scrutinee guard would still be held inside it.
+        let remembered = { self.state.lock().await.always.get(&always_key).copied() };
+        if let Some(decision) = remembered {
+            // A remembered deny applies immediately and unchanged.
             if decision == Decision::Deny {
                 self.mark_user_refusal().await;
+                return (
+                    Decision::Deny,
+                    format!("Always rejected `{tool_name}` in this session."),
+                );
             }
-            return (decision, reason);
+            // A remembered allow is only honoured for calls the bridge itself would
+            // wave through. One that leaves the workspace or names something
+            // sensitive still goes to the user — the original allow never covered
+            // that, so it must not become a permanent bypass.
+            if !self.escapes_containment(&args).await {
+                return (
+                    Decision::Allow,
+                    format!("Always allowed `{tool_name}` in this session."),
+                );
+            }
         }
 
         let request_id = format!("{REQUEST_ID_PREFIX}{}", Uuid::new_v4());
@@ -306,7 +328,7 @@ impl PermissionBridge {
                     "kind": tool_kind(&tool_name),
                     "rawInput": args,
                 },
-                "options": permission_options(),
+                "options": permission_options(&tool_name),
             },
         });
 
@@ -333,6 +355,17 @@ impl PermissionBridge {
         self.apply_outcome(&outcome, always_key, &tool_name).await
     }
 
+    /// True when `args` leaves the workspace or names something sensitive — the
+    /// two conditions that, whatever the policy, still require a prompt.
+    async fn escapes_containment(&self, args: &Value) -> bool {
+        let (policy, workspace_roots) = {
+            let state = self.state.lock().await;
+            (state.policy.clone(), state.workspace_roots.clone())
+        };
+        outside_workspace(args, &workspace_roots).is_some()
+            || string_args(args).iter().any(|arg| policy.is_sensitive(arg))
+    }
+
     /// Decides whether a tool call is dull enough to approve without asking,
     /// returning the reason it was waved through.
     ///
@@ -342,21 +375,17 @@ impl PermissionBridge {
     /// about. And tools that reach the network are excluded even though they only
     /// read: a URL is an exfiltration channel, not just a fetch.
     async fn auto_allow_reason(&self, tool_name: &str, args: &Value) -> Option<String> {
-        let (policy, workspace_roots) = {
+        let policy = {
             let state = self.state.lock().await;
-            (state.policy.clone(), state.workspace_roots.clone())
+            state.policy.clone()
         };
 
         if !policy.allows(tool_name) {
             return None;
         }
-        // Leaving the workspace is worth a prompt on its own.
-        if outside_workspace(args, &workspace_roots).is_some() {
-            return None;
-        }
-        // As is anything that looks like it holds credentials. Checked over every
-        // string argument, not just the absolute ones, so a relative `.env` counts.
-        if string_args(args).iter().any(|arg| policy.is_sensitive(arg)) {
+        // Anything leaving the workspace or looking sensitive needs a prompt even
+        // when the tool itself would be auto-allowed.
+        if self.escapes_containment(args).await {
             return None;
         }
 
@@ -430,12 +459,26 @@ const OPTION_ALLOW_ALWAYS: &str = "allow_always";
 const OPTION_REJECT_ONCE: &str = "reject_once";
 const OPTION_REJECT_ALWAYS: &str = "reject_always";
 
-fn permission_options() -> Value {
+/// The four answers offered with every prompt.
+///
+/// `kind` is the ACP enum the host styles on; `name` is free display text and is
+/// ours to word. The "always" labels name the tool and say "this session"
+/// because that is what the answer covers -- every later call to that tool, for
+/// this session only -- and the prompt is where someone decides, not the README.
+fn permission_options(tool_name: &str) -> Value {
     json!([
-        { "optionId": OPTION_ALLOW_ONCE, "name": "Allow", "kind": "allow_once" },
-        { "optionId": OPTION_ALLOW_ALWAYS, "name": "Always allow", "kind": "allow_always" },
+        { "optionId": OPTION_ALLOW_ONCE, "name": "Allow once", "kind": "allow_once" },
+        {
+            "optionId": OPTION_ALLOW_ALWAYS,
+            "name": format!("Always allow {tool_name} this session"),
+            "kind": "allow_always",
+        },
         { "optionId": OPTION_REJECT_ONCE, "name": "Reject", "kind": "reject_once" },
-        { "optionId": OPTION_REJECT_ALWAYS, "name": "Always reject", "kind": "reject_always" },
+        {
+            "optionId": OPTION_REJECT_ALWAYS,
+            "name": format!("Always reject {tool_name} this session"),
+            "kind": "reject_always",
+        },
     ])
 }
 
@@ -564,31 +607,127 @@ impl AutoAllowPolicy {
     }
 }
 
-/// Returns the first absolute path in `args` that falls outside every root.
+/// Returns the first argument path in `args` that falls outside every root.
+///
+/// Two classes of argument are not absolute but still must be contained here, not
+/// in `absolute_paths`: a `~`-prefixed string is always outside the workspace
+/// (home-relative), and a string carrying a `..` component escapes unless it
+/// resolves lexically inside a root. Plain strings like a search query are left
+/// alone — only `/`-, `~`-prefixed, and `..`-bearing arguments are treated as paths.
 ///
 /// Paths are compared after resolving symlinks where possible, since macOS reports
 /// `/tmp/x` to agy but `/private/tmp/x` to the permission layer.
 fn outside_workspace(args: &Value, roots: &[PathBuf]) -> Option<String> {
+    let absolute = absolute_paths(args);
+
     if roots.is_empty() {
-        // Without a known workspace nothing can be judged inside it.
-        return absolute_paths(args).into_iter().next();
+        // Without a known workspace nothing can be judged inside it, and that has
+        // to cover all three shapes: `~/.ssh/id_rsa` is no more contained for the
+        // roots being unset than it is with them set.
+        return absolute
+            .into_iter()
+            .next()
+            .or_else(|| path_field_args(args).into_iter().next())
+            .or_else(|| {
+                string_args(args)
+                    .into_iter()
+                    .find(|s| s.starts_with('~') || has_parent_component(s))
+            });
     }
-    absolute_paths(args)
-        .into_iter()
+
+    // Absolute paths that escape are the common case.
+    if let Some(escaped) = absolute
+        .iter()
         .find(|path| !roots.iter().any(|root| is_inside(path, root)))
+    {
+        return Some(escaped.clone());
+    }
+
+    // A field that names a path names one whatever its value looks like, so a
+    // plain relative value is judged too: `link/secret.txt` carries no `/`, `~`
+    // or `..` and can still leave the workspace through a symlink.
+    if let Some(escaped) = path_field_args(args)
+        .into_iter()
+        .find(|path| !roots.iter().any(|root| is_inside_from(path, root)))
+    {
+        return Some(escaped);
+    }
+
+    // `~` is home-relative and therefore never inside the workspace.
+    let home_relative = string_args(args).into_iter().find(|s| s.starts_with('~'));
+    if home_relative.is_some() {
+        return home_relative;
+    }
+
+    // A `..` component can escape, and does so through symlinks as well as
+    // textually, so this goes through the same resolving check as an absolute
+    // path rather than trusting normalization.
+    string_args(args)
+        .into_iter()
+        .filter(|s| has_parent_component(s))
+        .find(|s| !roots.iter().any(|root| is_inside_from(s, root)))
+}
+
+/// True if `path` has a `..` component, rather than merely the two characters
+/// somewhere in it: `sub/../x` is a traversal, `foo..bar` is an ordinary name.
+fn has_parent_component(path: &str) -> bool {
+    path.split('/').any(|component| component == "..")
+}
+
+/// True if `path` is inside `root`, taking a relative path as relative to it.
+///
+/// The adapter runs with the workspace as its working directory, so that is what
+/// a relative argument is relative to: `sub/../file.txt` stays inside, `../secret`
+/// does not.
+fn is_inside_from(path: &str, root: &Path) -> bool {
+    if path.starts_with('/') {
+        return is_inside(path, root);
+    }
+    let root_norm = lexical_normalize(&root.display().to_string());
+    is_inside(&format!("{root_norm}/{path}"), root)
+}
+
+/// Resolves `.` and `..` components textually without touching the filesystem.
+fn lexical_normalize(path: &str) -> String {
+    let mut parts: Vec<&str> = Vec::new();
+    for component in path.split('/') {
+        match component {
+            "" | "." => {}
+            ".." => {
+                if matches!(parts.last(), Some(&"..")) || parts.is_empty() {
+                    parts.push("..");
+                } else {
+                    parts.pop();
+                }
+            }
+            other => parts.push(other),
+        }
+    }
+    if parts.is_empty() {
+        return "/".to_string();
+    }
+    let joined = parts.join("/");
+    if path.starts_with('/') {
+        format!("/{joined}")
+    } else {
+        joined
+    }
 }
 
 fn is_inside(path: &str, root: &Path) -> bool {
-    let candidates = [Some(PathBuf::from(path)), resolve(Path::new(path))];
+    // One candidate, and the resolved one wherever it exists. Accepting the path
+    // as written too would call `<root>/link/../secret` contained on the strength
+    // of its first component, even where `link` points out of the workspace and
+    // the kernel follows it there. Where nothing can be resolved -- a file not
+    // created yet -- normalizing at least cancels the `..` that `starts_with`
+    // would otherwise ignore.
+    let candidate =
+        resolve(Path::new(path)).unwrap_or_else(|| PathBuf::from(lexical_normalize(path)));
     let roots = [Some(root.to_path_buf()), resolve(root)];
-    for candidate in candidates.iter().flatten() {
-        for root in roots.iter().flatten() {
-            if candidate == root || candidate.starts_with(root) {
-                return true;
-            }
-        }
-    }
-    false
+    roots
+        .iter()
+        .flatten()
+        .any(|root| candidate == *root || candidate.starts_with(root))
 }
 
 /// Resolves a path, falling back to resolving the nearest existing ancestor so
@@ -600,6 +739,46 @@ fn resolve(path: &Path) -> Option<PathBuf> {
     let parent = path.parent()?;
     let name = path.file_name()?;
     std::fs::canonicalize(parent).ok().map(|p| p.join(name))
+}
+
+/// Argument fields whose value is a path whatever it looks like.
+///
+/// agy's tool arguments are a fixed schema and `tool_title` already leans on it.
+/// Judging these by name is what lets a plain relative path be checked without
+/// having to guess that an arbitrary string is a path -- a `Query` of
+/// `src/main.rs` must not start prompting.
+///
+/// A field missing from this list keeps the shape-based checks and nothing else,
+/// which is what every field had before it existed: an omission costs coverage,
+/// never a false prompt. It has to track agy.
+const PATH_FIELDS: &[&str] = &[
+    "AbsolutePath",
+    "TargetFile",
+    "DirectoryPath",
+    "SearchPath",
+    "Cwd",
+    "Paths",
+];
+
+/// Collects every string sitting under a `PATH_FIELDS` key, at any depth.
+fn path_field_args(args: &Value) -> Vec<String> {
+    fn walk(value: &Value, under_path_field: bool, found: &mut Vec<String>) {
+        match value {
+            Value::String(s) if under_path_field => found.push(s.clone()),
+            Value::Array(items) => items.iter().for_each(|v| walk(v, under_path_field, found)),
+            Value::Object(map) => map.iter().for_each(|(key, v)| {
+                walk(
+                    v,
+                    under_path_field || PATH_FIELDS.contains(&key.as_str()),
+                    found,
+                )
+            }),
+            _ => {}
+        }
+    }
+    let mut found = Vec::new();
+    walk(args, false, &mut found);
+    found
 }
 
 /// Collects every absolute-looking path appearing in the tool arguments.
@@ -832,13 +1011,14 @@ mod tests {
                     .await
             })
         };
-        let raw = rx.recv().await.unwrap().unwrap();
-        let request: Value = serde_json::from_str(&raw).unwrap();
+        let request = expect_permission_request(&mut rx).await;
         assert!(
             bridge
                 .resolve_response(
                     &request["id"],
-                    Some(json!({ "outcome": { "outcome": "selected", "optionId": "reject_once" } })),
+                    Some(
+                        json!({ "outcome": { "outcome": "selected", "optionId": "reject_once" } })
+                    ),
                 )
                 .await
         );
@@ -875,9 +1055,7 @@ mod tests {
             })
         };
 
-        let raw = rx.recv().await.unwrap().unwrap();
-        let request: Value = serde_json::from_str(&raw).unwrap();
-        assert_eq!(request["method"], "session/request_permission");
+        let request = expect_permission_request(&mut rx).await;
         assert_eq!(request["params"]["sessionId"], "session-1");
         assert_eq!(request["params"]["toolCall"]["title"], "Run `ls`");
 
@@ -915,8 +1093,7 @@ mod tests {
             let payload = payload.clone();
             tokio::spawn(async move { bridge.decide(&payload).await })
         };
-        let raw = rx.recv().await.unwrap().unwrap();
-        let request: Value = serde_json::from_str(&raw).unwrap();
+        let request = expect_permission_request(&mut rx).await;
         bridge
             .resolve_response(
                 &request["id"],
@@ -978,6 +1155,34 @@ mod tests {
         assert_eq!(decision, Decision::Deny);
         assert!(reason.contains("internal directory"));
         assert!(rx.try_recv().is_err(), "the user must not be prompted");
+    }
+
+    /// Waits for the bridge to ask the user, failing fast if it never does.
+    ///
+    /// A missing prompt is the interesting failure here -- it means a check was
+    /// bypassed -- and without a timeout that shows up as the whole suite
+    /// hanging rather than as a red test.
+    async fn expect_permission_request(
+        rx: &mut mpsc::UnboundedReceiver<Option<String>>,
+    ) -> Value {
+        let raw = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+            .await
+            .expect("the bridge must ask the user, not decide on its own")
+            .unwrap()
+            .unwrap();
+        let request: Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(request["method"], "session/request_permission");
+        request
+    }
+
+    /// Waits for a decision the bridge reaches on its own, failing fast if it
+    /// asks instead. The mirror of `expect_permission_request`: an unwanted
+    /// prompt goes unanswered here and would otherwise block for the whole
+    /// nine-minute response timeout, reading as a hung suite, not a red test.
+    async fn expect_auto_decision(bridge: &PermissionBridge, payload: Value) -> (Decision, String) {
+        tokio::time::timeout(std::time::Duration::from_secs(5), bridge.decide(&payload))
+            .await
+            .expect("the bridge must decide on its own, not ask the user")
     }
 
     /// Builds a bridge wired to a session, a workspace and an explicit policy.
@@ -1068,9 +1273,7 @@ mod tests {
             })
         };
 
-        let raw = rx.recv().await.unwrap().unwrap();
-        let request: Value = serde_json::from_str(&raw).unwrap();
-        assert_eq!(request["method"], "session/request_permission");
+        let request = expect_permission_request(&mut rx).await;
         bridge
             .resolve_response(
                 &request["id"],
@@ -1135,10 +1338,545 @@ mod tests {
             })
         };
 
-        let raw = rx.recv().await.unwrap().unwrap();
-        let request: Value = serde_json::from_str(&raw).unwrap();
-        assert_eq!(request["method"], "session/request_permission");
+        let request = expect_permission_request(&mut rx).await;
 
+        bridge
+            .resolve_response(
+                &request["id"],
+                Some(json!({ "outcome": { "outcome": "selected", "optionId": "reject_once" } })),
+            )
+            .await;
+        assert_eq!(asking.await.unwrap().0, Decision::Deny);
+    }
+
+    #[tokio::test]
+    async fn parent_traversal_is_treated_as_outside_the_workspace() {
+        let workspace = std::env::temp_dir().join("agy-acp-dotdot-test");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let (bridge, mut rx) = test_bridge(&workspace.display().to_string(), READ_TOOLS).await;
+
+        let asking = {
+            let bridge = bridge.clone();
+            tokio::spawn(async move {
+                bridge
+                    .decide(&json!({
+                        "conversationId": "conv-1",
+                        "toolCall": { "name": "view_file", "args": { "AbsolutePath": "../../secret" } },
+                    }))
+                    .await
+            })
+        };
+
+        let request = expect_permission_request(&mut rx).await;
+        bridge
+            .resolve_response(
+                &request["id"],
+                Some(json!({ "outcome": { "outcome": "selected", "optionId": "reject_once" } })),
+            )
+            .await;
+        assert_eq!(asking.await.unwrap().0, Decision::Deny);
+    }
+
+    #[tokio::test]
+    async fn home_relative_paths_are_treated_as_outside_the_workspace() {
+        let workspace = std::env::temp_dir().join("agy-acp-home-test");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let (bridge, mut rx) = test_bridge(&workspace.display().to_string(), READ_TOOLS).await;
+
+        let asking = {
+            let bridge = bridge.clone();
+            tokio::spawn(async move {
+                bridge
+                    .decide(&json!({
+                        "conversationId": "conv-1",
+                        "toolCall": { "name": "view_file", "args": { "AbsolutePath": "~/.ssh/id_rsa" } },
+                    }))
+                    .await
+            })
+        };
+
+        let request = expect_permission_request(&mut rx).await;
+        bridge
+            .resolve_response(
+                &request["id"],
+                Some(json!({ "outcome": { "outcome": "selected", "optionId": "reject_once" } })),
+            )
+            .await;
+        assert_eq!(asking.await.unwrap().0, Decision::Deny);
+    }
+
+    #[tokio::test]
+    async fn dot_dot_inside_the_workspace_is_still_inside() {
+        let workspace = std::env::temp_dir().join("agy-acp-dotdot-inside-test");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let (bridge, mut rx) = test_bridge(&workspace.display().to_string(), READ_TOOLS).await;
+
+        let target = format!("{}/sub/../file.txt", workspace.display());
+        let (decision, reason) = expect_auto_decision(
+            &bridge,
+            json!({
+                "conversationId": "conv-1",
+                "toolCall": { "name": "view_file", "args": { "AbsolutePath": target } },
+            }),
+        )
+        .await;
+
+        assert_eq!(
+            decision,
+            Decision::Allow,
+            "a `..` that stays inside must auto-allow"
+        );
+        assert!(reason.contains("Auto-allowed"), "{reason}");
+        assert!(rx.try_recv().is_err(), "the user must not be prompted");
+    }
+
+    #[tokio::test]
+    async fn a_relative_dot_dot_that_stays_inside_the_workspace_is_still_inside() {
+        let workspace = std::env::temp_dir().join("agy-acp-relative-dotdot-test");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let (bridge, mut rx) = test_bridge(&workspace.display().to_string(), READ_TOOLS).await;
+
+        // Relative to the workspace this is just `file.txt`. Normalizing it without
+        // the workspace leaves a rootless `file.txt`, which matches no root and
+        // would prompt for a read that never leaves the workspace.
+        let (decision, reason) = expect_auto_decision(
+            &bridge,
+            json!({
+                "conversationId": "conv-1",
+                "toolCall": { "name": "view_file", "args": { "AbsolutePath": "sub/../file.txt" } },
+            }),
+        )
+        .await;
+
+        assert_eq!(
+            decision,
+            Decision::Allow,
+            "a workspace-relative `..` that stays inside must auto-allow"
+        );
+        assert!(reason.contains("Auto-allowed"), "{reason}");
+        assert!(rx.try_recv().is_err(), "the user must not be prompted");
+    }
+
+    /// `outside_workspace` is pure, so these go straight at it: they cover the
+    /// shapes that never reach a bridge test because they are decided before the
+    /// prompt.
+    #[test]
+    fn without_a_workspace_root_nothing_is_contained() {
+        let none: &[PathBuf] = &[];
+        let outside = |args| outside_workspace(&args, none);
+
+        assert_eq!(
+            outside(json!({ "AbsolutePath": "/etc/passwd" })).as_deref(),
+            Some("/etc/passwd")
+        );
+        // These two used to slip through: the empty-roots branch looked only at
+        // arguments starting with `/`, so an unset workspace made them contained.
+        assert_eq!(
+            outside(json!({ "AbsolutePath": "~/.ssh/id_rsa" })).as_deref(),
+            Some("~/.ssh/id_rsa")
+        );
+        assert_eq!(
+            outside(json!({ "AbsolutePath": "../../secret" })).as_deref(),
+            Some("../../secret")
+        );
+        assert_eq!(
+            outside(json!({ "Query": "foo..bar" })),
+            None,
+            "a query is not a path, with or without a root"
+        );
+    }
+
+    /// A symlink is the case lexical normalization cannot see: `link/..` cancels
+    /// on paper, but the kernel resolves `link` first and `..` then leaves from
+    /// wherever it landed.
+    #[test]
+    fn a_symlink_out_of_the_workspace_is_not_contained() {
+        let base = std::env::temp_dir().join(format!("agy-acp-symlink-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let workspace = base.join("work");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), "s").unwrap();
+        std::fs::write(workspace.join("file.txt"), "f").unwrap();
+        std::os::unix::fs::symlink(&outside, workspace.join("link")).unwrap();
+
+        let roots = vec![workspace.clone()];
+        let escaping = format!("{}/link/../outside/secret.txt", workspace.display());
+
+        assert_eq!(
+            outside_workspace(&json!({ "AbsolutePath": escaping }), &roots).as_deref(),
+            Some(escaping.as_str()),
+            "an absolute path that leaves through a symlink is outside"
+        );
+        assert!(
+            outside_workspace(
+                &json!({ "AbsolutePath": "link/../outside/secret.txt" }),
+                &roots
+            )
+            .is_some(),
+            "and so is the same path written relative to the workspace"
+        );
+        assert_eq!(
+            outside_workspace(
+                &json!({ "AbsolutePath": format!("{}/sub/../file.txt", workspace.display()) }),
+                &roots
+            ),
+            None,
+            "a `..` over a directory that does not exist still resolves inside"
+        );
+
+        // The shape-based tests see nothing wrong with this one: no leading `/`,
+        // no `~`, no `..`. It is judged because `AbsolutePath` is a path field.
+        assert_eq!(
+            outside_workspace(&json!({ "AbsolutePath": "link/secret.txt" }), &roots).as_deref(),
+            Some("link/secret.txt"),
+            "a plain relative path field still leaves through the symlink"
+        );
+        assert_eq!(
+            outside_workspace(&json!({ "Query": "link/secret.txt" }), &roots),
+            None,
+            "the same string in a query field is a search term, not a path"
+        );
+        assert_eq!(
+            outside_workspace(&json!({ "TargetFile": "notes.txt" }), &roots),
+            None,
+            "a relative path field inside the workspace stays silent"
+        );
+        assert_eq!(
+            outside_workspace(
+                &json!({ "Paths": ["notes.txt", "link/secret.txt"] }),
+                &roots
+            )
+            .as_deref(),
+            Some("link/secret.txt"),
+            "path fields are judged through arrays too"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_double_dot_inside_a_name_is_not_a_traversal() {
+        let roots = vec![PathBuf::from("/work")];
+        assert_eq!(
+            outside_workspace(&json!({ "Query": "foo..bar" }), &roots),
+            None,
+            "`..` must be a path component to count, not two characters"
+        );
+        assert_eq!(
+            outside_workspace(&json!({ "AbsolutePath": "../secret" }), &roots).as_deref(),
+            Some("../secret")
+        );
+    }
+
+    #[tokio::test]
+    async fn an_ordinary_string_argument_is_not_mistaken_for_a_path() {
+        let workspace = std::env::temp_dir().join("agy-acp-query-test");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let (bridge, mut rx) =
+            test_bridge(&workspace.display().to_string(), &["grep_search"]).await;
+
+        let (decision, reason) = bridge
+            .decide(&json!({
+                "conversationId": "conv-1",
+                "toolCall": { "name": "grep_search", "args": { "Query": "foo bar" } },
+            }))
+            .await;
+
+        assert_eq!(decision, Decision::Allow, "a plain query must auto-allow");
+        assert!(reason.contains("Auto-allowed"), "{reason}");
+        assert!(rx.try_recv().is_err(), "the user must not be prompted");
+    }
+
+    #[tokio::test]
+    async fn always_allow_does_not_bypass_the_sensitive_path_check() {
+        let workspace = std::env::temp_dir().join("agy-acp-always-sensitive-test");
+        std::fs::create_dir_all(&workspace).unwrap();
+        // Nothing auto-allowed, so the first call reaches the user and the sticky
+        // answer is actually recorded. Both calls use the same tool: the sticky
+        // key is (session, tool), so a second call to a different tool would
+        // never consult the remembered answer and would prove nothing.
+        let (bridge, mut rx) = test_bridge(&workspace.display().to_string(), &[]).await;
+        let ordinary = workspace.join("notes.md").display().to_string();
+
+        let first = {
+            let bridge = bridge.clone();
+            tokio::spawn(async move {
+                bridge
+                    .decide(&json!({
+                        "conversationId": "conv-1",
+                        "toolCall": { "name": "view_file", "args": { "AbsolutePath": ordinary } },
+                    }))
+                    .await
+            })
+        };
+        let request = expect_permission_request(&mut rx).await;
+        bridge
+            .resolve_response(
+                &request["id"],
+                Some(json!({ "outcome": { "outcome": "selected", "optionId": "allow_always" } })),
+            )
+            .await;
+        assert_eq!(first.await.unwrap().0, Decision::Allow);
+
+        // Same tool, sensitive path: the remembered allow must not cover it.
+        let second = {
+            let bridge = bridge.clone();
+            tokio::spawn(async move {
+                bridge
+                    .decide(&json!({
+                        "conversationId": "conv-1",
+                        "toolCall": { "name": "view_file", "args": { "AbsolutePath": ".env" } },
+                    }))
+                    .await
+            })
+        };
+        let request = expect_permission_request(&mut rx).await;
+        bridge
+            .resolve_response(
+                &request["id"],
+                Some(json!({ "outcome": { "outcome": "selected", "optionId": "reject_once" } })),
+            )
+            .await;
+        assert_eq!(second.await.unwrap().0, Decision::Deny);
+    }
+
+    #[tokio::test]
+    async fn always_allow_does_not_bypass_the_workspace_check() {
+        let workspace = std::env::temp_dir().join("agy-acp-always-workspace-test");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let (bridge, mut rx) = test_bridge(&workspace.display().to_string(), &[]).await;
+        let ordinary = workspace.join("notes.md").display().to_string();
+
+        let first = {
+            let bridge = bridge.clone();
+            tokio::spawn(async move {
+                bridge
+                    .decide(&json!({
+                        "conversationId": "conv-1",
+                        "toolCall": { "name": "view_file", "args": { "AbsolutePath": ordinary } },
+                    }))
+                    .await
+            })
+        };
+        let request = expect_permission_request(&mut rx).await;
+        bridge
+            .resolve_response(
+                &request["id"],
+                Some(json!({ "outcome": { "outcome": "selected", "optionId": "allow_always" } })),
+            )
+            .await;
+        assert_eq!(first.await.unwrap().0, Decision::Allow);
+
+        // Same tool, path outside the workspace: still the user's call.
+        let second = {
+            let bridge = bridge.clone();
+            tokio::spawn(async move {
+                bridge
+                    .decide(&json!({
+                        "conversationId": "conv-1",
+                        "toolCall": { "name": "view_file", "args": { "AbsolutePath": "../../secret" } },
+                    }))
+                    .await
+            })
+        };
+        let request = expect_permission_request(&mut rx).await;
+        bridge
+            .resolve_response(
+                &request["id"],
+                Some(json!({ "outcome": { "outcome": "selected", "optionId": "reject_once" } })),
+            )
+            .await;
+        assert_eq!(second.await.unwrap().0, Decision::Deny);
+    }
+
+    #[tokio::test]
+    async fn always_reject_still_applies_immediately() {
+        let workspace = std::env::temp_dir().join("agy-acp-always-reject-test");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let (bridge, mut rx) = test_bridge(&workspace.display().to_string(), READ_TOOLS).await;
+
+        // First call must prompt, so use a non-auto-allowed tool.
+        let first = {
+            let bridge = bridge.clone();
+            tokio::spawn(async move {
+                bridge
+                    .decide(&json!({
+                        "conversationId": "conv-1",
+                        "toolCall": { "name": "run_command", "args": { "CommandLine": "ls" } },
+                    }))
+                    .await
+            })
+        };
+        let request = expect_permission_request(&mut rx).await;
+        bridge
+            .resolve_response(
+                &request["id"],
+                Some(json!({ "outcome": { "outcome": "selected", "optionId": "reject_always" } })),
+            )
+            .await;
+        assert_eq!(first.await.unwrap().0, Decision::Deny);
+
+        // Second call: same tool, so the remembered reject must apply with no new
+        // prompt — regardless of what the arguments are.
+        let (decision, _) = bridge
+            .decide(&json!({
+                "conversationId": "conv-1",
+                "toolCall": { "name": "run_command", "args": { "CommandLine": "rm -rf /" } },
+            }))
+            .await;
+        assert_eq!(decision, Decision::Deny);
+        assert!(
+            rx.try_recv().is_err(),
+            "the remembered reject must not prompt again"
+        );
+    }
+
+    /// Records a remembered "Always allow" for `run_command` and returns the bridge.
+    async fn bridge_with_run_command_always_allowed(
+        workspace: &str,
+    ) -> (PermissionBridge, mpsc::UnboundedReceiver<Option<String>>) {
+        let (bridge, mut rx) = test_bridge(workspace, &[]).await;
+        let first = {
+            let bridge = bridge.clone();
+            tokio::spawn(async move {
+                bridge
+                    .decide(&json!({
+                        "conversationId": "conv-1",
+                        "toolCall": { "name": "run_command", "args": { "CommandLine": "ls" } },
+                    }))
+                    .await
+            })
+        };
+        let request = expect_permission_request(&mut rx).await;
+        bridge
+            .resolve_response(
+                &request["id"],
+                Some(json!({ "outcome": { "outcome": "selected", "optionId": "allow_always" } })),
+            )
+            .await;
+        assert_eq!(first.await.unwrap().0, Decision::Allow);
+        (bridge, rx)
+    }
+
+    #[tokio::test]
+    async fn the_always_options_say_what_they_cover() {
+        let workspace = std::env::temp_dir().join("agy-acp-option-label-test");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let (bridge, mut rx) = test_bridge(&workspace.display().to_string(), &[]).await;
+
+        let asking = {
+            let bridge = bridge.clone();
+            tokio::spawn(async move {
+                bridge
+                    .decide(&json!({
+                        "conversationId": "conv-1",
+                        "toolCall": { "name": "run_command", "args": { "CommandLine": "ls" } },
+                    }))
+                    .await
+            })
+        };
+        let request = expect_permission_request(&mut rx).await;
+        let options = request["params"]["options"].as_array().unwrap().clone();
+
+        let named = |kind: &str| -> String {
+            options
+                .iter()
+                .find(|o| o["kind"] == kind)
+                .unwrap()["name"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        // The answer covers the tool for the session, so the label has to say so:
+        // this prompt is where someone decides, and it shows only one command.
+        assert_eq!(named("allow_always"), "Always allow run_command this session");
+        assert_eq!(named("reject_always"), "Always reject run_command this session");
+        // The ACP kinds stay standard so hosts can still style and bind them.
+        for kind in ["allow_once", "allow_always", "reject_once", "reject_always"] {
+            assert!(options.iter().any(|o| o["kind"] == kind), "missing {kind}");
+        }
+
+        bridge
+            .resolve_response(
+                &request["id"],
+                Some(json!({ "outcome": { "outcome": "selected", "optionId": "reject_once" } })),
+            )
+            .await;
+        assert_eq!(asking.await.unwrap().0, Decision::Deny);
+    }
+
+    /// Pins a known gap, tracked in TODO.md: sticky answers are keyed by tool
+    /// name, so approving one command approves every later command. This test
+    /// asserts today's behaviour deliberately -- when the gap is closed it will
+    /// fail, which is the point: the fix must come with a doc change.
+    #[tokio::test]
+    async fn always_allow_is_remembered_per_tool_not_per_command() {
+        let workspace = std::env::temp_dir().join("agy-acp-always-per-tool-test");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let (bridge, mut rx) =
+            bridge_with_run_command_always_allowed(&workspace.display().to_string()).await;
+
+        // A completely different, destructive command. "Always allow" was never
+        // asked about this one, and the user is not consulted.
+        let (decision, reason) = bridge
+            .decide(&json!({
+                "conversationId": "conv-1",
+                "toolCall": { "name": "run_command", "args": { "CommandLine": "rm -rf build" } },
+            }))
+            .await;
+        assert_eq!(decision, Decision::Allow, "{reason}");
+        assert!(
+            rx.try_recv().is_err(),
+            "today the user is not asked again -- this is the gap, not the goal"
+        );
+    }
+
+    /// Pins the other half of the same gap: a command is one opaque string, so
+    /// the containment check never sees the path inside it. `absolute_paths`
+    /// keeps strings that *start with* `/`, and "cat /etc/shadow" does not.
+    #[tokio::test]
+    async fn a_path_inside_a_command_string_is_invisible_to_the_containment_check() {
+        let workspace = std::env::temp_dir().join("agy-acp-command-path-test");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let (bridge, mut rx) =
+            bridge_with_run_command_always_allowed(&workspace.display().to_string()).await;
+
+        let outside = json!({
+            "conversationId": "conv-1",
+            "toolCall": { "name": "run_command", "args": { "CommandLine": "cat /etc/shadow" } },
+        });
+        assert!(
+            outside_workspace(
+                &outside["toolCall"]["args"],
+                &[PathBuf::from(&workspace)]
+            )
+            .is_none(),
+            "the embedded path is not recognised as a path at all"
+        );
+
+        let (decision, reason) = bridge.decide(&outside).await;
+        assert_eq!(decision, Decision::Allow, "{reason}");
+        assert!(rx.try_recv().is_err(), "and so the user is not asked");
+
+        // The denylist is what happens to catch the neighbouring case, by
+        // substring and not by containment -- a second line, not the defence.
+        let asking = {
+            let bridge = bridge.clone();
+            tokio::spawn(async move {
+                bridge
+                    .decide(&json!({
+                        "conversationId": "conv-1",
+                        "toolCall": {
+                            "name": "run_command",
+                            "args": { "CommandLine": "cat /etc/passwd" },
+                        },
+                    }))
+                    .await
+            })
+        };
+        let request = expect_permission_request(&mut rx).await;
         bridge
             .resolve_response(
                 &request["id"],
@@ -1205,8 +1943,7 @@ mod tests {
             })
         };
 
-        let raw = rx.recv().await.unwrap().unwrap();
-        let request: Value = serde_json::from_str(&raw).unwrap();
+        let request = expect_permission_request(&mut rx).await;
         bridge
             .resolve_response(
                 &request["id"],

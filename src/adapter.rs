@@ -2,7 +2,6 @@ use fs2::FileExt;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::fs;
-use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -17,6 +16,44 @@ use crate::db::read_replay_updates_from_db;
 use crate::permission::{PermissionBridge, SOCKET_ENV};
 use crate::streaming::StreamProcessor;
 use crate::types::*;
+
+/// Reads a single newline-terminated frame from `reader` into `buf`.
+///
+/// Returns `Ok(true)` when a frame (including its trailing `\n`) was read,
+/// `Ok(false)` at EOF with nothing more to read, or `Err` on an underlying I/O
+/// error. `buf` is cleared first so each call yields exactly one frame. Split
+/// out from the stdout drain task so the byte-oriented loop can be unit-tested
+/// without spawning a real `agy` process.
+pub(crate) async fn read_until_newline<R: AsyncBufReadExt + Unpin>(
+    reader: &mut R,
+    buf: &mut Vec<u8>,
+) -> std::io::Result<bool> {
+    buf.clear();
+    let n = reader.read_until(b'\n', buf).await?;
+    Ok(n != 0)
+}
+
+/// Processes one stream-json frame and publishes its `session/update`
+/// notifications on `notify_tx`.
+///
+/// Split out of the stdout drain task so it can be unit-tested without spawning
+/// a real `agy` process. `processor` is the per-turn `StreamProcessor` and is
+/// mutated in place, since stream-json is a sequence of events that carry state
+/// (conversation binding, step indices, de-duplicated text).
+///
+/// Only ever sends `Some(..)`. `None` is the main loop's "pending prompt
+/// finished" sentinel, so sending it here would corrupt `pending_prompts` and
+/// make the process exit early.
+pub(crate) fn publish_stream_notifications(
+    processor: &mut StreamProcessor,
+    notify_tx: &tokio::sync::mpsc::UnboundedSender<Option<String>>,
+    line: &str,
+    session_id: &str,
+) {
+    for notification in processor.process_line(line, session_id) {
+        let _ = notify_tx.send(Some(notification));
+    }
+}
 
 pub struct Adapter {
     pub sessions: HashMap<String, Session>,
@@ -33,11 +70,17 @@ pub struct Adapter {
     pub permission_bridge: Option<PermissionBridge>,
     /// Private workspace root supplying the `PreToolUse` hook to agy.
     pub hook_root_dir: Option<PathBuf>,
+    /// Monotonic recency counter handed out by `touch_session`. A counter rather
+    /// than wall-clock time so eviction order survives a clock that jumps.
+    pub session_tick: u64,
 }
 
 /// Print-mode timeout used when permission prompts are on. Must outlast the
 /// bridge's own wait so an unanswered prompt ends as a deny, not a failed turn.
 const PERMISSION_PRINT_TIMEOUT: &str = "60m";
+/// Hard cap on persisted sessions in sessions.json. The file is fully rewritten
+/// on every turn, so keeping it bounded is what stops it growing without limit.
+const MAX_PERSISTED_SESSIONS: usize = 256;
 
 impl Adapter {
     pub const MODEL_CONFIG_ID: &'static str = "model";
@@ -66,6 +109,7 @@ impl Adapter {
             skip_naration,
             permission_bridge: None,
             hook_root_dir: None,
+            session_tick: 0,
         }
     }
 
@@ -248,6 +292,10 @@ impl Adapter {
         let Some(_lock) = self.lock_state_file() else {
             return;
         };
+        let updated_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
         let mut store = self.load_store_inner();
         store.sessions.insert(
             session_id.to_string(),
@@ -255,12 +303,45 @@ impl Adapter {
                 conversation_id: conversation_id.map(String::from),
                 last_step_idx,
                 model_id: model_id.map(String::from),
+                updated_at,
             },
         );
+        // The just-written entry must survive pruning even if it is old; its
+        // caller still needs it on the next turn.
+        Self::prune_store(&mut store, session_id);
         let tmp = self.state_file.with_extension("tmp");
         if let Ok(file) = fs::File::create(&tmp) {
             if serde_json::to_writer_pretty(&file, &store).is_ok() {
                 let _ = fs::rename(&tmp, &self.state_file);
+            }
+        }
+    }
+
+    /// Drop persisted sessions past the cap. Unbindable entries (no
+    /// conversation_id, so they can never be resumed) are removed before bound
+    /// ones, and within each group the oldest `updated_at` goes first. The entry
+    /// just written is never removed, even if the order would pick it.
+    fn prune_store(store: &mut SessionStore, just_written: &str) {
+        while store.sessions.len() > MAX_PERSISTED_SESSIONS {
+            let victim = store
+                .sessions
+                .iter()
+                .filter(|(id, _s)| *id != just_written)
+                .filter(|(_, s)| s.conversation_id.is_none())
+                .min_by_key(|(_, s)| s.updated_at)
+                .or_else(|| {
+                    store
+                        .sessions
+                        .iter()
+                        .filter(|(id, _s)| *id != just_written)
+                        .min_by_key(|(_, s)| s.updated_at)
+                })
+                .map(|(id, _)| id.clone());
+            match victim {
+                Some(id) => {
+                    store.sessions.remove(&id);
+                }
+                None => break,
             }
         }
     }
@@ -284,12 +365,49 @@ impl Adapter {
         })
     }
 
-    fn evict_if_needed(&mut self) {
+    /// Advance the recency clock and stamp the named session, if present, with
+    /// the new tick. Callers use this before serving any request so the session
+    /// they are about to use is never the one evicted.
+    fn touch_session(&mut self, session_id: &str) {
+        self.session_tick += 1;
+        if let Some(session) = self.sessions.get_mut(session_id) {
+            session.last_used = self.session_tick;
+        }
+    }
+
+    pub(crate) fn evict_if_needed(&mut self) {
         const MAX_SESSIONS: usize = 64;
         while self.sessions.len() >= MAX_SESSIONS {
-            if let Some(key) = self.sessions.keys().next().cloned() {
-                self.sessions.remove(&key);
+            // Drop the entry least recently used, not whichever HashMap key the
+            // iterator happens to land on first — that could evict a live turn.
+            let victim = self
+                .sessions
+                .iter()
+                .min_by_key(|(_, s)| s.last_used)
+                .map(|(id, _)| id.clone());
+            match victim {
+                Some(key) => {
+                    self.sessions.remove(&key);
+                }
+                None => break,
             }
+        }
+    }
+
+    /// Build a `Session` stamped with the current recency tick. Every insert goes
+    /// through here so no session can be created without one.
+    fn make_session(
+        &mut self,
+        conversation_id: Option<String>,
+        last_step_idx: i64,
+        model_id: Option<String>,
+    ) -> Session {
+        self.session_tick += 1;
+        Session {
+            conversation_id,
+            last_step_idx,
+            model_id,
+            last_used: self.session_tick,
         }
     }
 
@@ -301,17 +419,13 @@ impl Adapter {
         if !self.sessions.contains_key(session_id) {
             self.evict_if_needed();
         }
-        self.sessions.insert(
-            session_id.to_string(),
-            Session {
-                conversation_id: Some(conversation_id),
-                last_step_idx,
-                // Sessions written before the parser was fixed hold an id with the
-                // display label glued on; agy rejects that outright, so repair it
-                // here rather than failing every resumed thread.
-                model_id: model_id.as_deref().map(Self::sanitize_model_id),
-            },
+        // Built before the insert so the recency tick does not alias the map borrow.
+        let session = self.make_session(
+            Some(conversation_id),
+            last_step_idx,
+            model_id.as_deref().map(Self::sanitize_model_id),
         );
+        self.sessions.insert(session_id.to_string(), session);
         true
     }
 
@@ -335,14 +449,8 @@ impl Adapter {
     pub fn handle_session_new(&mut self, id: Value) -> JsonRpcResponse {
         let session_id = Uuid::new_v4().to_string();
         self.evict_if_needed();
-        self.sessions.insert(
-            session_id.clone(),
-            Session {
-                conversation_id: None,
-                last_step_idx: -1,
-                model_id: None,
-            },
-        );
+        let session = self.make_session(None, -1, None);
+        self.sessions.insert(session_id.clone(), session);
         let result = self.session_config_result_json(&session_id, None);
         JsonRpcResponse {
             jsonrpc: "2.0",
@@ -375,6 +483,7 @@ impl Adapter {
             .unwrap()];
         }
 
+        self.touch_session(session_id);
         if !self.sessions.contains_key(session_id) && !self.restore_session_state(session_id) {
             return vec![serde_json::to_string(&JsonRpcResponse {
                 jsonrpc: "2.0",
@@ -398,7 +507,8 @@ impl Adapter {
             .get(session_id)
             .and_then(|session| session.conversation_id.clone());
         if let Some(conv_id) = replay_conv_id {
-            if let Some((updates, max_step_idx)) = self.read_replay_updates_from_db_inner(&conv_id) {
+            if let Some((updates, max_step_idx)) = self.read_replay_updates_from_db_inner(&conv_id)
+            {
                 for update in updates {
                     let notification = serde_json::to_string(&JsonRpcNotification {
                         jsonrpc: "2.0",
@@ -460,6 +570,7 @@ impl Adapter {
             };
         }
 
+        self.touch_session(session_id);
         if self.sessions.contains_key(session_id) || self.restore_session_state(session_id) {
             let model_id = self
                 .sessions
@@ -501,6 +612,7 @@ impl Adapter {
             };
         }
 
+        self.touch_session(session_id);
         if !self.sessions.contains_key(session_id) {
             let _ = self.restore_session_state(session_id);
         }
@@ -589,6 +701,7 @@ impl Adapter {
             };
         }
 
+        self.touch_session(session_id);
         if !self.sessions.contains_key(session_id) {
             let _ = self.restore_session_state(session_id);
         }
@@ -640,17 +753,22 @@ impl Adapter {
         }
     }
 
+    /// `notify_tx` carries `session/update` notifications to the main loop, which
+    /// is the only writer of stdout. A second writer would interleave mid-line and
+    /// corrupt the JSON-RPC stream, so the stream reader never touches the fd.
     pub async fn handle_session_prompt(
         &mut self,
         id: Value,
         params: &Value,
         cancelled: Arc<AtomicBool>,
+        notify_tx: tokio::sync::mpsc::UnboundedSender<Option<String>>,
     ) -> Vec<String> {
         let session_id = params
             .get("sessionId")
             .and_then(|v| v.as_str())
             .unwrap_or("");
 
+        self.touch_session(session_id);
         if !session_id.is_empty() && !self.sessions.contains_key(session_id) {
             let _ = self.restore_session_state(session_id);
         }
@@ -742,16 +860,54 @@ impl Adapter {
         let stdout = child.stdout.take();
         let skip_naration = self.skip_naration;
         let poll_session_id = session_id.to_string();
+        // Set when nothing can read agy's stdout any more. The child would then
+        // block on a full pipe and `child.wait()` would never return, so this
+        // ends the turn the same way a cancel does -- by killing the child.
+        let undrainable = Arc::new(AtomicBool::new(false));
+        let drain_failed = Arc::clone(&undrainable);
         let stdout_reader = tokio::spawn(async move {
             let mut processor = StreamProcessor::new(skip_naration);
             if let Some(stdout) = stdout {
-                let mut lines = BufReader::new(stdout).lines();
-                let mut out = io::stdout();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    for notification in processor.process_line(&line, &poll_session_id) {
-                        let _ = writeln!(out, "{}", notification);
+                let mut reader = BufReader::new(stdout);
+                let mut read_error: Option<String> = None;
+                let mut buf = Vec::new();
+                loop {
+                    match read_until_newline(&mut reader, &mut buf).await {
+                        Ok(true) => {
+                            // from_utf8_lossy, not from_utf8: a malformed byte must
+                            // not be able to end this drain, or the pipe stops being
+                            // read, fills, and wedges child.wait() forever. At worst
+                            // one event fails to parse and is skipped below.
+                            let line = String::from_utf8_lossy(&buf)
+                                .trim_end_matches(['\n', '\r'])
+                                .to_string();
+                            publish_stream_notifications(
+                                &mut processor,
+                                &notify_tx,
+                                &line,
+                                &poll_session_id,
+                            );
+                        }
+                        Ok(false) => break, // EOF
+                        Err(e) => {
+                            read_error = Some(e.to_string());
+                            // The child may still have bytes queued; drain them so its
+                            // stdout pipe never blocks and child.wait() can return.
+                            // If even that fails the pipe is unreadable, and waiting
+                            // on a child that cannot write is the hang this whole
+                            // loop exists to avoid.
+                            if tokio::io::copy(&mut reader, &mut tokio::io::sink())
+                                .await
+                                .is_err()
+                            {
+                                drain_failed.store(true, Ordering::SeqCst);
+                            }
+                            break;
+                        }
                     }
-                    let _ = out.flush();
+                }
+                if let Some(e) = read_error {
+                    eprintln!("agy-acp: error reading agy stdout: {e}");
                 }
             }
             processor
@@ -770,11 +926,13 @@ impl Adapter {
         let result = tokio::select! {
             result = child.wait() => result,
             _ = async {
-                while !cancelled.load(Ordering::SeqCst) {
+                while !cancelled.load(Ordering::SeqCst) && !undrainable.load(Ordering::SeqCst) {
                     tokio::time::sleep(Duration::from_millis(50)).await;
                 }
             } => {
-                was_cancelled = true;
+                // An undrainable pipe kills the child too, but it is not a cancel:
+                // the turn failed, and reporting it as cancelled would hide that.
+                was_cancelled = cancelled.load(Ordering::SeqCst);
                 let _ = child.kill().await;
                 child.wait().await
             }

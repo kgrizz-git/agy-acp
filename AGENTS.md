@@ -7,8 +7,8 @@ Single Rust crate. ACP (Agent Client Protocol) stdio adapter for Google Antigrav
 ```bash
 cargo build                    # debug build
 cargo build --release          # release build (required for e2e tests)
-cargo test                     # unit tests only (fast, no I/O)
-cargo test -- --include-ignored  # all tests including filesystem I/O tests
+cargo test                     # unit tests (fast; some use a scratch dir in $TMPDIR)
+cargo test -- --include-ignored  # adds session persist/restore and DB tests
 cargo test e2e -- --ignored --nocapture  # e2e only (needs agy binary + auth)
 ```
 
@@ -35,12 +35,16 @@ code works today. Completed work is recorded in [CHANGELOG.md](CHANGELOG.md).
 
 | Path | Purpose |
 |---|---|
-| `~/.openab/agy-acp/sessions.json` | Persisted session→conversation mapping (with `.lock` file for mutual exclusion) |
+| `~/.openab/agy-acp/sessions.json` | Persisted session→conversation mapping (with `.lock` file for mutual exclusion). Capped at 256 entries, rewritten whole on every turn |
 
 ## Test tiers
 
-1. **Unit tests** (`cargo test`) — stream-json parsing, narration filtering, JSON-RPC response shape. No filesystem or network I/O.
-2. **Ignored I/O tests** (`-- --include-ignored`) — session persist/restore. Create temp dirs in `$TMPDIR`.
+1. **Unit tests** (`cargo test`) — stream-json parsing, narration filtering,
+   JSON-RPC response shape, permission decisions. No network and no reads of the
+   real `$HOME`; several do create a scratch directory under `$TMPDIR`.
+2. **Ignored I/O tests** (`-- --include-ignored`) — session persist/restore and
+   conversation-DB reads. They are `#[ignore]`d by inheritance, not because they
+   touch anything tier 1 does not; the split is worth revisiting when CI lands.
 3. **E2E tests** (`e2e -- --ignored`) — spawn the release binary, send JSON-RPC over stdin, verify responses. Requires:
    - `agy` in `PATH` (install from `google-antigravity/antigravity-cli` releases)
    - Auth via `GEMINI_API_KEY` env var or macOS Keychain (`~/.gemini/antigravity-cli/settings.json`)
@@ -60,12 +64,13 @@ code works today. Completed work is recorded in [CHANGELOG.md](CHANGELOG.md).
 ## Quirks
 
 - State persistence uses write-to-tmp-then-rename pattern under an exclusive file lock (`fs2`).
-- Streaming writes JSON-RPC notifications directly to stdout from the `agy` stdout reader, not through the main channel, and the main loop writes there too if another request arrives mid-prompt. Removing the SQLite poller did not fix this — it replaced one of the two writers. Still open; see "One stdout owner" in [TODO.md](TODO.md).
+- stdout has exactly one writer: the main loop in `main.rs`, draining `out_rx`. The stream reader and the permission bridge both publish through that channel rather than touching the fd, because two writers can interleave mid-line and corrupt line-delimited JSON-RPC. Anything new that emits to the client must go the same way.
 - `handle_session_load` returns a `Vec<String>`: the replayed history as `session/update` notifications, then the response. Replay reads agy's SQLite conversation DB, which is the only place past turns exist — streaming never touches SQLite.
 - Conversation binding: the `init` / `result` stream-json events include `conversation_id`, which is persisted and passed back as `--conversation` on subsequent prompts.
 - `fetch_available_models()` runs `agy models` synchronously during `Adapter::new()`. If `agy` isn't installed, models list is empty (no error).
 - `agy models` prints `id<TAB>Human Label` on stdout and its "Fetching available models..." banner on stderr. Only the id is a valid `--model` argument; ACP gets the id as `modelId`/`value` and the label as `name`. Ids arriving from a client are checked against that list, and a `id<TAB>label` string left in an old `sessions.json` is repaired on restore.
-- `session/cancel` returns `{}` immediately but sets an `AtomicBool` flag that the prompt task polls; when set, it kills the in-flight `agy` subprocess and the turn ends with `stopReason: "cancelled"`.
+- `session/cancel` returns `{}` immediately but sets an `AtomicBool` flag that the prompt task polls; when set, it kills the in-flight `agy` subprocess and the turn ends with `stopReason: "cancelled"`. `cancel.rs` holds one token per in-flight turn rather than one per session — a host may send a second prompt before the first finishes, and a cancel stops every turn in that session.
+- Permission answers marked "Always" are keyed by `(session, tool name)` and ignore arguments, so one "Always allow" on `run_command` covers every later command. Containment and sensitive-path checks still run on a remembered allow, but a command line is one opaque string and is not parsed as paths. Known gap, pinned by tests; see [TODO.md](TODO.md).
 - Both `session/set_model` and `session/setConfigOption` are accepted for model selection.
 
 ### Permission bridge (`--permission-prompts`)

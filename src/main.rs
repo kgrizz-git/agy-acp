@@ -1,4 +1,5 @@
 mod adapter;
+mod cancel;
 mod db;
 mod hook_root;
 mod permission;
@@ -11,12 +12,8 @@ mod types;
 mod tests;
 
 use serde_json::{json, Value};
-use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc, Mutex,
-};
+use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use adapter::Adapter;
@@ -79,8 +76,7 @@ async fn main() {
         Adapter::new()
     };
     let adapter = Arc::new(tokio::sync::Mutex::new(adapter));
-    let active_cancellations: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>> =
-        Arc::new(Mutex::new(HashMap::new()));
+    let active_cancellations: cancel::CancelRegistry = cancel::CancelRegistry::default();
 
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
     let (out_tx, mut out_rx) = mpsc::unbounded_channel::<Option<String>>();
@@ -195,14 +191,7 @@ async fn main() {
                 if req.method.as_deref() == Some("session/cancel") {
                     let params = req.params.unwrap_or(json!({}));
                     if let Some(session_id) = params.get("sessionId").and_then(|v| v.as_str()) {
-                        if let Some(cancelled) = active_cancellations
-                            .lock()
-                            .unwrap()
-                            .get(session_id)
-                            .cloned()
-                        {
-                            cancelled.store(true, Ordering::SeqCst);
-                        }
+                        active_cancellations.cancel(session_id);
                     }
                 }
                 continue;
@@ -235,25 +224,29 @@ async fn main() {
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
-                let cancelled = Arc::new(AtomicBool::new(false));
-                if !session_id.is_empty() {
-                    active_cancellations
-                        .lock()
-                        .unwrap()
-                        .insert(session_id.clone(), Arc::clone(&cancelled));
-                }
+                // A prompt with no session id is malformed, but it still spawns a
+                // real agy turn, so it is registered under the id it was given --
+                // the empty one. A `session/cancel` naming that same id then
+                // reaches it, rather than it being the one turn nothing can stop.
+                let token = active_cancellations.register(&session_id);
                 let adapter = Arc::clone(&adapter);
-                let active_cancellations = Arc::clone(&active_cancellations);
+                let active_cancellations = active_cancellations.clone();
                 let out_tx = out_tx.clone();
+                let adapter_notify_tx = out_tx.clone();
                 pending_prompts += 1;
                 tokio::spawn(async move {
                     let output = {
                         let mut adapter = adapter.lock().await;
-                        adapter.handle_session_prompt(id, &params, cancelled).await
+                        adapter
+                            .handle_session_prompt(
+                                id,
+                                &params,
+                                Arc::clone(&token),
+                                adapter_notify_tx,
+                            )
+                            .await
                     };
-                    if !session_id.is_empty() {
-                        active_cancellations.lock().unwrap().remove(&session_id);
-                    }
+                    active_cancellations.unregister(&session_id, &token);
                     for line in output {
                         let _ = out_tx.send(Some(line));
                     }
@@ -264,14 +257,7 @@ async fn main() {
             Some("session/cancel") => {
                 let params = req.params.unwrap_or(json!({}));
                 if let Some(session_id) = params.get("sessionId").and_then(|v| v.as_str()) {
-                    if let Some(cancelled) = active_cancellations
-                        .lock()
-                        .unwrap()
-                        .get(session_id)
-                        .cloned()
-                    {
-                        cancelled.store(true, Ordering::SeqCst);
-                    }
+                    active_cancellations.cancel(session_id);
                 }
                 let r = JsonRpcResponse {
                     jsonrpc: "2.0",

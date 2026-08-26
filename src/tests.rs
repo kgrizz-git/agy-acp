@@ -627,6 +627,7 @@ fn test_session_load_restores_persisted_session() {
         skip_naration: false,
         permission_bridge: None,
         hook_root_dir: None,
+        session_tick: 0,
     };
     adapter.persist_session("sess-1", Some("conv-abc"), 5, None);
 
@@ -663,6 +664,7 @@ fn test_session_load_rejects_unknown_session() {
         skip_naration: false,
         permission_bridge: None,
         hook_root_dir: None,
+        session_tick: 0,
     };
 
     let output = adapter.handle_session_load(json!(9), &json!({"sessionId": "missing"}));
@@ -772,6 +774,7 @@ fn test_session_load_replays_conversation_history() {
         skip_naration: false,
         permission_bridge: None,
         hook_root_dir: None,
+        session_tick: 0,
     };
     adapter.persist_session("sess-replay", Some("conv-replay"), 8, None);
 
@@ -897,6 +900,7 @@ fn test_session_resume_restores_persisted_session() {
         skip_naration: false,
         permission_bridge: None,
         hook_root_dir: None,
+        session_tick: 0,
     };
     adapter.persist_session("sess-r1", Some("conv-xyz"), 3, None);
 
@@ -940,6 +944,7 @@ fn test_session_resume_rejects_unknown_session() {
         skip_naration: false,
         permission_bridge: None,
         hook_root_dir: None,
+        session_tick: 0,
     };
 
     let response = adapter.handle_session_resume(json!(11), &json!({"sessionId": "nope"}));
@@ -982,6 +987,7 @@ fn test_session_resume_accepts_in_memory_session() {
         skip_naration: false,
         permission_bridge: None,
         hook_root_dir: None,
+        session_tick: 0,
     };
     adapter.sessions.insert(
         "sess-memory".to_string(),
@@ -989,6 +995,7 @@ fn test_session_resume_accepts_in_memory_session() {
             conversation_id: None,
             last_step_idx: -1,
             model_id: None,
+            last_used: 0,
         },
     );
 
@@ -1016,6 +1023,7 @@ fn test_session_load_accepts_in_memory_session_without_replay() {
         skip_naration: false,
         permission_bridge: None,
         hook_root_dir: None,
+        session_tick: 0,
     };
     adapter.sessions.insert(
         "sess-memory-load".to_string(),
@@ -1023,6 +1031,7 @@ fn test_session_load_accepts_in_memory_session_without_replay() {
             conversation_id: None,
             last_step_idx: -1,
             model_id: None,
+            last_used: 0,
         },
     );
 
@@ -1049,6 +1058,7 @@ fn test_session_resume_does_not_replay_history() {
         skip_naration: false,
         permission_bridge: None,
         hook_root_dir: None,
+        session_tick: 0,
     };
     adapter.persist_session("sess-nr", Some("conv-nr"), 10, None);
 
@@ -1205,7 +1215,10 @@ fn test_read_response_multi_step_no_skip_no_duplicate() {
     drop(conn);
 
     let result = crate::db::read_delta_from_db(&conv_dir, "multi", -1).unwrap();
-    assert_eq!(result.text, Some("hello\nworld\nline1\nline2\nline3".to_string()));
+    assert_eq!(
+        result.text,
+        Some("hello\nworld\nline1\nline2\nline3".to_string())
+    );
     assert_eq!(result.max_step_idx, 5);
 
     let result = crate::db::read_delta_from_db(&conv_dir, "multi", 2).unwrap();
@@ -1256,6 +1269,7 @@ fn test_persist_and_restore_session() {
         skip_naration: false,
         permission_bridge: None,
         hook_root_dir: None,
+        session_tick: 0,
     };
 
     adapter.persist_session("sess-1", Some("conv-abc"), 7, None);
@@ -1805,6 +1819,7 @@ fn test_session_set_model_persists() {
         skip_naration: false,
         permission_bridge: None,
         hook_root_dir: None,
+        session_tick: 0,
     };
 
     adapter.persist_session("sess-m1", Some("conv-m1"), 0, None);
@@ -1824,6 +1839,7 @@ fn test_session_set_model_persists() {
         skip_naration: false,
         permission_bridge: None,
         hook_root_dir: None,
+        session_tick: 0,
     };
     let restored = adapter2.restore_session("sess-m1");
     assert_eq!(
@@ -1847,6 +1863,7 @@ fn test_session_load_returns_models() {
             conversation_id: None,
             last_step_idx: -1,
             model_id: Some("Gemini 3.1 Pro (High)".to_string()),
+            last_used: 0,
         },
     );
     adapter.persist_session(
@@ -1967,8 +1984,14 @@ fn test_session_models_json_never_emits_a_label_as_an_id() {
     adapter.available_models = Adapter::parse_models_output(AGY_MODELS_STDOUT);
     let models = adapter.session_models_json(None);
     let available = models["availableModels"].as_array().unwrap();
-    assert_eq!(available[0]["modelId"].as_str(), Some("gemini-3.7-flash-high"));
-    assert_eq!(available[0]["name"].as_str(), Some("Gemini 3.7 Flash (High)"));
+    assert_eq!(
+        available[0]["modelId"].as_str(),
+        Some("gemini-3.7-flash-high")
+    );
+    assert_eq!(
+        available[0]["name"].as_str(),
+        Some("Gemini 3.7 Flash (High)")
+    );
     for entry in available {
         assert!(!entry["modelId"].as_str().unwrap().contains('\t'));
     }
@@ -2080,7 +2103,9 @@ mod harden_check {
     };
 
     fn lcg(seed: &mut u64) -> u8 {
-        *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        *seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         (*seed >> 33) as u8
     }
 
@@ -2203,4 +2228,314 @@ fn test_read_varint_rejects_an_overflowing_tenth_group() {
     let mut too_long = vec![0x80u8; 10];
     too_long.push(0x01);
     assert_eq!(read_varint(&too_long), None);
+}
+
+/// The binding that matters survives a prune that drops the unbindable entries
+/// first, so a live conversation is never lost to make room for dead ones.
+#[test]
+fn persist_session_prunes_unbindable_entries_first() {
+    let root = std::env::temp_dir().join(format!("agy-acp-prune-{}", Uuid::new_v4()));
+    let _ = fs::create_dir_all(&root);
+
+    let adapter = Adapter {
+        sessions: HashMap::new(),
+        working_dir: root.to_string_lossy().to_string(),
+        state_file: root.join("sessions.json"),
+        conversations_dir: root.join("conversations"),
+        available_models: vec![],
+        skip_naration: false,
+        permission_bridge: None,
+        hook_root_dir: None,
+        session_tick: 0,
+    };
+    for i in 0..300 {
+        // Most entries can never be resumed; they must be the first to go.
+        let conv = if i == 50 {
+            Some(format!("conv-bound-{i}"))
+        } else {
+            None
+        };
+        adapter.persist_session(&format!("sess-{i}"), conv.as_deref(), 0, None);
+    }
+
+    let file = fs::read_to_string(root.join("sessions.json")).unwrap();
+    let store: crate::types::SessionStore = serde_json::from_str(&file).unwrap();
+    assert!(
+        store.sessions.len() <= 256,
+        "persisted sessions must stay under the cap, got {}",
+        store.sessions.len()
+    );
+    assert!(
+        store.sessions.contains_key("sess-50"),
+        "the bound entry must survive the prune"
+    );
+    assert_eq!(
+        store
+            .sessions
+            .values()
+            .filter(|s| s.conversation_id.is_some())
+            .count(),
+        1,
+        "the single bound entry must be kept while null entries are dropped first"
+    );
+    assert!(
+        store.sessions.len() < 300,
+        "null-conversation entries must have been dropped to meet the cap"
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+/// The entry just written must not be evicted even when the store is over cap.
+#[test]
+fn persist_session_keeps_the_entry_it_just_wrote() {
+    let root = std::env::temp_dir().join(format!("agy-acp-keep-{}", Uuid::new_v4()));
+    let _ = fs::create_dir_all(&root);
+
+    let adapter = Adapter {
+        sessions: HashMap::new(),
+        working_dir: root.to_string_lossy().to_string(),
+        state_file: root.join("sessions.json"),
+        conversations_dir: root.join("conversations"),
+        available_models: vec![],
+        skip_naration: false,
+        permission_bridge: None,
+        hook_root_dir: None,
+        session_tick: 0,
+    };
+    for i in 0..400 {
+        adapter.persist_session(
+            &format!("old-{i}"),
+            Some(format!("conv-{i}").as_str()),
+            0,
+            None,
+        );
+    }
+    adapter.persist_session("just-written", Some("conv-just"), 0, None);
+
+    let store: crate::types::SessionStore =
+        serde_json::from_str(&fs::read_to_string(root.join("sessions.json")).unwrap()).unwrap();
+    assert!(
+        store.sessions.contains_key("just-written"),
+        "the session written last must still be present after pruning"
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+/// Entries written before `updated_at` existed deserialize as 0 and are thus the
+/// elders when pruning — backwards compatibility without a migration step.
+#[test]
+fn stored_sessions_without_updated_at_load_as_oldest() {
+    let root = std::env::temp_dir().join(format!("agy-acp-legacy-{}", Uuid::new_v4()));
+    let _ = fs::create_dir_all(&root);
+
+    let json = json!({
+        "sessions": {
+            "sess-a": { "conversation_id": "conv-a", "last_step_idx": 1 },
+            "sess-b": { "conversation_id": "conv-b", "last_step_idx": 2 },
+        }
+    });
+    fs::write(
+        root.join("sessions.json"),
+        serde_json::to_string_pretty(&json).unwrap(),
+    )
+    .unwrap();
+
+    let adapter = Adapter {
+        sessions: HashMap::new(),
+        working_dir: root.to_string_lossy().to_string(),
+        state_file: root.join("sessions.json"),
+        conversations_dir: root.join("conversations"),
+        available_models: vec![],
+        skip_naration: false,
+        permission_bridge: None,
+        hook_root_dir: None,
+        session_tick: 0,
+    };
+    let store = adapter.load_store();
+    assert_eq!(store.sessions.len(), 2, "both legacy entries should load");
+    assert!(
+        store.sessions.values().all(|s| s.updated_at == 0),
+        "missing updated_at must default to 0"
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+/// Eviction drops the least-recently-used session, leaving a freshly touched one
+/// alive even when it was inserted before the victim.
+#[test]
+fn evict_if_needed_drops_the_least_recently_used_session() {
+    use crate::types::Session;
+
+    let mut adapter = Adapter {
+        sessions: HashMap::new(),
+        working_dir: "/tmp".to_string(),
+        state_file: PathBuf::from("/tmp/nonexistent-agy-acp-sessions.json"),
+        conversations_dir: PathBuf::from("/tmp/conversations"),
+        available_models: vec![],
+        skip_naration: false,
+        permission_bridge: None,
+        hook_root_dir: None,
+        session_tick: 0,
+    };
+    for i in 0..64 {
+        adapter.sessions.insert(
+            format!("sess-{i}"),
+            Session {
+                conversation_id: None,
+                last_step_idx: -1,
+                model_id: None,
+                last_used: i as u64,
+            },
+        );
+    }
+    // Mark one of the earliest as most-recently-used.
+    adapter.sessions.get_mut("sess-1").unwrap().last_used = 1000;
+    adapter.sessions.insert(
+        "sess-new".to_string(),
+        Session {
+            conversation_id: None,
+            last_step_idx: -1,
+            model_id: None,
+            last_used: 1001,
+        },
+    );
+    adapter.evict_if_needed();
+
+    assert!(
+        adapter.sessions.contains_key("sess-1"),
+        "a touched (recently used) session must survive eviction"
+    );
+    assert!(
+        adapter.sessions.contains_key("sess-new"),
+        "the newest session must survive eviction"
+    );
+    assert!(
+        !adapter.sessions.contains_key("sess-0"),
+        "the untouched, oldest-used session is the one evicted"
+    );
+}
+
+#[test]
+fn stream_processor_survives_invalid_utf8_in_a_line() {
+    use crate::streaming::StreamProcessor;
+
+    // A byte slice with an invalid UTF-8 byte (0xff) decodes to U+FFFD via
+    // from_utf8_lossy, so one bad line must not stop the stream.
+    let bad_bytes = b"{\"event\":\"result\",\"result\":{\"status\":\"\xff\"}}";
+    let bad_line = String::from_utf8_lossy(bad_bytes);
+    assert!(
+        bad_line.contains('\u{fffd}'),
+        "precondition: line carries a replacement char"
+    );
+
+    let mut processor = StreamProcessor::new(false);
+    let from_bad = processor.process_line(&bad_line, "sess-1");
+    assert!(
+        from_bad.is_empty(),
+        "a malformed line yields no notifications"
+    );
+
+    // A valid event fed right after must still be processed normally.
+    let good = r#"{"event":"result","result":{"conversation_id":"conv-x","status":"SUCCESS","response":"OK"}}"#;
+    let from_good = processor.process_line(good, "sess-1");
+    assert_eq!(
+        from_good.len(),
+        1,
+        "the valid event after the bad one is processed"
+    );
+    assert!(
+        processor.saw_result,
+        "result event is still tracked after a bad line"
+    );
+}
+
+#[tokio::test]
+async fn read_until_newline_yields_events_after_invalid_utf8_line() {
+    use crate::adapter::read_until_newline;
+
+    // A stream that starts with a line containing an invalid UTF-8 byte, then
+    // two valid NDJSON events. We exercise the byte-oriented frame reader
+    // directly to prove the later events are still delivered.
+    let mut payload: Vec<u8> = Vec::new();
+    payload.extend_from_slice(b"{\"event\":\"init\",\"conversation_id\":\"conv-x\"}\xff\n");
+    payload.extend_from_slice(b"{\"event\":\"result\",\"result\":{\"conversation_id\":\"conv-x\",\"status\":\"SUCCESS\",\"response\":\"OK\"}}\n");
+    payload.extend_from_slice(b"{\"event\":\"step_update\",\"step_update\":{\"step_index\":1,\"state\":\"DONE\",\"step_type\":\"checkpoint\"}}\n");
+
+    let mut reader = tokio::io::BufReader::new(std::io::Cursor::new(payload));
+    let mut frames: Vec<Vec<u8>> = Vec::new();
+    let mut buf = Vec::new();
+    while read_until_newline(&mut reader, &mut buf).await.unwrap() {
+        frames.push(buf.clone());
+    }
+
+    assert_eq!(
+        frames.len(),
+        3,
+        "three frames read despite the invalid byte"
+    );
+    // Each frame is decoded lossily and still parses as JSON after trimming.
+    let mut processor = crate::streaming::StreamProcessor::new(false);
+    let mut total = 0;
+    for frame in &frames {
+        let line = String::from_utf8_lossy(frame)
+            .trim_end_matches(['\n', '\r'])
+            .to_string();
+        if line.trim().is_empty() {
+            continue;
+        }
+        total += processor.process_line(&line, "sess-1").len();
+    }
+    assert!(
+        processor.saw_result,
+        "result frame survived the invalid byte"
+    );
+    assert!(
+        total >= 1,
+        "valid events after the bad line are still emitted"
+    );
+}
+
+#[tokio::test]
+async fn stream_notifications_go_through_the_output_channel() {
+    use tokio::sync::mpsc::unbounded_channel;
+
+    let (notify_tx, mut notify_rx) = unbounded_channel::<Option<String>>();
+    let mut processor = StreamProcessor::new(false);
+
+    let frames = [
+        r#"{"event":"init","conversation_id":"conv-abc","init":{"cwd":"/tmp"}}"#,
+        r#"{"event":"step_update","step_update":{"conversation_id":"conv-abc","step_index":1,"state":"ACTIVE","step_type":"agent_response","text_delta":"OK"}}"#,
+        r#"{"event":"step_update","step_update":{"conversation_id":"conv-abc","step_index":3,"state":"ACTIVE","step_type":"tool","tool_name":"run_command","tool_info":{"name":"run_command","parameters":{"CommandLine":"echo hello"}}}}"#,
+        r#"{"event":"result","result":{"conversation_id":"conv-abc","status":"SUCCESS","response":"OK"}}"#,
+    ];
+
+    for frame in frames {
+        crate::adapter::publish_stream_notifications(
+            &mut processor,
+            &notify_tx,
+            frame,
+            "sess-1",
+        );
+    }
+    drop(notify_tx);
+
+    let mut count = 0;
+    while let Some(value) = notify_rx.recv().await {
+        // (a) the drain task must never send the pending-prompt sentinel.
+        assert!(
+            value.is_some(),
+            "notification channel received None, which corrupts pending_prompts"
+        );
+        let notification = value.unwrap();
+        // (b) every value is a complete JSON-RPC session/update notification.
+        let parsed: Value = serde_json::from_str(&notification)
+            .unwrap_or_else(|e| panic!("notification is not valid JSON: {e}: {notification}"));
+        assert_eq!(parsed["method"], "session/update");
+        assert!(parsed["params"]["update"].is_object());
+        count += 1;
+    }
+    assert!(count >= 1, "at least one notification was emitted");
 }
