@@ -53,6 +53,7 @@ pub fn run_hook() {
     let mut stdout = std::io::stdout();
     let _ = writeln!(
         stdout,
+        "{}",
         r#"{"decision":"deny","reason":"agy-acp: permission prompts require a Unix platform"}"#
     );
     let _ = stdout.flush();
