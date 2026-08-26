@@ -102,6 +102,10 @@ fn process_lines(
     (processor, updates)
 }
 
+fn test_adapter() -> Adapter {
+    Adapter::new_for_test()
+}
+
 #[test]
 fn test_parse_skip_naration_flag() {
     assert!(
@@ -582,8 +586,17 @@ fn test_tool_kind_mapping() {
 }
 
 #[test]
+fn test_adapter_uses_a_scratch_home_without_model_discovery() {
+    let adapter = test_adapter();
+
+    assert!(adapter.state_file.starts_with(std::env::temp_dir()));
+    assert!(adapter.conversations_dir.starts_with(std::env::temp_dir()));
+    assert!(adapter.available_models.is_empty());
+}
+
+#[test]
 fn test_initialize_advertises_load_session_support() {
-    let adapter = Adapter::new();
+    let adapter = test_adapter();
     let response = adapter.handle_initialize(json!(1));
     assert_eq!(
         response
@@ -598,7 +611,7 @@ fn test_initialize_advertises_load_session_support() {
 
 #[test]
 fn test_initialize_advertises_resume_capability() {
-    let adapter = Adapter::new();
+    let adapter = test_adapter();
     let response = adapter.handle_initialize(json!(1));
     assert!(
         response
@@ -984,7 +997,7 @@ fn test_session_resume_rejects_unknown_session() {
 
 #[test]
 fn test_session_resume_rejects_empty_session_id() {
-    let mut adapter = Adapter::new();
+    let mut adapter = test_adapter();
     let response = adapter.handle_session_resume(json!(12), &json!({}));
     assert!(response.result.is_none());
     assert_eq!(
@@ -1537,7 +1550,7 @@ fn test_filter_narration_all_narration_drops_all() {
 
 #[test]
 fn test_session_new_returns_models() {
-    let mut adapter = Adapter::new();
+    let mut adapter = test_adapter();
     let response = adapter.handle_session_new(json!(1));
     let result = response.result.as_ref().unwrap();
     assert!(result.get("sessionId").is_some());
@@ -1555,7 +1568,7 @@ fn test_session_new_returns_models() {
 
 #[test]
 fn test_session_set_model() {
-    let mut adapter = Adapter::new();
+    let mut adapter = test_adapter();
     adapter.available_models = test_models();
     let new_resp = adapter.handle_session_new(json!(1));
     let session_id = new_resp.result.as_ref().unwrap()["sessionId"]
@@ -1581,7 +1594,7 @@ fn test_session_set_model() {
 
 #[test]
 fn test_session_set_model_missing_params() {
-    let mut adapter = Adapter::new();
+    let mut adapter = test_adapter();
     let resp = adapter.handle_session_set_model(json!(1), &json!({}));
     assert!(resp.error.is_some());
     assert_eq!(resp.error.as_ref().unwrap()["code"].as_i64(), Some(-32602));
@@ -1589,7 +1602,7 @@ fn test_session_set_model_missing_params() {
 
 #[test]
 fn test_session_set_model_unknown_session() {
-    let mut adapter = Adapter::new();
+    let mut adapter = test_adapter();
     let resp = adapter.handle_session_set_model(
         json!(1),
         &json!({"sessionId": "nonexistent", "modelId": "some-model"}),
@@ -1600,7 +1613,7 @@ fn test_session_set_model_unknown_session() {
 
 #[test]
 fn test_session_set_config_option_sets_model() {
-    let mut adapter = Adapter::new();
+    let mut adapter = test_adapter();
     adapter.available_models = test_models();
     let new_resp = adapter.handle_session_new(json!(1));
     let session_id = new_resp.result.as_ref().unwrap()["sessionId"]
@@ -1631,7 +1644,7 @@ fn test_session_set_config_option_sets_model() {
 
 #[test]
 fn test_session_set_config_option_rejects_unknown_config() {
-    let mut adapter = Adapter::new();
+    let mut adapter = test_adapter();
     let new_resp = adapter.handle_session_new(json!(1));
     let session_id = new_resp.result.as_ref().unwrap()["sessionId"]
         .as_str()
@@ -1699,7 +1712,7 @@ fn test_session_set_model_persists() {
 
 #[test]
 fn test_session_load_returns_models() {
-    let mut adapter = Adapter::new();
+    let mut adapter = test_adapter();
     adapter.sessions.insert(
         "test-load".to_string(),
         crate::types::Session {
@@ -1737,7 +1750,7 @@ fn test_session_load_returns_models() {
 
 #[test]
 fn test_session_resume_returns_models() {
-    let mut adapter = Adapter::new();
+    let mut adapter = test_adapter();
     adapter.persist_session(
         "test-resume",
         Some("conv-resume"),
@@ -1763,7 +1776,7 @@ fn test_session_resume_returns_models() {
 
 #[test]
 fn test_session_models_json_default() {
-    let mut adapter = Adapter::new();
+    let mut adapter = test_adapter();
     let models = adapter.session_models_json(None);
     let current = models["currentModelId"].as_str().unwrap();
     if adapter.available_models.is_empty() {
@@ -1823,7 +1836,7 @@ fn test_parse_models_output_without_label_column() {
 
 #[test]
 fn test_session_models_json_never_emits_a_label_as_an_id() {
-    let mut adapter = Adapter::new();
+    let mut adapter = test_adapter();
     adapter.available_models = Adapter::parse_models_output(AGY_MODELS_STDOUT);
     let models = adapter.session_models_json(None);
     let available = models["availableModels"].as_array().unwrap();
@@ -1846,7 +1859,7 @@ fn test_session_models_json_never_emits_a_label_as_an_id() {
 
 #[test]
 fn test_session_models_json_with_model() {
-    let mut adapter = Adapter::new();
+    let mut adapter = test_adapter();
     adapter.available_models = test_models();
     let models = adapter.session_models_json(Some("model-b"));
     assert_eq!(models["currentModelId"].as_str(), Some("model-b"));
@@ -1859,7 +1872,7 @@ fn test_session_models_json_with_model() {
 
 #[test]
 fn test_session_config_options_json_with_model() {
-    let mut adapter = Adapter::new();
+    let mut adapter = test_adapter();
     adapter.available_models = test_models();
     let config_options = adapter.session_config_options_json(Some("model-b"));
     assert_eq!(config_options[0]["id"].as_str(), Some("model"));
@@ -1877,7 +1890,7 @@ fn test_session_config_options_json_with_model() {
 /// must not have it passed through to `--model`, which agy would reject.
 #[test]
 fn test_set_model_strips_a_label_glued_to_the_id() {
-    let mut adapter = Adapter::new();
+    let mut adapter = test_adapter();
     adapter.available_models = Adapter::parse_models_output(AGY_MODELS_STDOUT);
     let new_resp = adapter.handle_session_new(json!(1));
     let session_id = new_resp.result.as_ref().unwrap()["sessionId"]
@@ -1901,7 +1914,7 @@ fn test_set_model_strips_a_label_glued_to_the_id() {
 
 #[test]
 fn test_set_model_rejects_a_model_agy_does_not_offer() {
-    let mut adapter = Adapter::new();
+    let mut adapter = test_adapter();
     adapter.available_models = test_models();
     let new_resp = adapter.handle_session_new(json!(1));
     let session_id = new_resp.result.as_ref().unwrap()["sessionId"]
@@ -1919,7 +1932,7 @@ fn test_set_model_rejects_a_model_agy_does_not_offer() {
 
 #[test]
 fn test_set_config_option_rejects_a_model_agy_does_not_offer() {
-    let mut adapter = Adapter::new();
+    let mut adapter = test_adapter();
     adapter.available_models = test_models();
     let new_resp = adapter.handle_session_new(json!(1));
     let session_id = new_resp.result.as_ref().unwrap()["sessionId"]

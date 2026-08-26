@@ -97,15 +97,43 @@ impl Adapter {
 
     pub fn new_with_skip_naration(skip_naration: bool) -> Self {
         let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-        let state_dir = PathBuf::from(&home).join(".openab/agy-acp");
+        Self::new_with_home(
+            PathBuf::from(home),
+            Self::fetch_available_models(),
+            skip_naration,
+        )
+    }
+
+    /// Constructs an adapter for unit tests without consulting HOME or running
+    /// `agy models`. Each invocation uses a private scratch root so a test that
+    /// persists a session cannot observe another test's state.
+    #[cfg(test)]
+    pub(crate) fn new_for_test() -> Self {
+        use std::sync::atomic::AtomicUsize;
+
+        static NEXT_TEST_ROOT: AtomicUsize = AtomicUsize::new(0);
+        let sequence = NEXT_TEST_ROOT.fetch_add(1, Ordering::Relaxed);
+        let home = std::env::temp_dir().join(format!(
+            "agy-acp-test-{}-{sequence}",
+            std::process::id()
+        ));
+        Self::new_with_home(home, Vec::new(), false)
+    }
+
+    fn new_with_home(
+        home: PathBuf,
+        available_models: Vec<AgyModel>,
+        skip_naration: bool,
+    ) -> Self {
+        let state_dir = home.join(".openab/agy-acp");
         Self {
             sessions: HashMap::new(),
             working_dir: std::env::current_dir()
                 .map(|p| p.to_string_lossy().to_string())
                 .unwrap_or_else(|_| "/tmp".to_string()),
-            conversations_dir: PathBuf::from(&home).join(".gemini/antigravity-cli/conversations"),
+            conversations_dir: home.join(".gemini/antigravity-cli/conversations"),
             state_file: state_dir.join("sessions.json"),
-            available_models: Self::fetch_available_models(),
+            available_models,
             skip_naration,
             permission_bridge: None,
             hook_root_dir: None,

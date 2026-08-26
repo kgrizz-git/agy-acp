@@ -10,9 +10,10 @@
   E2e is deliberately separate because it uses a paid external service.
 - CI must land after `fix-test-read-response-from-db.md`; the ignored tier is
   knowingly red until that stale helper is removed.
-- E2e runs for pull requests to `main` when the repository has a
-  `GEMINI_API_KEY` secret and is skipped otherwise. It is also manually
-  dispatchable. This is a secret-enabled PR workflow, not a manual-only gate.
+- E2e runs for pull requests to `main` only after approval of a protected `e2e`
+  GitHub environment. Store its `E2E_GEMINI_API_KEY` as an environment secret,
+  not a repository secret, because the job checks out PR-controlled code. It is
+  also manually dispatchable.
 - Pin agy to `1.1.16`, the current release selected for this workflow. The
   Ubuntu x64 archive and SHA-256 are recorded below so a release change cannot
   silently alter the test environment. The integrity value was checked against
@@ -36,9 +37,10 @@ Create `.github/workflows/ci.yml` with:
     group: ${{ github.workflow }}-${{ github.ref }}
     cancel-in-progress: true
   ```
-- A stable `test` job using `actions/checkout@v4`,
-  `dtolnay/rust-toolchain@stable` with `profile: minimal`, and
-  `Swatinem/rust-cache@v2`.
+- A stable `test` job using SHA-pinned `actions/checkout` with
+  `persist-credentials: false`, SHA-pinned `dtolnay/rust-toolchain` with
+  `toolchain: stable` and `profile: minimal`, and SHA-pinned
+  `Swatinem/rust-cache`.
 - A 15-minute job timeout.
 - The following steps, in order:
   ```sh
@@ -51,8 +53,9 @@ The last command runs only ignored tests and excludes the four `test_e2e_*`
 tests by their stable shared substring. Add a short workflow comment explaining
 the e2e exclusion and update it if that naming convention changes.
 
-Add a separate Ubuntu `msrv` job using `dtolnay/rust-toolchain@1.70` and the
-same checkout/cache setup and a 15-minute timeout. It must run
+Add an `msrv` matrix job for Ubuntu and Windows using the SHA-pinned
+`dtolnay/rust-toolchain` action with `toolchain: 1.70`, the same secure
+checkout/cache setup, and a 15-minute timeout. It must run
 `cargo build --verbose` and `cargo test --verbose`. Add `rust-version = "1.70"`
 to the package metadata in
 `Cargo.toml`. If current dependencies cannot meet that toolchain, either pin
@@ -68,18 +71,21 @@ Create `.github/workflows/e2e.yml` with `pull_request` targeting `main` and
 `workflow_dispatch` triggers, top-level `permissions: contents: read`, and this
 two-job shape:
 
-1. `gate` always runs and writes `has_key` to `$GITHUB_OUTPUT` after checking
-   whether `GEMINI_API_KEY` is nonempty. Do this in a step environment; secrets
-   cannot be referenced directly in an `if:` expression. Use this exact shape:
+1. `gate` runs in the protected `e2e` environment and writes `has_key` to
+   `$GITHUB_OUTPUT` after checking whether `E2E_GEMINI_API_KEY` is nonempty. Set
+   up that environment with required reviewers, add the secret there, and remove
+   any repository-level e2e key. Do this in a step environment; secrets cannot
+   be referenced directly in an `if:` expression. Use this exact shape:
    ```yaml
    gate:
      runs-on: ubuntu-latest
+     environment: e2e
      outputs:
        has_key: ${{ steps.key.outputs.has_key }}
      steps:
        - id: key
          env:
-           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.E2E_GEMINI_API_KEY }}
          run: |
            if [ -n "$GEMINI_API_KEY" ]; then
              echo 'has_key=true' >>"$GITHUB_OUTPUT"
@@ -89,11 +95,9 @@ two-job shape:
    ```
 2. `e2e` needs `gate` and uses
    `if: needs.gate.outputs.has_key == 'true'`. It is visibly skipped when the
-   secret is absent. Set `timeout-minutes: 20` and `permissions: contents: read`.
-   Add a workflow comment that repository secrets are intentionally unavailable
-   to pull requests from forks, so those e2e jobs skip. Do not replace this with
-   `pull_request_target`: checking out untrusted PR code with the API key would
-   expose the secret.
+   secret is absent. Set `environment: e2e`, `timeout-minutes: 20`, and
+   `permissions: contents: read`. Do not replace this with `pull_request_target`:
+   checking out untrusted PR code with the API key would expose the secret.
 
 The `e2e` job uses the same checkout, Rust setup, and cache as `ci.yml`, then
 performs these steps:
@@ -160,8 +164,8 @@ real-client permission-bridge verification tracked in `TODO.md`.
 ## Documentation and landing
 
 - Add one concise `AGENTS.md` note: CI enforces the build/unit/ignored-I/O tiers;
-  Rust 1.70 is the tested MSRV; the e2e workflow is secret-gated and uses a
-  pinned agy release.
+  Rust 1.70 is tested on Linux and Windows; the e2e workflow requires approval
+  of a protected environment and uses a pinned agy release.
 - Add a `CHANGELOG.md` Maintenance entry naming `ci.yml` and `e2e.yml`, the
   ignored-tier e2e exclusion, and the absence of a formatting gate.
 - Keep both TODO pointers through implementation and review. Delete the CI
@@ -172,10 +176,11 @@ real-client permission-bridge verification tracked in `TODO.md`.
 
 1. Confirm GitHub Actions is enabled for `kgrizz-git/agy-acp` before declaring
    the work complete.
-2. On a PR without `GEMINI_API_KEY`, `test` succeeds and the `e2e` job is
+2. On a PR without an approved `e2e` environment containing
+   `E2E_GEMINI_API_KEY`, `test` succeeds and the `e2e` job is
    skipped—not failed or rejected during workflow parsing.
-3. With a repository secret, verify the e2e job reports the pinned agy version,
+3. With an approved environment secret, verify the e2e job reports the pinned agy version,
    verifies the SHA-256, and runs all four e2e tests. A missing binary or failed
    download must fail the job rather than produce a green self-skip.
-4. Verify both the stable `test` job and the Rust 1.70 `msrv` job pass. The MSRV
-   job is the proof behind the README's Rust 1.70+ requirement.
+4. Verify the stable `test` job and both Rust 1.70 `msrv` matrix jobs pass. The
+   MSRV jobs are the proof behind the README's Rust 1.70+ requirement.

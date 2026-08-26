@@ -1,7 +1,7 @@
-# Secret-gated e2e. Repository secrets are intentionally unavailable to pull
-# requests from forks, so those e2e jobs skip rather than fail. Do not replace
-# this with pull_request_target: checking out untrusted PR code with the API key
-# would expose the secret.
+# Secret-gated e2e. The e2e environment must require reviewer approval and hold
+# E2E_GEMINI_API_KEY; do not use a repository secret. This keeps a PR's code
+# from receiving the key until a maintainer explicitly authorizes this run. Do
+# not replace pull_request with pull_request_target.
 name: e2e
 
 on:
@@ -15,12 +15,13 @@ permissions:
 jobs:
   gate:
     runs-on: ubuntu-latest
+    environment: e2e
     outputs:
       has_key: ${{ steps.key.outputs.has_key }}
     steps:
       - id: key
         env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.E2E_GEMINI_API_KEY }}
         run: |
           if [ -n "$GEMINI_API_KEY" ]; then
             echo 'has_key=true' >>"$GITHUB_OUTPUT"
@@ -32,16 +33,19 @@ jobs:
     needs: gate
     if: needs.gate.outputs.has_key == 'true'
     runs-on: ubuntu-latest
+    environment: e2e
     timeout-minutes: 20
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
           toolchain: stable
           profile: minimal
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - name: Install agy
         # Pinned agy release and SHA-256 are deliberate compatibility inputs, as is
         # the modelProvider: gemini config below. Run the local 1.1.16 preflight
@@ -71,5 +75,5 @@ jobs:
         run: cargo build --release --verbose
       - name: Run e2e tests
         env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.E2E_GEMINI_API_KEY }}
         run: cargo test e2e -- --ignored --nocapture

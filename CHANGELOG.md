@@ -150,9 +150,11 @@ anywhere yet; see "Verify the port under Paseo" in [TODO.md](TODO.md).
 ### Maintenance
 
 - CI: `ci.yml` runs `cargo build`, unit tests, and the ignored I/O tier with
-  `--ignored --skip e2e` to exclude the four e2e tests; `e2e.yml` is
-  secret-gated on `GEMINI_API_KEY` (skips for fork PRs) and uses a pinned agy
-  release. No formatting gate — the tree is not rustfmt-clean.
+  `--ignored --skip e2e` to exclude the four e2e tests; Rust 1.70 runs on Linux
+  and Windows. All Actions are SHA-pinned, checkout credentials are not
+  persisted, and e2e is protected by the approval-gated `e2e` environment with
+  its own `E2E_GEMINI_API_KEY`. No formatting gate — the tree is not
+  rustfmt-clean.
 - Hard fork: the `upstream` remote is removed, `gh repo set-default` points at
   this fork, and `pre-push` refuses any target but `kgrizz-git/agy-acp`. Note
   that `gh pr create` in a fork defaults its base to the parent repo regardless
