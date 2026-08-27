@@ -14,6 +14,12 @@ permissions:
 
 jobs:
   gate:
+    # Fork PRs cannot receive Actions secrets. Skip before requesting the
+    # protected environment, so they do not wait for an approval that cannot
+    # lead to an e2e run.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     environment: e2e
     outputs:
@@ -31,7 +37,7 @@ jobs:
 
   e2e:
     needs: gate
-    if: needs.gate.outputs.has_key == 'true'
+    if: needs.gate.result == 'success' && needs.gate.outputs.has_key == 'true'
     runs-on: ubuntu-latest
     environment: e2e
     timeout-minutes: 20

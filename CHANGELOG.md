@@ -17,6 +17,8 @@ anywhere yet; see "Verify the port under Paseo" in [TODO.md](TODO.md).
 
 - Keep the Windows build portable by failing closed when the Unix-socket-based
   `--permission-prompts` feature is requested there.
+- Keep fork PRs from waiting on an e2e-environment approval they cannot use, and
+  make unit-test scratch homes collision-resistant across test processes.
 
 ### Added
 

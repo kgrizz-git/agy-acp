@@ -37,8 +37,10 @@ permission prompt, a reopened thread, and a cancellation.
 
 `e2e.yml` deliberately reads its key only from the approval-gated GitHub
 environment named `e2e`; the environment has not been created yet, so the e2e
-job currently skips after its secret gate. This does not weaken the deterministic
-CI jobs or expose a repository secret to pull-request code.
+job currently skips after its secret gate. Fork pull requests skip before
+requesting environment approval because they cannot receive Actions secrets.
+This does not weaken the deterministic CI jobs or expose a repository secret to
+pull-request code.
 
 When it becomes useful to run paid e2e on pull requests:
 

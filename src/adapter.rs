@@ -105,16 +105,12 @@ impl Adapter {
     }
 
     /// Constructs an adapter for unit tests without consulting HOME or running
-    /// `agy models`. Each invocation uses a private scratch root so a test that
-    /// persists a session cannot observe another test's state.
+    /// `agy models`. Each invocation uses a collision-resistant private scratch
+    /// root so a test that persists a session cannot observe another test's
+    /// state, including after a prior test process has exited.
     #[cfg(test)]
     pub(crate) fn new_for_test() -> Self {
-        use std::sync::atomic::AtomicUsize;
-
-        static NEXT_TEST_ROOT: AtomicUsize = AtomicUsize::new(0);
-        let sequence = NEXT_TEST_ROOT.fetch_add(1, Ordering::Relaxed);
-        let home =
-            std::env::temp_dir().join(format!("agy-acp-test-{}-{sequence}", std::process::id()));
+        let home = std::env::temp_dir().join(format!("agy-acp-test-{}", Uuid::new_v4()));
         Self::new_with_home(home, Vec::new(), false)
     }
 

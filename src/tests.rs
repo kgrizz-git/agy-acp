@@ -595,6 +595,15 @@ fn test_adapter_uses_a_scratch_home_without_model_discovery() {
 }
 
 #[test]
+fn test_adapters_use_distinct_scratch_homes() {
+    let first = test_adapter();
+    let second = test_adapter();
+
+    assert_ne!(first.state_file, second.state_file);
+    assert_ne!(first.conversations_dir, second.conversations_dir);
+}
+
+#[test]
 fn test_initialize_advertises_load_session_support() {
     let adapter = test_adapter();
     let response = adapter.handle_initialize(json!(1));
