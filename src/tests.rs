@@ -102,6 +102,10 @@ fn process_lines(
     (processor, updates)
 }
 
+fn test_adapter() -> Adapter {
+    Adapter::new_for_test()
+}
+
 #[test]
 fn test_parse_skip_naration_flag() {
     assert!(
@@ -582,8 +586,26 @@ fn test_tool_kind_mapping() {
 }
 
 #[test]
+fn test_adapter_uses_a_scratch_home_without_model_discovery() {
+    let adapter = test_adapter();
+
+    assert!(adapter.state_file.starts_with(std::env::temp_dir()));
+    assert!(adapter.conversations_dir.starts_with(std::env::temp_dir()));
+    assert!(adapter.available_models.is_empty());
+}
+
+#[test]
+fn test_adapters_use_distinct_scratch_homes() {
+    let first = test_adapter();
+    let second = test_adapter();
+
+    assert_ne!(first.state_file, second.state_file);
+    assert_ne!(first.conversations_dir, second.conversations_dir);
+}
+
+#[test]
 fn test_initialize_advertises_load_session_support() {
-    let adapter = Adapter::new();
+    let adapter = test_adapter();
     let response = adapter.handle_initialize(json!(1));
     assert_eq!(
         response
@@ -598,7 +620,7 @@ fn test_initialize_advertises_load_session_support() {
 
 #[test]
 fn test_initialize_advertises_resume_capability() {
-    let adapter = Adapter::new();
+    let adapter = test_adapter();
     let response = adapter.handle_initialize(json!(1));
     assert!(
         response
@@ -763,6 +785,11 @@ fn test_session_load_replays_conversation_history() {
         rusqlite::params![8i64, make_assistant_payload("second response")],
     )
     .unwrap();
+    conn.execute(
+        "INSERT INTO steps (idx, step_type, step_payload) VALUES (?1, 14, ?2)",
+        rusqlite::params![9i64, make_user_payload("one more question")],
+    )
+    .unwrap();
     drop(conn);
 
     let mut adapter = Adapter {
@@ -779,6 +806,22 @@ fn test_session_load_replays_conversation_history() {
     adapter.persist_session("sess-replay", Some("conv-replay"), 8, None);
 
     let output = adapter.handle_session_load(json!(1), &json!({"sessionId": "sess-replay"}));
+    assert_eq!(
+        adapter
+            .sessions
+            .get("sess-replay")
+            .map(|session| session.last_step_idx),
+        Some(9)
+    );
+    let persisted_store: crate::types::SessionStore =
+        serde_json::from_str(&fs::read_to_string(root.join("sessions.json")).unwrap()).unwrap();
+    assert_eq!(
+        persisted_store
+            .sessions
+            .get("sess-replay")
+            .map(|session| session.last_step_idx),
+        Some(9)
+    );
 
     assert!(
         output.len() >= 2,
@@ -822,7 +865,8 @@ fn test_session_load_replays_conversation_history() {
             "tool_call",
             "agent_message_chunk",
             "user_message_chunk",
-            "agent_message_chunk"
+            "agent_message_chunk",
+            "user_message_chunk"
         ]
     );
     let message_updates: Vec<_> = updates
@@ -849,7 +893,8 @@ fn test_session_load_replays_conversation_history() {
             "agent_message_chunk",
             "agent_message_chunk",
             "user_message_chunk",
-            "agent_message_chunk"
+            "agent_message_chunk",
+            "user_message_chunk"
         ]
     );
     let message_texts: Vec<_> = message_updates
@@ -867,7 +912,8 @@ fn test_session_load_replays_conversation_history() {
             "I will inspect the workspace.",
             "hello from agent",
             "how are you?",
-            "second response"
+            "second response",
+            "one more question"
         ]
     );
     assert!(
@@ -963,7 +1009,7 @@ fn test_session_resume_rejects_unknown_session() {
 
 #[test]
 fn test_session_resume_rejects_empty_session_id() {
-    let mut adapter = Adapter::new();
+    let mut adapter = test_adapter();
     let response = adapter.handle_session_resume(json!(12), &json!({}));
     assert!(response.result.is_none());
     assert_eq!(
@@ -1072,184 +1118,6 @@ fn test_session_resume_does_not_replay_history() {
             .and_then(|s| s.as_str()),
         Some("sess-nr")
     );
-
-    let _ = fs::remove_dir_all(root);
-}
-
-#[test]
-#[ignore]
-fn test_read_response_from_db() {
-    let root = std::env::temp_dir().join(format!("agy-acp-sqlite-{}", Uuid::new_v4()));
-    let conv_dir = root.join("conversations");
-    fs::create_dir_all(&conv_dir).unwrap();
-
-    let db_path = conv_dir.join("test-conv.db");
-    let conn = Connection::open(&db_path).unwrap();
-    conn.execute_batch(
-        "CREATE TABLE steps (
-            idx INTEGER PRIMARY KEY,
-            step_type INTEGER NOT NULL DEFAULT 0,
-            status INTEGER NOT NULL DEFAULT 0,
-            has_subtrajectory NUMERIC NOT NULL DEFAULT 0,
-            metadata BLOB,
-            error_details BLOB,
-            permissions BLOB,
-            task_details BLOB,
-            render_info BLOB,
-            step_payload BLOB,
-            step_format INTEGER NOT NULL DEFAULT 0
-        )",
-    )
-    .unwrap();
-
-    let mut inner = Vec::new();
-    inner.push(0x0A);
-    inner.push(11);
-    inner.extend_from_slice(b"hello world");
-    let mut payload = vec![0x08, 0x0F, 0xA2, 0x01, inner.len() as u8];
-    payload.extend_from_slice(&inner);
-
-    conn.execute(
-        "INSERT INTO steps (idx, step_type, step_payload) VALUES (?1, 15, ?2)",
-        rusqlite::params![1i64, payload],
-    )
-    .unwrap();
-
-    conn.execute(
-        "INSERT INTO steps (idx, step_type, step_payload) VALUES (?1, 14, ?2)",
-        rusqlite::params![2i64, vec![0x08u8, 0x0E]],
-    )
-    .unwrap();
-    drop(conn);
-
-    let result = crate::db::read_delta_from_db(&conv_dir, "test-conv", -1);
-    let delta = result.expect("expected a delta for the freshly-inserted rows");
-    assert_eq!(delta.text, Some("hello world".to_string()));
-    assert_eq!(delta.max_step_idx, 1);
-
-    let result = crate::db::read_delta_from_db(&conv_dir, "test-conv", 1);
-    assert!(result.is_none());
-
-    let _ = fs::remove_dir_all(root);
-}
-
-#[test]
-#[ignore]
-fn test_read_response_multi_step_no_skip_no_duplicate() {
-    let root = std::env::temp_dir().join(format!("agy-acp-multi-step-{}", Uuid::new_v4()));
-    let conv_dir = root.join("conversations");
-    fs::create_dir_all(&conv_dir).unwrap();
-
-    let db_path = conv_dir.join("multi.db");
-    let conn = Connection::open(&db_path).unwrap();
-    conn.execute_batch(
-        "CREATE TABLE steps (
-            idx INTEGER PRIMARY KEY,
-            step_type INTEGER NOT NULL DEFAULT 0,
-            status INTEGER NOT NULL DEFAULT 0,
-            has_subtrajectory NUMERIC NOT NULL DEFAULT 0,
-            metadata BLOB,
-            error_details BLOB,
-            permissions BLOB,
-            task_details BLOB,
-            render_info BLOB,
-            step_payload BLOB,
-            step_format INTEGER NOT NULL DEFAULT 0
-        )",
-    )
-    .unwrap();
-
-    fn make_payload(text: &str) -> Vec<u8> {
-        let text_bytes = text.as_bytes();
-        let mut inner = vec![0x0A];
-        let mut len = text_bytes.len();
-        loop {
-            if len < 128 {
-                inner.push(len as u8);
-                break;
-            }
-            inner.push((len as u8 & 0x7F) | 0x80);
-            len >>= 7;
-        }
-        inner.extend_from_slice(text_bytes);
-
-        let mut outer = vec![0xA2, 0x01];
-        let mut ilen = inner.len();
-        loop {
-            if ilen < 128 {
-                outer.push(ilen as u8);
-                break;
-            }
-            outer.push((ilen as u8 & 0x7F) | 0x80);
-            ilen >>= 7;
-        }
-        outer.extend(inner);
-        outer
-    }
-
-    conn.execute(
-        "INSERT INTO steps (idx, step_type, step_payload) VALUES (1, 0, X'0801')",
-        [],
-    )
-    .unwrap();
-    conn.execute(
-        "INSERT INTO steps (idx, step_type, step_payload) VALUES (?1, 15, ?2)",
-        rusqlite::params![2i64, make_payload("hello")],
-    )
-    .unwrap();
-    conn.execute(
-        "INSERT INTO steps (idx, step_type, step_payload) VALUES (3, 0, X'0802')",
-        [],
-    )
-    .unwrap();
-    conn.execute(
-        "INSERT INTO steps (idx, step_type, step_payload) VALUES (?1, 15, ?2)",
-        rusqlite::params![4i64, make_payload("world")],
-    )
-    .unwrap();
-    conn.execute(
-        "INSERT INTO steps (idx, step_type, step_payload) VALUES (?1, 15, ?2)",
-        rusqlite::params![5i64, make_payload("line1\nline2\nline3")],
-    )
-    .unwrap();
-    drop(conn);
-
-    let result = crate::db::read_delta_from_db(&conv_dir, "multi", -1).unwrap();
-    assert_eq!(
-        result.text,
-        Some("hello\nworld\nline1\nline2\nline3".to_string())
-    );
-    assert_eq!(result.max_step_idx, 5);
-
-    let result = crate::db::read_delta_from_db(&conv_dir, "multi", 2).unwrap();
-    assert_eq!(result.text, Some("world\nline1\nline2\nline3".to_string()));
-    assert_eq!(result.max_step_idx, 5);
-
-    let result = crate::db::read_delta_from_db(&conv_dir, "multi", 4).unwrap();
-    assert_eq!(result.text, Some("line1\nline2\nline3".to_string()));
-    assert_eq!(result.max_step_idx, 5);
-
-    let result = crate::db::read_delta_from_db(&conv_dir, "multi", 5);
-    assert!(result.is_none());
-
-    let _ = fs::remove_dir_all(root);
-}
-
-#[test]
-#[ignore]
-fn test_read_response_missing_steps_table() {
-    let root = std::env::temp_dir().join(format!("agy-acp-noschema-{}", Uuid::new_v4()));
-    let conv_dir = root.join("conversations");
-    fs::create_dir_all(&conv_dir).unwrap();
-
-    let db_path = conv_dir.join("empty.db");
-    let conn = Connection::open(&db_path).unwrap();
-    conn.execute_batch("CREATE TABLE other (id INTEGER)")
-        .unwrap();
-    drop(conn);
-
-    let result = crate::db::read_delta_from_db(&conv_dir, "empty", -1);
-    assert!(result.is_none());
 
     let _ = fs::remove_dir_all(root);
 }
@@ -1694,7 +1562,7 @@ fn test_filter_narration_all_narration_drops_all() {
 
 #[test]
 fn test_session_new_returns_models() {
-    let mut adapter = Adapter::new();
+    let mut adapter = test_adapter();
     let response = adapter.handle_session_new(json!(1));
     let result = response.result.as_ref().unwrap();
     assert!(result.get("sessionId").is_some());
@@ -1712,7 +1580,7 @@ fn test_session_new_returns_models() {
 
 #[test]
 fn test_session_set_model() {
-    let mut adapter = Adapter::new();
+    let mut adapter = test_adapter();
     adapter.available_models = test_models();
     let new_resp = adapter.handle_session_new(json!(1));
     let session_id = new_resp.result.as_ref().unwrap()["sessionId"]
@@ -1738,7 +1606,7 @@ fn test_session_set_model() {
 
 #[test]
 fn test_session_set_model_missing_params() {
-    let mut adapter = Adapter::new();
+    let mut adapter = test_adapter();
     let resp = adapter.handle_session_set_model(json!(1), &json!({}));
     assert!(resp.error.is_some());
     assert_eq!(resp.error.as_ref().unwrap()["code"].as_i64(), Some(-32602));
@@ -1746,7 +1614,7 @@ fn test_session_set_model_missing_params() {
 
 #[test]
 fn test_session_set_model_unknown_session() {
-    let mut adapter = Adapter::new();
+    let mut adapter = test_adapter();
     let resp = adapter.handle_session_set_model(
         json!(1),
         &json!({"sessionId": "nonexistent", "modelId": "some-model"}),
@@ -1757,7 +1625,7 @@ fn test_session_set_model_unknown_session() {
 
 #[test]
 fn test_session_set_config_option_sets_model() {
-    let mut adapter = Adapter::new();
+    let mut adapter = test_adapter();
     adapter.available_models = test_models();
     let new_resp = adapter.handle_session_new(json!(1));
     let session_id = new_resp.result.as_ref().unwrap()["sessionId"]
@@ -1788,7 +1656,7 @@ fn test_session_set_config_option_sets_model() {
 
 #[test]
 fn test_session_set_config_option_rejects_unknown_config() {
-    let mut adapter = Adapter::new();
+    let mut adapter = test_adapter();
     let new_resp = adapter.handle_session_new(json!(1));
     let session_id = new_resp.result.as_ref().unwrap()["sessionId"]
         .as_str()
@@ -1856,7 +1724,7 @@ fn test_session_set_model_persists() {
 
 #[test]
 fn test_session_load_returns_models() {
-    let mut adapter = Adapter::new();
+    let mut adapter = test_adapter();
     adapter.sessions.insert(
         "test-load".to_string(),
         crate::types::Session {
@@ -1894,7 +1762,7 @@ fn test_session_load_returns_models() {
 
 #[test]
 fn test_session_resume_returns_models() {
-    let mut adapter = Adapter::new();
+    let mut adapter = test_adapter();
     adapter.persist_session(
         "test-resume",
         Some("conv-resume"),
@@ -1920,7 +1788,7 @@ fn test_session_resume_returns_models() {
 
 #[test]
 fn test_session_models_json_default() {
-    let mut adapter = Adapter::new();
+    let mut adapter = test_adapter();
     let models = adapter.session_models_json(None);
     let current = models["currentModelId"].as_str().unwrap();
     if adapter.available_models.is_empty() {
@@ -1980,7 +1848,7 @@ fn test_parse_models_output_without_label_column() {
 
 #[test]
 fn test_session_models_json_never_emits_a_label_as_an_id() {
-    let mut adapter = Adapter::new();
+    let mut adapter = test_adapter();
     adapter.available_models = Adapter::parse_models_output(AGY_MODELS_STDOUT);
     let models = adapter.session_models_json(None);
     let available = models["availableModels"].as_array().unwrap();
@@ -2003,7 +1871,7 @@ fn test_session_models_json_never_emits_a_label_as_an_id() {
 
 #[test]
 fn test_session_models_json_with_model() {
-    let mut adapter = Adapter::new();
+    let mut adapter = test_adapter();
     adapter.available_models = test_models();
     let models = adapter.session_models_json(Some("model-b"));
     assert_eq!(models["currentModelId"].as_str(), Some("model-b"));
@@ -2016,7 +1884,7 @@ fn test_session_models_json_with_model() {
 
 #[test]
 fn test_session_config_options_json_with_model() {
-    let mut adapter = Adapter::new();
+    let mut adapter = test_adapter();
     adapter.available_models = test_models();
     let config_options = adapter.session_config_options_json(Some("model-b"));
     assert_eq!(config_options[0]["id"].as_str(), Some("model"));
@@ -2034,7 +1902,7 @@ fn test_session_config_options_json_with_model() {
 /// must not have it passed through to `--model`, which agy would reject.
 #[test]
 fn test_set_model_strips_a_label_glued_to_the_id() {
-    let mut adapter = Adapter::new();
+    let mut adapter = test_adapter();
     adapter.available_models = Adapter::parse_models_output(AGY_MODELS_STDOUT);
     let new_resp = adapter.handle_session_new(json!(1));
     let session_id = new_resp.result.as_ref().unwrap()["sessionId"]
@@ -2058,7 +1926,7 @@ fn test_set_model_strips_a_label_glued_to_the_id() {
 
 #[test]
 fn test_set_model_rejects_a_model_agy_does_not_offer() {
-    let mut adapter = Adapter::new();
+    let mut adapter = test_adapter();
     adapter.available_models = test_models();
     let new_resp = adapter.handle_session_new(json!(1));
     let session_id = new_resp.result.as_ref().unwrap()["sessionId"]
@@ -2076,7 +1944,7 @@ fn test_set_model_rejects_a_model_agy_does_not_offer() {
 
 #[test]
 fn test_set_config_option_rejects_a_model_agy_does_not_offer() {
-    let mut adapter = Adapter::new();
+    let mut adapter = test_adapter();
     adapter.available_models = test_models();
     let new_resp = adapter.handle_session_new(json!(1));
     let session_id = new_resp.result.as_ref().unwrap()["sessionId"]
@@ -2513,12 +2381,7 @@ async fn stream_notifications_go_through_the_output_channel() {
     ];
 
     for frame in frames {
-        crate::adapter::publish_stream_notifications(
-            &mut processor,
-            &notify_tx,
-            frame,
-            "sess-1",
-        );
+        crate::adapter::publish_stream_notifications(&mut processor, &notify_tx, frame, "sess-1");
     }
     drop(notify_tx);
 

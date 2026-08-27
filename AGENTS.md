@@ -17,6 +17,20 @@ No separate lint/typecheck/format commands — just `cargo build` and `cargo tes
 Work items live in [TODO.md](TODO.md), not here — this file describes how the
 code works today. Completed work is recorded in [CHANGELOG.md](CHANGELOG.md).
 
+### Plans and TODO discipline
+
+TODO.md entries are the source of truth for what's next; a *plan* is not
+completion. When a piece of work gets a plan (kept under `plans/`):
+
+- Keep the TODO.md entry and its "Next Up" pointer **on the board until the work
+  actually lands** (PR merged). Do not delete them while planning or implementing.
+- **Link** the plan from the TODO entry (a one-line `Plan: plans/<name>.md`
+  pointer) so the entry and the plan cross-reference.
+- **Delete** the entry as the **final step of implementation** — never during
+  planning. Per TODO.md's own rule, entries are deleted on landing, not ticked.
+- This applies symmetrically: if an entry is removed before its work ships, the
+  work becomes untracked. Premature deletion is the bug to avoid.
+
 > This is a **hard fork** of `hicder/agy-acp`: no upstream remote, no pull requests
 > filed there. Fork-specific context and workflow are in the second half of this
 > file, from "What this fork is" onward.
@@ -49,6 +63,15 @@ code works today. Completed work is recorded in [CHANGELOG.md](CHANGELOG.md).
    - `agy` in `PATH` (install from `google-antigravity/antigravity-cli` releases)
    - Auth via `GEMINI_API_KEY` env var or macOS Keychain (`~/.gemini/antigravity-cli/settings.json`)
    - `cargo build --release` must have been run first
+
+CI (`ci.yml`) enforces `cargo build`, unit tests, and the ignored I/O tier
+(`cargo test -- --ignored --skip e2e`); Rust 1.70 is the tested MSRV on Linux
+and Windows. The Unix-socket `--permission-prompts` bridge is intentionally
+unavailable on Windows and fails closed there. E2e (`e2e.yml`) runs only after
+approval of the protected `e2e` GitHub environment for same-repository PRs;
+fork PRs skip before requesting approval. The environment holds
+`E2E_GEMINI_API_KEY`, and the workflow uses a pinned agy release. Do not use a
+repository-level e2e key: the workflow checks out PR code.
 
 ## Environment variables
 
@@ -200,4 +223,3 @@ Things worth re-checking after any change, because each one was a real bug:
 
 `AGY_ACP_PERMISSION_TIMEOUT_SECS` exists mainly so the timeout ordering can be
 tested in seconds rather than nine minutes.
-

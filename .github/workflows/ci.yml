@@ -1,0 +1,57 @@
+# Build and deterministic tests. No formatting gate: tree is not rustfmt-clean.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+        with:
+          toolchain: stable
+          profile: minimal
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - name: Build
+        run: cargo build --verbose
+      - name: Test (unit)
+        run: cargo test --verbose
+      # --ignored runs the ignored I/O tier; --skip e2e excludes the four e2e tests (test_e2e_*) that need agy + GEMINI_API_KEY — update if that naming convention changes.
+      - name: Test (ignored I/O, excluding e2e)
+        run: cargo test --verbose -- --ignored --skip e2e
+
+  msrv:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+        with:
+          toolchain: 1.70
+          profile: minimal
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - name: Build (MSRV)
+        run: cargo build --verbose
+      - name: Test (MSRV)
+        run: cargo test --verbose

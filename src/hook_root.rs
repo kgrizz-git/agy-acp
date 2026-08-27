@@ -84,7 +84,10 @@ fn sweep_stale_roots() {
         let stale = entry
             .metadata()
             .and_then(|m| m.modified())
-            .and_then(|t| t.elapsed().map_err(std::io::Error::other))
+            .and_then(|t| {
+                t.elapsed()
+                    .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err))
+            })
             .map(|age| age > STALE_ROOT_AGE)
             .unwrap_or(false);
         if stale {

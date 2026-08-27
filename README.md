@@ -102,6 +102,10 @@ Set the `AGY_EXTRA_ARGS` environment variable to pass additional arguments to ev
 
 `agy` runs headless under this adapter, and headless `agy` cannot prompt for tool permissions — it auto-denies anything that needs one, so the tool call fails silently and the model stops. Pass `--permission-prompts` to ask the ACP host instead:
 
+> Permission prompts require a Unix platform (macOS or Linux). The rest of the
+> adapter remains usable on Windows, but this opt-in mode is safely unavailable
+> there because it relies on Unix-domain sockets.
+
 ```json
 {
   "agent_servers": {
@@ -182,4 +186,3 @@ To inspect the JSON-RPC messages between Zed and `agy-acp`, run `dev: open acp l
 ## License
 
 MIT
-

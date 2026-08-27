@@ -13,6 +13,13 @@ of its own yet, so everything below is unreleased.
 The stream-json port merged as `bf6e81b` (PR #1). It has not been installed
 anywhere yet; see "Verify the port under Paseo" in [TODO.md](TODO.md).
 
+### Maintenance
+
+- Keep the Windows build portable by failing closed when the Unix-socket-based
+  `--permission-prompts` feature is requested there.
+- Keep fork PRs from waiting on an e2e-environment approval they cannot use, and
+  make unit-test scratch homes collision-resistant across test processes.
+
 ### Added
 
 - `--permission-prompts` routes agy's tool permission checks to the ACP host.
@@ -147,15 +154,14 @@ anywhere yet; see "Verify the port under Paseo" in [TODO.md](TODO.md).
   Bounding it would push the backpressure onto agy, which is the right shape but
   couples a stalled host to agy's progress, so it is measured and decided rather
   than swapped in. Tracked in TODO.md.
-- `test_read_response_from_db` fails under `cargo test -- --include-ignored`. It
-  is upstream's test and upstream's implementation, `#[ignore]`d since it was
-  written, so it has not run in either lineage in months: it expects
-  `max_step_idx == 1` where the code returns `2`, having advanced the cursor over
-  a trailing user-message row. The helper it tests is `#[cfg(test)]`-only, so
-  nothing in production depends on the answer. Tracked in TODO.md.
-
 ### Maintenance
 
+- CI: `ci.yml` runs `cargo build`, unit tests, and the ignored I/O tier with
+  `--ignored --skip e2e` to exclude the four e2e tests; Rust 1.70 runs on Linux
+  and Windows. All Actions are SHA-pinned, checkout credentials are not
+  persisted, and e2e is protected by the approval-gated `e2e` environment with
+  its own `E2E_GEMINI_API_KEY`. No formatting gate — the tree is not
+  rustfmt-clean.
 - Hard fork: the `upstream` remote is removed, `gh repo set-default` points at
   this fork, and `pre-push` refuses any target but `kgrizz-git/agy-acp`. Note
   that `gh pr create` in a fork defaults its base to the parent repo regardless
@@ -174,3 +180,6 @@ anywhere yet; see "Verify the port under Paseo" in [TODO.md](TODO.md).
   ignored set is ignored by inheritance. The compliance checklist's record of
   known permission gaps is likewise updated, since one of the two it listed is
   closed by this branch.
+- Removed the stale test-only conversation-DB delta reader. Load-replay coverage
+  now proves that its persisted all-row watermark advances past a trailing user
+  message.

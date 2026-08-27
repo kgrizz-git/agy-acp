@@ -16,10 +16,10 @@ The few things worth picking up next. Each is a pointer; the detail lives below.
   — one "Always allow" on `run_command` covers every later command.
 - [Confirm the path-field list against real agy traffic](#confirm-the-path-field-list-against-real-agy-traffic)
   — a path field this fork has not seen is judged only by how its value looks.
-- [Build and test in CI](#build-and-test-in-ci) — there is none, which is why an
-  ignored test rotted for months.
 - [Rename the binary and crate](#rename-the-binary-and-crate) — cheaper now than
   after anyone else installs it.
+- [Configure the protected e2e environment](#configure-the-protected-e2e-environment)
+  — key-backed PR e2e is intentionally deferred; deterministic CI already runs.
 
 ## Active
 
@@ -32,6 +32,27 @@ cancellation (upstream's `child.kill()` path), concurrent sessions and subagent
 events are untested anywhere. Install the built binary to `~/.local/bin` with
 `codesign -f -s -`, restart the daemon, then drive one real agent through a
 permission prompt, a reopened thread, and a cancellation.
+
+### Configure the protected e2e environment
+
+`e2e.yml` deliberately reads its key only from the approval-gated GitHub
+environment named `e2e`; the environment has not been created yet, so the e2e
+job currently skips after its secret gate. Fork pull requests skip before
+requesting environment approval because they cannot receive Actions secrets.
+This does not weaken the deterministic CI jobs or expose a repository secret to
+pull-request code.
+
+When it becomes useful to run paid e2e on pull requests:
+
+1. Create the `e2e` GitHub environment and require reviewer approval before a
+   job can use it.
+2. Add `E2E_GEMINI_API_KEY` as an environment secret. Do not use a
+   repository-level e2e key; the job checks out pull-request code.
+3. If the existing repository-level `GEMINI_API_KEY` is only for this workflow,
+   remove it after the environment secret works.
+4. Re-run e2e on a same-repository PR or use `workflow_dispatch`, and confirm
+   the gate proceeds, the pinned agy archive verifies, and all four e2e tests
+   run.
 
 ### Security and permission boundaries
 
@@ -182,17 +203,6 @@ configurable `agy` binary path.
 
 ### Fork maintenance
 
-#### Build and test in CI
-
-There is no build or test workflow — only `upstream-watch.yml`. That absence is
-why `test_read_response_from_db` rotted unnoticed: it is `#[ignore]`d, and nobody
-runs `--include-ignored` by hand. A workflow should run `cargo build`,
-`cargo test`, and `cargo test -- --include-ignored` with the four e2e tests
-skipped, since those need `agy` and auth. Gate e2e behind a `GEMINI_API_KEY`
-secret so they skip rather than fail when it is absent. Do not add a bare
-`cargo fmt --check`: this tree is not rustfmt-clean and it would reflow files no
-change touched.
-
 #### Rename the binary and crate
 
 It is a hard fork with different behaviour (permission bridge, load replay,
@@ -210,16 +220,6 @@ it emits during a turn; persisting those and replaying its own transcript would
 drop `db.rs`/`protobuf.rs` entirely. The gap is history the adapter never
 streamed (older threads, other clients), so any switch needs a fallback or a
 migration.
-
-#### test_read_response_from_db disagrees with the code
-
-The only red test in the suite, and it was red before the stream-json port too,
-so it is not a regression from it. `read_delta_from_db` advances `max_step_idx`
-over every row it read, including the trailing user-message row, and returns 2;
-the test expects 1, the last row it takes text from. As a cursor, 2 looks right
-and the assertion looks stale, but the helper is `#[cfg(test)]`-only now, so
-nothing in production depends on either answer. Decide which semantics were
-meant, then fix the test or the code — do not just change the number to match.
 
 ### Upstream and ecosystem
 
