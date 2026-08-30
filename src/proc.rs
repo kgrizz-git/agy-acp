@@ -320,20 +320,26 @@ mod tests {
     ///
     /// Two levels below the child on purpose. A one-level tree would let a walk
     /// that only looks at direct children pass here and still miss the command
-    /// agy is actually running. `set -m` turns on job control, which is what puts
-    /// the background subshell in a group of its own -- no external interpreter
-    /// needed for it. The `; :` stops that subshell from `exec`ing `sleep` in
-    /// place, which is the whole point: it has to be a separate process.
+    /// agy is actually running. `perl` is what does the `setpgrp`, and `exec`
+    /// keeps the pid the shell printed. The `; :` stops the inner `sh` from
+    /// `exec`ing `sleep` in place, which is the whole point: it has to be a
+    /// separate process.
     ///
-    /// The detachment is asserted rather than assumed. A shell that ignored
-    /// `set -m` would leave the subshell in our group and quietly turn this into
-    /// a weaker test than it looks.
+    /// The shell-native alternative, `set -m; (sleep 30; :) &`, was tried and
+    /// does not travel. Job control gives the background subshell its own group
+    /// under bash, so it looks right on macOS, but under dash -- which is
+    /// `/bin/sh` on the Linux CI -- the subshell stays in our group and the tree
+    /// is not detached at all.
+    ///
+    /// Which is why the detachment is asserted rather than assumed: a shell that
+    /// does not detach would quietly turn this into a weaker test than it reads
+    /// as, and that assertion is what caught the above.
     ///
     /// Returns the child, the middle pid, and the deepest pid.
     async fn spawn_detached_tree() -> (Child, u32, u32) {
         let mut child = Command::new("sh")
             .arg("-c")
-            .arg(r#"set -m; (sleep 30; :) & echo $!; sleep 30"#)
+            .arg(r#"perl -e 'setpgrp; exec("sh", "-c", "sleep 30; :")' & echo $!; sleep 30"#)
             .stdout(std::process::Stdio::piped())
             .spawn()
             .expect("spawn sh");
