@@ -14,7 +14,8 @@ noted at the end so the next reader does not re-derive them.
 ## Why option 1 and not the others
 
 Both briefs (`dev-docs/investigations/kilo-hy3-brief.md`,
-`kilo-longcat-brief.md`) reach the same conclusion, and it holds up: exact-match
+`dev-docs/investigations/kilo-longcat-brief.md`) reach the same conclusion, and
+it holds up: exact-match
 keying needs an equivalence test, not a shell parser. Option 2 can never be
 complete — a path it fails to extract is a path that gets allowed — and option 3
 is evaded by `cat .en"v"`.
@@ -37,8 +38,13 @@ the code comment, not just here.
 `AlwaysKey` becomes `(String, String, Option<String>)` —
 `(session_id, tool_name, args_fingerprint)`.
 
-The fingerprint is `Some(args.to_string())` for command tools and `None` for
-everything else. **Fingerprint the whole `args` object, not just `CommandLine`.**
+The fingerprint is `Some(args_fingerprint(args))` for command tools and `None`
+for everything else, where `args_fingerprint` serializes the argument object with
+the volatile fields of D1b removed. Every mention of "fingerprint" below means
+that function, never a bare `args.to_string()`.
+
+**Fingerprint the whole `args` object, not just `CommandLine`** — minus the
+narrow, justified exclusions in D1b, and nothing else.
 
 Rationale: keying on `CommandLine` alone silently drops every other argument from
 the scope of the answer. `Cwd` is the concrete case, and it is no longer a
@@ -117,7 +123,8 @@ in `PATH_FIELDS` (`AbsolutePath`, `SearchPath`, `Cwd`), and `Query` is correctly
 three tools. And only three tools were exercised; the write and edit tools are
 still unobserved. See the narrowed `TODO.md` entry.
 
-`args.to_string()` is canonical here because `serde_json` is built without
+The serialization inside `args_fingerprint` is canonical because `serde_json` is
+built without
 `preserve_order`, so its `Map` is a `BTreeMap` and keys serialize sorted.
 Note the trap for later: enabling `preserve_order` anywhere in the dependency
 graph makes the fingerprint follow wire key order. That direction is safe (a
@@ -152,7 +159,8 @@ Detector 1 catches a command tool whose argument shape the fork has not seen;
 detector 2 catches a command-executing tool whose *name* the fork has not seen.
 
 To be unambiguous, because this is the sentence an implementer will act on:
-`sticky_scope` returns `Some(args.to_string())` when **either** detector fires.
+`sticky_scope` returns `Some(args_fingerprint(args))` when **either** detector
+fires.
 It returns `None` only when **both** miss. Reading this as an AND would leave a
 known command tool with an unfamiliar argument shape on the old tool-only key,
 which is the exact bypass this plan exists to close.
@@ -205,8 +213,13 @@ and the label does not need to carry the command.
   "never cleared", and describes the gap as open. All three become wrong on
   landing. State instead what D1 and D3 decide, and why (the D-block reasoning
   above about inert containment).
+- Add `fn args_fingerprint(args: &Value) -> String`: clone the argument object,
+  remove every key named in `UNKEYED_FIELDS` (D1b), and serialize with
+  `to_string()`. Do this in one place — the filtering and the serialization must
+  never be reachable separately, or the next reader will use the unfiltered form.
 - Add `fn sticky_scope(tool_name: &str, args: &Value) -> Option<String>`
-  implementing D3, returning `Some(args.to_string())` or `None`.
+  implementing D3, returning `Some(args_fingerprint(args))` when either detector
+  fires and `None` only when both miss.
 - In `decide` (`permission.rs:289`), build
   `let scope = sticky_scope(&tool_name, &args);` and
   `let always_key = (session_id.clone(), tool_name.clone(), scope.clone());`.
