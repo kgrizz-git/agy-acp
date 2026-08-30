@@ -10,8 +10,8 @@ carries no work items.
 
 The few things worth picking up next. Each is a pointer; the detail lives below.
 
-- [Verify the port under Paseo](#verify-the-port-under-paseo) — merged and
-  installed nowhere yet; only a scripted client has exercised it.
+- [Verify the port under Paseo](#verify-the-port-under-paseo) — the provider is
+  already wired up, but the installed binary predates the port.
 - [Permission decisions ignore what a command actually does](#permission-decisions-ignore-what-a-command-actually-does)
   — one "Always allow" on `run_command` covers every later command.
 - [Confirm the path-field list against real agy traffic](#confirm-the-path-field-list-against-real-agy-traffic)
@@ -27,11 +27,32 @@ The few things worth picking up next. Each is a pointer; the detail lives below.
 
 The stream-json port merged as `bf6e81b`. Everything verified so far was driven by
 a scripted ACP client: the four permission scenarios, load replay across
-processes, and the test suite. Nothing has run under Paseo itself, and
+processes, and the test suite. Nothing on `main` has run under Paseo itself, and
 cancellation (upstream's `child.kill()` path), concurrent sessions and subagent
-events are untested anywhere. Install the built binary to `~/.local/bin` with
-`codesign -f -s -`, restart the daemon, then drive one real agent through a
-permission prompt, a reopened thread, and a cancellation.
+events are untested anywhere.
+
+This is a *reinstall*, not a first install — the earlier wording here ("installed
+nowhere yet") was wrong. Inspecting the local Paseo 0.6.1 install found:
+
+- `~/.local/bin/agy-acp` already exists, built 2026-08-21. It predates the
+  stream-json port (2026-08-24): no `stream-json` string in the binary. It has
+  the permission bridge but not the port, `PATH_FIELDS`, or anything from PR #3.
+- Paseo is already wired to it. `agents.providers.agy` in `~/.paseo/config.json`
+  is a user-defined provider extending Paseo's generic `acp` provider, with
+  `command: ["agy-acp", "--permission-prompts"]`, and it reports
+  `status: "available"`. So the provider setup is done; only the binary is stale.
+- That generic `acp` provider exposes an **Auto Accept** feature toggle,
+  "Automatically approves ACP permission prompts" (currently off). It is a
+  host-side answer to `session/request_permission`, so with it on the adapter
+  still gates but the user never sees a prompt. Keep it off for any permission
+  testing, and note the README currently says the adapter "becomes the only gate
+  on tool execution" without mentioning that a host can auto-answer.
+- Paseo reports `modes: []` for `agy` — no session-mode UI, unlike its Claude and
+  Copilot providers. Relates to "More ACP configuration" below.
+
+So: rebuild, install to `~/.local/bin` with `codesign -f -s -`, restart the
+daemon, then drive one real agent through a permission prompt, a reopened thread,
+and a cancellation.
 
 ### Configure the protected e2e environment
 
@@ -57,6 +78,8 @@ When it becomes useful to run paid e2e on pull requests:
 ### Security and permission boundaries
 
 #### Permission decisions ignore what a command actually does
+
+Plan: plans/permission-command-keying.md
 
 Remembered answers are keyed by `(session, tool name)`, so one "Always allow" on
 `run_command` approves every later command in that session. The containment and
@@ -133,9 +156,37 @@ repository already handles — `AbsolutePath`, `TargetFile`, `DirectoryPath`,
 A field it does not know keeps the shape-based tests and nothing else, so a
 miss costs coverage quietly and never announces itself.
 
-Capture the `PreToolUse` payloads from a real session and diff the argument keys
-against the list. Same trip as the Paseo verification above, since both need one
-real agy run.
+Partly done. A capture against agy 1.1.22 (hook that appends the payload and
+allows, driven by `agy -p ... --add-dir <ws> --dangerously-skip-permissions` —
+no adapter build and no Paseo needed) exercised three tools:
+
+```
+run_command  args: CommandLine, Cwd, WaitMsBeforeAsync, toolAction, toolSummary
+view_file    args: AbsolutePath, toolAction, toolSummary
+grep_search  args: Query, SearchPath, toolAction, toolSummary
+```
+
+Every path argument there is already in `PATH_FIELDS` (`AbsolutePath`,
+`SearchPath`, `Cwd`) and `Query` is correctly not, so for these three the
+shape-based fallback is not quietly carrying the load. The non-path additions
+(`toolAction`, `toolSummary`, `WaitMsBeforeAsync`) are model-authored display and
+pacing fields.
+
+What is left is the write side — the edit, create and delete tools, plus
+`list_dir` and the network tools — which this capture never triggered. Repeat it
+with a prompt that writes and deletes files.
+
+No adapter change is needed to capture them. The `session/request_permission`
+request already carries the full argument object as `rawInput`, and the default
+auto-allow list is only `ask_question`, so nearly every tool call prompts and
+every prompt shows its arguments. Point the Paseo provider's `command` at a
+wrapper script that runs the real binary through `tee` and read the captured
+JSON-RPC afterwards, rather than adding payload logging to the adapter — a debug
+switch that writes command lines to disk is not something to carry in the tree.
+
+It also answered the open question in
+[plans/permission-command-keying.md](plans/permission-command-keying.md):
+`run_command` does carry `Cwd`, so the sticky key has to cover it.
 
 #### Workspace-supplied hooks
 

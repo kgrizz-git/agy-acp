@@ -10,8 +10,11 @@ of its own yet, so everything below is unreleased.
 
 ## Unreleased
 
-The stream-json port merged as `bf6e81b` (PR #1). It has not been installed
-anywhere yet; see "Verify the port under Paseo" in [TODO.md](TODO.md).
+The stream-json port merged as `bf6e81b` (PR #1) and has not been installed
+anywhere yet — though an *older* build of the adapter is installed at
+`~/.local/bin/agy-acp` and Paseo is already wired to it, so verifying the port is
+a reinstall rather than a first install. See "Verify the port under Paseo" in
+[TODO.md](TODO.md).
 
 ### Maintenance
 
