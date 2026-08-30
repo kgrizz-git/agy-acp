@@ -209,6 +209,13 @@ impl PermissionBridge {
         // the turn that just took that lock. Nothing else can have a request in
         // flight right now.
         //
+        // That serialization is the load-bearing premise, and it is a property of
+        // `main.rs`, not of this module -- `CancelRegistry` already turns on the
+        // same fact ("the adapter mutex serializes execution", `cancel.rs`). If
+        // turns are ever allowed to run concurrently, this drain has to go back
+        // to filtering by session, and the session-scoped hole it leaves has to
+        // be closed some other way, because the flag below is adapter-wide.
+        //
         // Draining all of them, rather than only this session's, is the point.
         // `refused_during_prompt` is one flag for the adapter, not one per
         // session, so a request left behind by session A times out into
