@@ -20,6 +20,27 @@ below.
 
 ### Fixed
 
+- A turn no longer leaves its permission request behind when it ends. An
+  outstanding `session/request_permission` was keyed only by its JSON-RPC id, so
+  nothing could find it again: the call sat waiting for its full 540-second
+  timeout, and that timeout marks a refusal, landing in whatever turn happened to
+  be running nine minutes later and reporting `stopReason: "refusal"` for a turn
+  nobody refused. Pending requests now carry the session that asked, and both
+  cancellation and ordinary turn teardown answer their own — denying, because agy
+  must not run the tool, but not as a refusal, since nobody declined anything.
+  Clearing it at teardown as well as on cancel matters: a turn that ends because
+  agy died or its output became unreadable left the same request behind, with the
+  same consequence, and nothing else would ever have cleared it. A late answer
+  from the host is dropped rather than applied, so an "always allow" arriving
+  afterwards cannot become sticky for the rest of the session. Starting a turn
+  clears anything still pending for that session as well, in the same place the
+  refusal flag is reset — turns for one session run one at a time, so a leftover
+  there can only belong to a turn that is over, and routing it through the one
+  point every turn must pass keeps a dropped teardown call from being enough to
+  bring the bug back. The host may still
+  be showing the prompt: ACP has no way to retract a request, and a host that
+  cancels is expected to dismiss its own.
+
 - Cancelling a turn stops the command, not just agy. `session/cancel` killed the
   `agy` process alone, and agy runs a tool call by shelling out, so the shell and
   its command were reparented to PID 1 and ran to completion — verified against

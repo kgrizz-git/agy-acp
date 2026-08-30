@@ -84,7 +84,12 @@ struct BridgeState {
     /// brand new conversation.
     active_session: Option<String>,
     /// In-flight `session/request_permission` calls, keyed by JSON-RPC id.
-    pending: HashMap<String, oneshot::Sender<Value>>,
+    ///
+    /// The session is kept alongside the sender so that cancelling a turn can
+    /// find that turn's requests. Without it a cancelled request keeps waiting
+    /// for its full timeout, which then lands in whatever turn is running by
+    /// then -- see [`PermissionBridge::cancel_session`].
+    pending: HashMap<String, PendingRequest>,
     /// Sticky answers from "always" options.
     always: HashMap<AlwaysKey, Decision>,
     /// The adapter's private hook directory, refused on sight. See [`targets_hook_root`].
@@ -105,6 +110,20 @@ struct BridgeState {
     /// treating them as a refusal would let one hide a genuine provider failure
     /// later in the same turn.
     refused_during_prompt: bool,
+}
+
+/// A `session/request_permission` the host has not answered yet.
+struct PendingRequest {
+    session_id: String,
+    answer: oneshot::Sender<Answer>,
+}
+
+/// How a pending permission request ended.
+enum Answer {
+    /// The host replied. The value is its `result`.
+    Host(Value),
+    /// The turn that asked has ended, so nobody is going to answer this.
+    Abandoned,
 }
 
 /// Shared handle to the permission bridge.
@@ -180,8 +199,25 @@ impl PermissionBridge {
     pub async fn set_active_session(&self, session_id: Option<&str>) {
         let mut state = self.state.lock().await;
         state.active_session = session_id.map(str::to_string);
-        if state.active_session.is_some() {
-            state.refused_during_prompt = false;
+        let Some(started) = state.active_session.clone() else {
+            return;
+        };
+        state.refused_during_prompt = false;
+        // Anything still pending for this session belongs to a turn that is over,
+        // since turns for one session run one at a time. Clearing it here as well
+        // as at teardown is deliberate: teardown is a call that a future edit
+        // could drop, and this is the one place every turn must pass through, so
+        // a stale request cannot reach the flag this line just reset.
+        let stale: Vec<String> = state
+            .pending
+            .iter()
+            .filter(|(_, request)| request.session_id == started)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in &stale {
+            if let Some(request) = state.pending.remove(id) {
+                let _ = request.answer.send(Answer::Abandoned);
+            }
         }
     }
 
@@ -194,6 +230,39 @@ impl PermissionBridge {
         self.state.lock().await.refused_during_prompt = true;
     }
 
+    /// Answers every outstanding permission request for a session whose turn has
+    /// ended, so that none of them outlives the turn that asked.
+    ///
+    /// Without this the request sits in `pending` until its 540 second timeout,
+    /// and that timeout marks a refusal — landing in whatever turn happens to be
+    /// running by then and reporting it as `stopReason: "refusal"` when nobody
+    /// refused anything. Returns how many were cleared.
+    ///
+    /// Called on cancellation *and* at the end of every turn. Cancellation is the
+    /// obvious case, but not the only one: a turn that ends because agy died or
+    /// its output became unreadable leaves the same request behind, with the same
+    /// consequence, and nothing else would ever clear it.
+    ///
+    /// The host is not told to withdraw its prompt: ACP has no way to retract a
+    /// request, and a host that follows the spec dismisses its own prompts when
+    /// it cancels. A late answer to one of these is dropped, because the id is no
+    /// longer in `pending`.
+    pub async fn abandon_pending(&self, session_id: &str) -> usize {
+        let mut state = self.state.lock().await;
+        let ids: Vec<String> = state
+            .pending
+            .iter()
+            .filter(|(_, request)| request.session_id == session_id)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in &ids {
+            if let Some(request) = state.pending.remove(id) {
+                let _ = request.answer.send(Answer::Abandoned);
+            }
+        }
+        ids.len()
+    }
+
     /// Routes an incoming JSON-RPC response back to the waiting hook. Returns
     /// `true` if the id belonged to this bridge.
     pub async fn resolve_response(&self, id: &Value, result: Option<Value>) -> bool {
@@ -204,8 +273,10 @@ impl PermissionBridge {
             return false;
         }
         let mut state = self.state.lock().await;
-        if let Some(tx) = state.pending.remove(key) {
-            let _ = tx.send(result.unwrap_or_else(|| json!({})));
+        if let Some(request) = state.pending.remove(key) {
+            let _ = request
+                .answer
+                .send(Answer::Host(result.unwrap_or_else(|| json!({}))));
         }
         true
     }
@@ -310,11 +381,13 @@ impl PermissionBridge {
 
         let request_id = format!("{REQUEST_ID_PREFIX}{}", Uuid::new_v4());
         let (tx, rx) = oneshot::channel();
-        self.state
-            .lock()
-            .await
-            .pending
-            .insert(request_id.clone(), tx);
+        self.state.lock().await.pending.insert(
+            request_id.clone(),
+            PendingRequest {
+                session_id: session_id.clone(),
+                answer: tx,
+            },
+        );
 
         let request = json!({
             "jsonrpc": "2.0",
@@ -341,7 +414,16 @@ impl PermissionBridge {
         }
 
         let outcome = match tokio::time::timeout(response_timeout(), rx).await {
-            Ok(Ok(value)) => value,
+            Ok(Ok(Answer::Host(value))) => value,
+            // The turn this belonged to is over. Deny, because agy must not run
+            // the tool, but this is not a refusal: nobody declined anything, and
+            // the turn reports its own ending -- cancelled, or failed -- already.
+            Ok(Ok(Answer::Abandoned)) => {
+                return (
+                    Decision::Deny,
+                    "agy-acp: the turn ended before this was answered".to_string(),
+                );
+            }
             _ => {
                 self.state.lock().await.pending.remove(&request_id);
                 self.mark_user_refusal().await;
@@ -1705,6 +1787,206 @@ mod tests {
             )
             .await;
         assert_eq!(second.await.unwrap().0, Decision::Deny);
+    }
+
+    #[tokio::test]
+    async fn ending_a_turn_answers_its_pending_permission_request() {
+        let workspace = std::env::temp_dir().join("agy-acp-cancel-pending-test");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let (bridge, mut rx) = test_bridge(&workspace.display().to_string(), &[]).await;
+
+        let pending = {
+            let bridge = bridge.clone();
+            tokio::spawn(async move {
+                bridge
+                    .decide(&json!({
+                        "conversationId": "conv-1",
+                        "toolCall": { "name": "run_command", "args": { "CommandLine": "sleep 45" } },
+                    }))
+                    .await
+            })
+        };
+        expect_permission_request(&mut rx).await;
+
+        assert_eq!(
+            bridge.abandon_pending("session-1").await,
+            1,
+            "the outstanding request belongs to this session"
+        );
+
+        // Bounded on purpose. Without this the call sits here for the full
+        // response timeout, which reads as a hung suite rather than a red test.
+        let (decision, reason) = tokio::time::timeout(std::time::Duration::from_secs(5), pending)
+            .await
+            .expect("the request must be answered at once, not left to time out")
+            .unwrap();
+        assert_eq!(decision, Decision::Deny, "agy must not run the tool");
+        assert!(
+            reason.contains("turn ended"),
+            "the reason should say why: {reason}"
+        );
+        assert!(
+            !bridge.refused_during_prompt().await,
+            "an ended turn is not a refusal -- nobody declined anything"
+        );
+        assert!(
+            bridge.state.lock().await.pending.is_empty(),
+            "the request must not be left behind"
+        );
+    }
+
+    #[tokio::test]
+    async fn one_sessions_turn_ending_leaves_another_sessions_request_alone() {
+        let workspace = std::env::temp_dir().join("agy-acp-cancel-other-session-test");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let (bridge, mut rx) = test_bridge(&workspace.display().to_string(), &[]).await;
+
+        let pending = {
+            let bridge = bridge.clone();
+            tokio::spawn(async move {
+                bridge
+                    .decide(&json!({
+                        "conversationId": "conv-1",
+                        "toolCall": { "name": "run_command", "args": { "CommandLine": "ls" } },
+                    }))
+                    .await
+            })
+        };
+        let request = expect_permission_request(&mut rx).await;
+
+        // "session-10" on purpose: it has the pending session's id as a prefix,
+        // so a filter doing anything looser than equality fails here.
+        assert_eq!(
+            bridge.abandon_pending("session-10").await,
+            0,
+            "another session's turn ending must not touch this one"
+        );
+        assert!(!pending.is_finished(), "the request is still waiting");
+
+        // And it still answers normally afterwards.
+        bridge
+            .resolve_response(
+                &request["id"],
+                Some(json!({ "outcome": { "outcome": "selected", "optionId": "allow_once" } })),
+            )
+            .await;
+        assert_eq!(pending.await.unwrap().0, Decision::Allow);
+    }
+
+    #[tokio::test]
+    async fn a_late_allow_after_the_turn_ended_does_not_become_sticky() {
+        let workspace = std::env::temp_dir().join("agy-acp-cancel-late-answer-test");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let (bridge, mut rx) = test_bridge(&workspace.display().to_string(), &[]).await;
+
+        let pending = {
+            let bridge = bridge.clone();
+            tokio::spawn(async move {
+                bridge
+                    .decide(&json!({
+                        "conversationId": "conv-1",
+                        "toolCall": { "name": "run_command", "args": { "CommandLine": "rm -rf /" } },
+                    }))
+                    .await
+            })
+        };
+        let request = expect_permission_request(&mut rx).await;
+        bridge.abandon_pending("session-1").await;
+        let (decision, _) = tokio::time::timeout(std::time::Duration::from_secs(5), pending)
+            .await
+            .expect("a cancelled request must be answered at once, not left to time out")
+            .unwrap();
+        assert_eq!(decision, Decision::Deny);
+
+        // The host may still answer -- it has no way of knowing we stopped
+        // waiting. An "allow" arriving now must not resurrect anything.
+        bridge
+            .resolve_response(
+                &request["id"],
+                Some(json!({ "outcome": { "outcome": "selected", "optionId": "allow_always" } })),
+            )
+            .await;
+        assert!(
+            !bridge.state.lock().await.always.values().any(|d| *d == Decision::Allow),
+            "a late allow must not become a sticky allow for the rest of the session"
+        );
+    }
+
+    /// The cancel path is not the only way a turn ends. agy dying, or its output
+    /// becoming unreadable, ends one too -- and leaves the same request behind.
+    #[tokio::test]
+    async fn a_turn_that_ends_without_being_cancelled_still_clears_its_request() {
+        let workspace = std::env::temp_dir().join("agy-acp-turn-end-pending-test");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let (bridge, mut rx) = test_bridge(&workspace.display().to_string(), &[]).await;
+
+        let pending = {
+            let bridge = bridge.clone();
+            tokio::spawn(async move {
+                bridge
+                    .decide(&json!({
+                        "conversationId": "conv-1",
+                        "toolCall": { "name": "run_command", "args": { "CommandLine": "ls" } },
+                    }))
+                    .await
+            })
+        };
+        expect_permission_request(&mut rx).await;
+
+        // What the adapter does at the end of every turn, cancelled or not.
+        bridge.set_active_session(None).await;
+        assert_eq!(bridge.abandon_pending("session-1").await, 1);
+
+        let (decision, _) = tokio::time::timeout(std::time::Duration::from_secs(5), pending)
+            .await
+            .expect("the request must be answered at once, not left to time out")
+            .unwrap();
+        assert_eq!(decision, Decision::Deny);
+        assert!(
+            !bridge.refused_during_prompt().await,
+            "a turn ending is not the user refusing"
+        );
+    }
+
+    /// Belt and braces for the teardown call: even if nothing cleared the last
+    /// turn's request, starting a turn must, because that is the one place every
+    /// turn goes through and it is where the refusal flag is reset.
+    #[tokio::test]
+    async fn starting_a_turn_clears_a_request_left_over_from_the_last_one() {
+        let workspace = std::env::temp_dir().join("agy-acp-turn-start-pending-test");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let (bridge, mut rx) = test_bridge(&workspace.display().to_string(), &[]).await;
+
+        let leftover = {
+            let bridge = bridge.clone();
+            tokio::spawn(async move {
+                bridge
+                    .decide(&json!({
+                        "conversationId": "conv-1",
+                        "toolCall": { "name": "run_command", "args": { "CommandLine": "ls" } },
+                    }))
+                    .await
+            })
+        };
+        expect_permission_request(&mut rx).await;
+
+        // The turn ends without anything draining the bridge, then the next one
+        // starts. Nothing else stands between the leftover and the new turn.
+        bridge.set_active_session(Some("session-1")).await;
+
+        let (decision, _) = tokio::time::timeout(std::time::Duration::from_secs(5), leftover)
+            .await
+            .expect("the leftover must not survive into the new turn")
+            .unwrap();
+        assert_eq!(decision, Decision::Deny);
+        assert!(
+            bridge.state.lock().await.pending.is_empty(),
+            "nothing may be left to time out during the new turn"
+        );
+        assert!(
+            !bridge.refused_during_prompt().await,
+            "and it must not have marked the new turn a refusal"
+        );
     }
 
     #[tokio::test]
