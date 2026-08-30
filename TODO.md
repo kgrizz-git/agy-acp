@@ -156,9 +156,25 @@ repository already handles — `AbsolutePath`, `TargetFile`, `DirectoryPath`,
 A field it does not know keeps the shape-based tests and nothing else, so a
 miss costs coverage quietly and never announces itself.
 
-Capture the `PreToolUse` payloads from a real session and diff the argument keys
-against the list. Same trip as the Paseo verification above, since both need one
-real agy run.
+Partly done. A capture against agy 1.1.22 (hook that appends the payload and
+allows, driven by `agy -p ... --add-dir <ws> --dangerously-skip-permissions` —
+no adapter build and no Paseo needed) exercised three tools:
+
+```
+run_command  args: CommandLine, Cwd, WaitMsBeforeAsync, toolAction, toolSummary
+view_file    args: AbsolutePath, toolAction, toolSummary
+grep_search  args: Query, SearchPath, toolAction, toolSummary
+```
+
+Every path argument there is already in `PATH_FIELDS` (`AbsolutePath`,
+`SearchPath`, `Cwd`) and `Query` is correctly not, so for these three the
+shape-based fallback is not quietly carrying the load. The non-path additions
+(`toolAction`, `toolSummary`, `WaitMsBeforeAsync`) are model-authored display and
+pacing fields.
+
+What is left is the write side — the edit, create and delete tools, plus
+`list_dir` and the network tools — which this capture never triggered. Repeat it
+with a prompt that writes and deletes files.
 
 No adapter change is needed to capture them. The `session/request_permission`
 request already carries the full argument object as `rawInput`, and the default
@@ -168,9 +184,9 @@ wrapper script that runs the real binary through `tee` and read the captured
 JSON-RPC afterwards, rather than adding payload logging to the adapter — a debug
 switch that writes command lines to disk is not something to carry in the tree.
 
-The same capture answers the open question in
-[plans/permission-command-keying.md](plans/permission-command-keying.md): whether
-`run_command` carries a `Cwd` argument.
+It also answered the open question in
+[plans/permission-command-keying.md](plans/permission-command-keying.md):
+`run_command` does carry `Cwd`, so the sticky key has to cover it.
 
 #### Workspace-supplied hooks
 

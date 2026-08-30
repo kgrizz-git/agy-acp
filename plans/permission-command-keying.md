@@ -40,21 +40,82 @@ the code comment, not just here.
 The fingerprint is `Some(args.to_string())` for command tools and `None` for
 everything else. **Fingerprint the whole `args` object, not just `CommandLine`.**
 
-Rationale, and the correction to the earlier draft of this plan: keying on
-`CommandLine` alone silently drops every other argument from the scope of the
-answer. `Cwd` is the concrete case — it is a known agy argument key
-(`src/tools.rs:183`, `PATH_FIELDS` in `src/permission.rs:759`), and `ls` run in
-one directory is not `ls` run in another. Since containment does not constrain a
-remembered command allow, an ignored `Cwd` is a real widening of what the user
-approved. Whether agy actually sends `Cwd` on `run_command` is unverified — see
-"Confirm the path-field list against real agy traffic" in `TODO.md`, which needs
-the same real-agy capture — and *that uncertainty is the argument for hashing
-everything*: an argument the fork has not seen is inside the key by default
-instead of outside it.
+Rationale: keying on `CommandLine` alone silently drops every other argument from
+the scope of the answer. `Cwd` is the concrete case, and it is no longer a
+guess — a capture against real agy 1.1.22 traffic (see "Measured payloads" below)
+shows `run_command` sending `Cwd` on every call. `ls` run in one directory is not
+`ls` run in another, and since containment does not constrain a remembered
+command allow, an ignored `Cwd` is a real widening of what the user approved.
 
-The cost of over-including is a reprompt when an incidental field changes (a
-timeout, a blocking flag). Per `TODO.md`: under-normalizing costs a prompt,
-over-normalizing is a hole. This deliberately errs into the first.
+The default is therefore to include: an argument the fork has not seen is inside
+the key rather than outside it, so a new security-relevant field is covered the
+day agy starts sending it.
+
+### D1b. Exclude the volatile presentation fields
+
+Include-everything cannot be taken literally, and the same capture is what shows
+why. Measured payloads for the *identical* command `echo probe-ok`, from two
+turns:
+
+```
+turn 1: CommandLine "echo probe-ok", Cwd "/tmp/...", WaitMsBeforeAsync 500,
+        toolAction "Running command", toolSummary "Run echo command"
+turn 2: CommandLine "echo probe-ok", Cwd "/tmp/...", WaitMsBeforeAsync 1000,
+        toolAction "Running command", toolSummary "Echo probe-ok"
+```
+
+`toolSummary` is model-authored display text and `WaitMsBeforeAsync` is a
+model-chosen delay; both differ across turns for a byte-identical command. A
+naive whole-args fingerprint therefore *never matches on a repeat*, so "Always
+allow" would silently do nothing for command tools — the user clicks it and is
+asked again every time. That is not merely an ergonomic failure: an option that
+visibly does not work teaches people to stop reading the prompt.
+
+So the fingerprint is the args object minus an explicit denylist:
+
+```rust
+/// Model-authored display and pacing fields, observed to differ between two
+/// otherwise identical calls. They cannot change what a command is or where it
+/// runs, so they are excluded from the sticky key; leaving them in would make
+/// "Always allow" never match on a repeat.
+const UNKEYED_FIELDS: &[&str] = &["toolAction", "toolSummary", "WaitMsBeforeAsync"];
+```
+
+Denylist and not an allowlist, deliberately, and this is the load-bearing
+choice. An allowlist of "the fields that decide what runs" would today be
+`CommandLine` and `Cwd` — but a field agy adds later would fall outside the key
+silently, which is a hole. With a denylist a new field lands *inside* the key; if
+it turns out to be volatile the symptom is a reprompt, which is visible and
+harmless. Per `TODO.md`: under-normalizing costs a prompt, over-normalizing is a
+hole. Every future addition to `UNKEYED_FIELDS` is a normalization step and needs
+the same argument made here — that the field cannot affect what the tool does.
+
+`WaitMsBeforeAsync` is the borderline one: it is behavioural, not presentational,
+since it controls how long agy waits before backgrounding the command. It is
+excluded because it cannot change *what* runs or *where*, only how the adapter
+waits for it, and because it demonstrably varies. Flagging it as the entry most
+worth revisiting if the denylist ever grows.
+
+### D1c. Measured payloads
+
+Captured from agy 1.1.22 via a `PreToolUse` hook that appends the payload and
+allows, driven by `agy -p ... --add-dir <ws> --dangerously-skip-permissions`.
+Reproduce it that way rather than through Paseo; it needs no adapter build.
+
+```
+run_command  args: CommandLine, Cwd, WaitMsBeforeAsync, toolAction, toolSummary
+view_file    args: AbsolutePath, toolAction, toolSummary
+grep_search  args: Query, SearchPath, toolAction, toolSummary
+```
+
+Payload top level: `conversationId`, `stepIdx`, `toolCall`, `modelName`,
+`workspacePaths`, `transcriptPath`, `artifactDirectoryPath`.
+
+Two things follow beyond the key design. Every observed path argument is already
+in `PATH_FIELDS` (`AbsolutePath`, `SearchPath`, `Cwd`), and `Query` is correctly
+*not* — so the shape-based fallback is not silently carrying the load for these
+three tools. And only three tools were exercised; the write and edit tools are
+still unobserved. See the narrowed `TODO.md` entry.
 
 `args.to_string()` is canonical here because `serde_json` is built without
 `preserve_order`, so its `Map` is a `BTreeMap` and keys serialize sorted.
@@ -119,15 +180,21 @@ The label does not repeat the command because the prompt's `title` is already
 inside an option label wraps badly in a host's button. "this exact command"
 refers to the one shown directly above it.
 
-**This rests on an unverified host assumption.** "this exact command" is only
-meaningful if the host actually renders the tool-call `title` next to the
-options. Paseo's ACP integration reports that it hands back *normalized*
-permission payloads (`list_pending_permissions`), and nothing here has confirmed
-that the `title` survives normalization into the UI. Check it during the capture
-trip: with a prompt pending, read `list_pending_permissions` and confirm both the
-`title` and the four option `name` strings are present. If the title does not
-survive, the label must carry the command itself (truncated), because otherwise
-"this exact command" names something the user cannot see.
+**Verified against Paseo 0.6.1.** This was an open assumption; it holds. Paseo's
+ACP provider maps our request with
+
+```js
+title: params.toolCall.title ?? snapshot.title,
+actions: params.options.map((option) => ({
+    id: option.optionId,
+    label: option.name,
+    behavior: option.kind.startsWith("allow") ? "allow" : "deny",
+})),
+```
+
+so the `title` we send is preserved verbatim and each option's `name` becomes the
+button label. "this exact command" refers to something the user can actually see,
+and the label does not need to carry the command.
 
 ## Implementation
 
@@ -312,6 +379,11 @@ Add:
 - `a_differing_cwd_is_a_different_command` — same `CommandLine`, different `Cwd`,
   prompts again. Pins D1's whole-args decision; without it, someone "simplifies"
   the fingerprint back to `CommandLine` and no test objects.
+- `a_differing_tool_summary_is_the_same_command` — same `CommandLine` and `Cwd`,
+  different `toolSummary` and `WaitMsBeforeAsync`, auto-allowed with no prompt.
+  Pins D1b with the measured values from D1c. Without it the fingerprint looks
+  correct in review and "Always allow" quietly never matches in production, which
+  is the failure this whole sub-decision exists to prevent.
 - `always_allow_still_applies_per_tool_for_path_tools` — `view_file` on one file
   still auto-allows a second file. Guards the ergonomics: fingerprinting *every*
   tool's args would make "Always" useless for reads, and this is the assertion
@@ -369,6 +441,46 @@ is *deleted* when the work lands and recorded in `CHANGELOG.md`.
   approved without asking" — this change narrows, so the rule passes, but the
   record of the remembered-answer granularity gap that the rule carries needs to
   come out with the fix.
+
+## Host constraints this design has to respect
+
+Both established by reading Paseo 0.6.1's ACP provider, and both are traps for
+the obvious next change rather than problems with the plan as written.
+
+**Never offer two options of the same ACP `kind`.** Paseo classifies a request as
+a *chooser* rather than a permission prompt when two options share an allow kind:
+
+```js
+function isACPChooserRequest(options) {
+    const allowKinds = new Set();
+    for (const option of options) {
+        if (!option.kind.startsWith("allow")) continue;
+        if (allowKinds.has(option.kind)) return true;
+        allowKinds.add(option.kind);
+    }
+    return false;
+}
+```
+
+Our four options have four distinct kinds, so we are classified correctly today.
+But the natural extension of this plan — offering *both* "Always allow this
+command" and "Always allow this tool" — would emit two `allow_always` options and
+silently reclassify every prompt into a different UI path. If that extension is
+ever wanted, it needs a different mechanism.
+
+**Do not remove `allow_once`.** `TODO.md` option 1 lists "do not offer Always
+allow for command tools at all" as an alternative to keying. Under Paseo's Auto
+Accept, that alternative is actively dangerous: auto-accept picks an option by
+kind preference,
+
+```js
+const order = response.behavior === "allow" ? ["allow_once", "allow_always"] : ...
+```
+
+so it selects `allow_once` while we offer one — harmless, no sticky entry. Drop
+`allow_once` from a command prompt and auto-accept falls through to
+`allow_always`, turning every auto-accepted command into a permanent
+session-wide grant. The safe-looking option removal is the unsafe one.
 
 ## Out of scope, deliberately
 
