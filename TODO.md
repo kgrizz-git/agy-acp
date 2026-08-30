@@ -321,19 +321,53 @@ Wanted, roughly in order of value:
   reading.
 - **File size.** See the refactoring entry below; a cap is only worth setting once
   the shape the code should end up in is decided.
-- **SonarCloud.** It has never analyzed this repo and never will as configured.
-  Automatic Analysis "is available for all of SonarQube Cloud's supported
-  languages except for Objective-C, Dart, and Rust", and separately requires 20%
-  of the project to be in a supported language — this repo is 96% Rust, with
-  Python and Shell together under 3%. Rust *is* supported by CI-based analysis,
-  so getting anything out of Sonar means a workflow running the scanner with a
-  `SONAR_TOKEN`, and it is worth deciding whether it earns its place next to
-  clippy and llvm-cov rather than turning it on because the account exists.
+- **SonarCloud.** Has never analyzed this repo and cannot as configured. Its own
+  entry below.
 
 Hooks and CI serve different ends here and both are wanted: a local hook gives
 the fast signal while writing (fmt, clippy, the unit tier), CI is what actually
 blocks a merge. A hook that duplicates CI slowly is worse than no hook, so scope
 the local one to what is quick.
+
+#### SonarCloud analyses nothing today, and only CI-based analysis can change that
+
+The account has Automatic Analysis switched on and the project has never been
+analyzed. That is not a misconfiguration to hunt for — it cannot work here, for
+two independent reasons in Sonar's own documentation:
+
+- Automatic Analysis "is available for all of SonarQube Cloud's supported
+  languages except for Objective-C, Dart, and Rust".
+- Eligibility separately requires at least 20% of the project to be in a
+  supported language. GitHub measures this repo as 96% Rust, with Python and
+  Shell together under 3%.
+
+Rust *is* analyzed by SonarQube Cloud, but only through CI-based analysis. What
+that needs, from the Rust language page:
+
+- The SonarScanner CLI on the runner, plus `cargo` and `clippy`
+  (`rustup component add clippy`) — the analyzer shells out to Clippy itself
+  rather than importing a report, and `sonar.rust.clippy.enabled=false` turns
+  that off.
+- `SONAR_TOKEN` as a repository secret, and a project key and organization.
+  `sonar.rust.cargo.manifestPaths` is only needed when the manifest is not at the
+  root, which here it is.
+- Coverage import accepts LCOV and Cobertura. The exact property name was not
+  confirmed from the docs — check it before writing the workflow rather than
+  guessing at `sonar.rust.lcov.reportPaths`.
+- Automatic Analysis has to be turned off first. With CI-based analysis
+  configured as well, Sonar fails the build.
+
+One caveat found while checking: the Rust language page reads as though Clippy
+runs under automatic analysis when a root `Cargo.toml` is present, which
+contradicts the automatic-analysis page's explicit exclusion of Rust. The
+evidence here favours the exclusion — automatic analysis is enabled and has
+produced nothing.
+
+The decision, before any of the above: Sonar would run Clippy and import coverage,
+which is most of what the quality-gates entry above wants from `cargo clippy` and
+`cargo llvm-cov` directly. Running both means two sources of truth for the same
+findings and a second place to silence a lint. Worth picking one deliberately
+rather than adding Sonar because the account is already there.
 
 #### Split the two files and the one function that have outgrown reading
 
