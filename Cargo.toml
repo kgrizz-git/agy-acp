@@ -16,3 +16,8 @@ fs2 = "0.4.3"
 # Read-only, for replaying conversation history on session/load. Streaming does
 # not touch SQLite.
 rusqlite = { version = "=0.31.0", features = ["bundled"] }
+
+# For kill(2): cancelling a turn has to reach the shell agy started, not just
+# agy. Already in the tree as a tokio dependency on Unix.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

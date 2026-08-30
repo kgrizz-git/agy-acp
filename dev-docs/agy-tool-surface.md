@@ -86,6 +86,30 @@ it is worth it when something independent says the field names a path — as wit
 describing its own schema is not that: `FullPath` reads exactly like a path field
 and holds a boolean.
 
+## How agy runs a command
+
+`run_command` shells out, and agy puts each command it starts into a **process
+group of its own** rather than leaving it in agy's. Observed on agy 1.1.22 with
+the adapter deliberately spawning agy as a group leader:
+
+```
+PID   PPID  PGID
+73606 73578 73606   agy                                  <- leads its own group
+73687 73606 73687   zsh -c 'sleep 45 && touch marker'    <- and its own, not agy's
+73688 73687 73687   sleep 45
+```
+
+This is why cancelling a turn kills agy's process *tree* rather than its process
+group: `killpg` on agy reaches agy alone. agy is still spawned into a group of
+its own, but only so a signal aimed at the adapter's group cannot kill agy before
+the tree under it can be read. `scripts/probe-cancel.py` reproduces
+the whole thing end to end. It also means the command survives agy
+by default — reparented to PID 1 — so anything that stops a turn has to stop the
+command explicitly. See `src/proc.rs`.
+
+Note the shell here was `zsh` rather than `sh`. Presumably `$SHELL`, though that
+was not tested — do not assume `sh` when matching on the command line.
+
 ## Where agy writes
 
 `generate_image` takes no destination argument. Asked to save into the

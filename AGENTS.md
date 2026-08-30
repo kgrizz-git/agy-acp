@@ -51,6 +51,8 @@ completion. When a piece of work gets a plan (kept under `plans/`):
 |---|---|
 | `~/.openab/agy-acp/sessions.json` | Persisted session→conversation mapping (with `.lock` file for mutual exclusion). Capped at 256 entries, rewritten whole on every turn |
 | `~/.gemini/antigravity-cli/brain/<conversation-id>/` | Where agy writes generated artifacts. Not the workspace, and not visible to the bridge — `generate_image` takes no destination argument |
+| `src/proc.rs` | Killing agy's process tree. agy puts each command it runs in its own process group, so a cancel stops agy, walks a process-table snapshot for descendants and kills those, rather than signalling a group; shutdown kills the same trees through `LiveChildren` |
+| `scripts/probe-cancel.py` | Manual check that a cancel stops the command agy is running. Needs `agy` and auth, so it is not in CI; it is the probe that caught the first attempt at this fix aiming at the wrong mechanism, kept so the check is repeatable |
 | `dev-docs/agy-tool-surface.md` | What agy actually sends the permission bridge: its tools, their argument keys, which are paths, and how that was captured. Reference for `PATH_FIELDS` and the auto-allow groups |
 
 ## Test tiers
@@ -94,7 +96,7 @@ repository-level e2e key: the workflow checks out PR code.
 - Conversation binding: the `init` / `result` stream-json events include `conversation_id`, which is persisted and passed back as `--conversation` on subsequent prompts.
 - `fetch_available_models()` runs `agy models` synchronously during `Adapter::new()`. If `agy` isn't installed, models list is empty (no error).
 - `agy models` prints `id<TAB>Human Label` on stdout and its "Fetching available models..." banner on stderr. Only the id is a valid `--model` argument; ACP gets the id as `modelId`/`value` and the label as `name`. Ids arriving from a client are checked against that list, and a `id<TAB>label` string left in an old `sessions.json` is repaired on restore.
-- `session/cancel` returns `{}` immediately but sets an `AtomicBool` flag that the prompt task polls; when set, it kills the in-flight `agy` subprocess and the turn ends with `stopReason: "cancelled"`. `cancel.rs` holds one token per in-flight turn rather than one per session — a host may send a second prompt before the first finishes, and a cancel stops every turn in that session.
+- `session/cancel` returns `{}` immediately but sets an `AtomicBool` flag that the prompt task polls; when set, it kills the in-flight `agy` subprocess *and every process agy started* — agy shells out to run a tool call, so killing the pid alone left the command orphaned and running to completion — and the turn ends with `stopReason: "cancelled"`. `cancel.rs` holds one token per in-flight turn rather than one per session — a host may send a second prompt before the first finishes, and a cancel stops every turn in that session.
 - Permission answers marked "Always" are keyed by `(session, tool name)` and ignore arguments, so one "Always allow" on `run_command` covers every later command. Containment and sensitive-path checks still run on a remembered allow, but a command line is one opaque string and is not parsed as paths. Known gap, pinned by tests; see [TODO.md](TODO.md).
 - Both `session/set_model` and `session/setConfigOption` are accepted for model selection.
 

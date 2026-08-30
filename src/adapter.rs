@@ -9,11 +9,11 @@ use std::sync::{
 };
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
-use tokio::process::Command;
 use uuid::Uuid;
 
 use crate::db::read_replay_updates_from_db;
 use crate::permission::{PermissionBridge, SOCKET_ENV};
+use crate::proc::LiveChildren;
 use crate::streaming::StreamProcessor;
 use crate::types::*;
 
@@ -73,6 +73,9 @@ pub struct Adapter {
     /// Monotonic recency counter handed out by `touch_session`. A counter rather
     /// than wall-clock time so eviction order survives a clock that jumps.
     pub session_tick: u64,
+    /// The agy children running right now, so that shutdown can kill the same
+    /// trees a cancel would.
+    pub live_children: LiveChildren,
 }
 
 /// Print-mode timeout used when permission prompts are on. Must outlast the
@@ -93,6 +96,11 @@ impl Adapter {
 
     pub fn new() -> Self {
         Self::new_with_skip_naration(false)
+    }
+
+    /// A handle on the live agy children, for whoever owns shutdown.
+    pub fn live_children(&self) -> LiveChildren {
+        self.live_children.clone()
     }
 
     pub fn new_with_skip_naration(skip_naration: bool) -> Self {
@@ -128,6 +136,7 @@ impl Adapter {
             permission_bridge: None,
             hook_root_dir: None,
             session_tick: 0,
+            live_children: LiveChildren::default(),
         }
     }
 
@@ -850,7 +859,9 @@ impl Adapter {
         args.push("-p".to_string());
         args.push(clean_prompt.to_string());
 
-        let mut command = Command::new("agy");
+        // In its own process group, so that a signal aimed at the adapter's group
+        // cannot kill agy before the tree under it can be walked.
+        let mut command = crate::proc::command_in_own_group("agy");
         command
             .args(&args)
             .current_dir(&self.working_dir)
@@ -875,12 +886,18 @@ impl Adapter {
             }
         };
 
+        // Registered before anything can fail: an early return from here on must
+        // not leave a child nobody knows about. Unregistered below, as soon as
+        // the child is reaped.
+        let child_guard = self.live_children.register(child.id());
+
         let stdout = child.stdout.take();
         let skip_naration = self.skip_naration;
         let poll_session_id = session_id.to_string();
         // Set when nothing can read agy's stdout any more. The child would then
         // block on a full pipe and `child.wait()` would never return, so this
-        // ends the turn the same way a cancel does -- by killing the child.
+        // ends the turn the same way a cancel does -- by killing agy and
+        // everything it started.
         let undrainable = Arc::new(AtomicBool::new(false));
         let drain_failed = Arc::clone(&undrainable);
         let stdout_reader = tokio::spawn(async move {
@@ -951,10 +968,15 @@ impl Adapter {
                 // An undrainable pipe kills the child too, but it is not a cancel:
                 // the turn failed, and reporting it as cancelled would hide that.
                 was_cancelled = cancelled.load(Ordering::SeqCst);
-                let _ = child.kill().await;
+                // Before the wait below: the walk this does needs agy alive to
+                // find the shell it started, and needs its pid unreaped to name
+                // it at all.
+                crate::proc::kill_tree(&mut child).await;
                 child.wait().await
             }
         };
+        // The pid is reaped now, so it may be reused; stop naming it.
+        drop(child_guard);
         let processor = stdout_reader
             .await
             .unwrap_or_else(|_| StreamProcessor::new(skip_naration));

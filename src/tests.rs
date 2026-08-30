@@ -650,6 +650,7 @@ fn test_session_load_restores_persisted_session() {
         permission_bridge: None,
         hook_root_dir: None,
         session_tick: 0,
+        live_children: Default::default(),
     };
     adapter.persist_session("sess-1", Some("conv-abc"), 5, None);
 
@@ -687,6 +688,7 @@ fn test_session_load_rejects_unknown_session() {
         permission_bridge: None,
         hook_root_dir: None,
         session_tick: 0,
+        live_children: Default::default(),
     };
 
     let output = adapter.handle_session_load(json!(9), &json!({"sessionId": "missing"}));
@@ -802,6 +804,7 @@ fn test_session_load_replays_conversation_history() {
         permission_bridge: None,
         hook_root_dir: None,
         session_tick: 0,
+        live_children: Default::default(),
     };
     adapter.persist_session("sess-replay", Some("conv-replay"), 8, None);
 
@@ -947,6 +950,7 @@ fn test_session_resume_restores_persisted_session() {
         permission_bridge: None,
         hook_root_dir: None,
         session_tick: 0,
+        live_children: Default::default(),
     };
     adapter.persist_session("sess-r1", Some("conv-xyz"), 3, None);
 
@@ -991,6 +995,7 @@ fn test_session_resume_rejects_unknown_session() {
         permission_bridge: None,
         hook_root_dir: None,
         session_tick: 0,
+        live_children: Default::default(),
     };
 
     let response = adapter.handle_session_resume(json!(11), &json!({"sessionId": "nope"}));
@@ -1034,6 +1039,7 @@ fn test_session_resume_accepts_in_memory_session() {
         permission_bridge: None,
         hook_root_dir: None,
         session_tick: 0,
+        live_children: Default::default(),
     };
     adapter.sessions.insert(
         "sess-memory".to_string(),
@@ -1070,6 +1076,7 @@ fn test_session_load_accepts_in_memory_session_without_replay() {
         permission_bridge: None,
         hook_root_dir: None,
         session_tick: 0,
+        live_children: Default::default(),
     };
     adapter.sessions.insert(
         "sess-memory-load".to_string(),
@@ -1105,6 +1112,7 @@ fn test_session_resume_does_not_replay_history() {
         permission_bridge: None,
         hook_root_dir: None,
         session_tick: 0,
+        live_children: Default::default(),
     };
     adapter.persist_session("sess-nr", Some("conv-nr"), 10, None);
 
@@ -1138,6 +1146,7 @@ fn test_persist_and_restore_session() {
         permission_bridge: None,
         hook_root_dir: None,
         session_tick: 0,
+        live_children: Default::default(),
     };
 
     adapter.persist_session("sess-1", Some("conv-abc"), 7, None);
@@ -1688,6 +1697,7 @@ fn test_session_set_model_persists() {
         permission_bridge: None,
         hook_root_dir: None,
         session_tick: 0,
+        live_children: Default::default(),
     };
 
     adapter.persist_session("sess-m1", Some("conv-m1"), 0, None);
@@ -1708,6 +1718,7 @@ fn test_session_set_model_persists() {
         permission_bridge: None,
         hook_root_dir: None,
         session_tick: 0,
+        live_children: Default::default(),
     };
     let restored = adapter2.restore_session("sess-m1");
     assert_eq!(
@@ -2115,6 +2126,7 @@ fn persist_session_prunes_unbindable_entries_first() {
         permission_bridge: None,
         hook_root_dir: None,
         session_tick: 0,
+        live_children: Default::default(),
     };
     for i in 0..300 {
         // Most entries can never be resumed; they must be the first to go.
@@ -2170,6 +2182,7 @@ fn persist_session_keeps_the_entry_it_just_wrote() {
         permission_bridge: None,
         hook_root_dir: None,
         session_tick: 0,
+        live_children: Default::default(),
     };
     for i in 0..400 {
         adapter.persist_session(
@@ -2220,6 +2233,7 @@ fn stored_sessions_without_updated_at_load_as_oldest() {
         permission_bridge: None,
         hook_root_dir: None,
         session_tick: 0,
+        live_children: Default::default(),
     };
     let store = adapter.load_store();
     assert_eq!(store.sessions.len(), 2, "both legacy entries should load");
@@ -2247,6 +2261,7 @@ fn evict_if_needed_drops_the_least_recently_used_session() {
         permission_bridge: None,
         hook_root_dir: None,
         session_tick: 0,
+        live_children: Default::default(),
     };
     for i in 0..64 {
         adapter.sessions.insert(
