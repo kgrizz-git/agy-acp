@@ -22,8 +22,10 @@
 //! it: stop agy, snapshot the process table, find every descendant, kill those,
 //! then kill agy. The snapshot has to be taken before agy dies, because once it
 //! does the kernel reparents its children to PID 1 and the links that identify
-//! them are gone. agy is `SIGSTOP`ped first so it cannot fork anything new
-//! between the snapshot and the kill.
+//! them are gone. Everything found is `SIGSTOP`ped as it is found, and the table
+//! is read again until a read turns up nothing new: stopping agy does not stop
+//! the shell agy already started, and that shell can fork its next command
+//! between two reads.
 //!
 //! agy is still spawned into a process group of its own, for one narrow reason:
 //! it keeps a signal aimed at the *adapter's* group -- a terminal `Ctrl-C`, a
@@ -63,8 +65,11 @@ pub fn command_in_own_group(program: &str) -> Command {
 
 /// SIGKILLs a child and everything it started.
 ///
-/// Falls back to killing just the child when there is no pid to walk from --
-/// meaning the child has already exited and been reaped, so there is no tree.
+/// On a non-Unix target there is no process table to walk, so only the direct
+/// child is killed and anything it started outlives it -- the behaviour this
+/// module was written to fix, still in place where it cannot be. Unix also falls
+/// back to the direct child when there is no pid to walk from, meaning the child
+/// has already exited and been reaped, so there is no tree left.
 pub async fn kill_tree(child: &mut Child) {
     if let Some(pid) = child.id() {
         kill_process_tree(pid);
@@ -74,45 +79,88 @@ pub async fn kill_tree(child: &mut Child) {
     let _ = child.kill().await;
 }
 
-/// Stops `root`, SIGKILLs everything below it, then SIGKILLs `root`.
+/// Stops `root` and everything below it, then SIGKILLs the lot.
 ///
-/// The stop is what makes the snapshot trustworthy. A snapshot is only a list of
-/// parent links, and a running agy can fork a new command in the time it takes
-/// to read one and act on it; a stopped one cannot, so nothing is spawned into
-/// the gap. Stopping is not killing, so the links survive for the walk -- which
-/// is why the root is stopped rather than killed first.
+/// Stopping first is what makes the snapshot trustworthy, but one stop is not
+/// enough. `SIGSTOP` on agy freezes agy; the shell agy already started keeps
+/// running and can fork its next command after the table has been read, and that
+/// process would then be missing from the list and survive its dead ancestors --
+/// the original bug, narrowed. So this scans, stops whatever is new, and scans
+/// again until a scan finds nothing new. A stopped process cannot fork, so the
+/// set stops growing once the frontier is stopped.
 ///
-/// Deliberately one synchronous function with no `await` in it: a stop that
-/// never reached its kill would leave agy suspended for as long as the machine
-/// is up, so nothing may be allowed to interleave between the two.
+/// Deliberately one synchronous function with no `await` in it: a stop that never
+/// reached its kill would leave processes suspended for as long as the machine is
+/// up, so nothing may be allowed to interleave between the two.
 #[cfg(unix)]
 fn kill_process_tree(root: u32) {
-    // SAFETY: kill is a plain syscall wrapper with no memory arguments.
-    unsafe { libc::kill(root as libc::pid_t, libc::SIGSTOP) };
-    let table = process_table();
-    let mut victims: Vec<u32> = Vec::new();
+    let mut stopped: HashSet<u32> = HashSet::from([root]);
+    stop(root);
+    // A process forking in a loop can outrun any tree killer; this bounds the
+    // work rather than pretending otherwise. In the shape this exists for --
+    // `zsh -c 'a && b'` -- one rescan is already enough.
+    for scan in 0..MAX_SCANS {
+        let table = process_table();
+        if table.is_empty() {
+            if scan == 0 {
+                // Not fatal -- `root` is still killed below -- but it silently
+                // restores the exact bug this module exists to fix.
+                eprintln!(
+                    "agy-acp: could not read the process table; agy's own children may survive"
+                );
+            }
+            break;
+        }
+        let mut found_new = false;
+        for pid in descendants(&table, root) {
+            if stopped.insert(pid) {
+                stop(pid);
+                found_new = true;
+            }
+        }
+        if !found_new {
+            break;
+        }
+    }
+
+    // SAFETY: kill is a plain syscall wrapper with no memory arguments. Each pid
+    // named a descendant of our own child moments ago; the same pid-reuse window
+    // applies here as to any process-tree killer. `root` goes last, so nothing
+    // below it is left without the links back to it.
+    for pid in stopped.iter().filter(|&&pid| pid != root) {
+        unsafe { libc::kill(*pid as libc::pid_t, libc::SIGKILL) };
+    }
+    unsafe { libc::kill(root as libc::pid_t, libc::SIGKILL) };
+}
+
+/// How many times [`kill_process_tree`] will rescan for processes that appeared
+/// while it was working.
+#[cfg(unix)]
+const MAX_SCANS: usize = 8;
+
+/// Suspends one process, so that it cannot start anything else while the tree
+/// around it is being read.
+#[cfg(unix)]
+fn stop(pid: u32) {
+    // SAFETY: as in `kill_process_tree`, whose kill this is always paired with.
+    unsafe { libc::kill(pid as libc::pid_t, libc::SIGSTOP) };
+}
+
+/// Every process under `root` in `table`, transitively.
+#[cfg(unix)]
+fn descendants(table: &[(u32, u32)], root: u32) -> Vec<u32> {
+    let mut found: Vec<u32> = Vec::new();
     let mut frontier = vec![root];
     let mut seen: HashSet<u32> = HashSet::from([root]);
     while let Some(parent) = frontier.pop() {
-        for &(pid, ppid) in &table {
+        for &(pid, ppid) in table {
             if ppid == parent && seen.insert(pid) {
-                victims.push(pid);
+                found.push(pid);
                 frontier.push(pid);
             }
         }
     }
-    if table.is_empty() {
-        // Not fatal -- the caller still kills `root` -- but it silently restores
-        // the exact bug this module exists to fix, so it must not pass unsaid.
-        eprintln!("agy-acp: could not read the process table; agy's own children may survive");
-    }
-    // SAFETY: as above. Each `pid` named a descendant of our own child moments
-    // ago; the same pid-reuse window applies here as to any process-tree killer.
-    // `root` goes last so that nothing below it outlives the links to it.
-    for pid in victims {
-        unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
-    }
-    unsafe { libc::kill(root as libc::pid_t, libc::SIGKILL) };
+    found
 }
 
 #[cfg(not(unix))]
@@ -350,6 +398,24 @@ mod tests {
             "shutdown must reach the whole tree, not just agy"
         );
         assert_eq!(children.len(), 0, "the guard unregisters the child");
+    }
+
+    #[test]
+    fn descendants_walks_transitively_and_stops_at_the_tree() {
+        // 1 -> 10 -> 20 -> 30, plus an unrelated 11 -> 21, and a row that
+        // claims to be its own parent.
+        let table = [(10, 1), (20, 10), (30, 20), (11, 1), (21, 11), (40, 40)];
+        let mut found = descendants(&table, 10);
+        found.sort_unstable();
+        assert_eq!(found, vec![20, 30], "the walk must not stop at direct children");
+        assert!(
+            descendants(&table, 30).is_empty(),
+            "a leaf has no descendants"
+        );
+        assert!(
+            descendants(&table, 40).is_empty(),
+            "a self-parenting row must not loop or count itself"
+        );
     }
 
     #[test]

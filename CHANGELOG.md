@@ -26,9 +26,11 @@ below.
   agy 1.1.22 by cancelling `sleep 45 && touch marker` and watching the marker
   appear 45 seconds later, and by the same route a build, a `curl` or an `rm -rf`
   would have finished too. A cancel now kills agy's whole process tree: agy is
-  stopped so it cannot start anything else, the process table is snapshotted
-  while agy is still alive to hold the parent links, every descendant is killed,
-  and then agy itself. Killing agy's *process group* would have been the obvious
+  stopped so it cannot start anything else, the process table is read while agy
+  is still alive to hold the parent links, whatever is found is stopped too and
+  the table read again until a read turns up nothing new — stopping agy does not
+  stop the shell it already started, and that shell can fork its next command
+  between two reads — and then the lot is killed, agy last. Killing agy's *process group* would have been the obvious
   fix and does not work: agy puts each command it runs into a process group of
   its own, so `killpg` on agy reaches agy and nothing else. agy is still spawned
   into its own group, but only so that a signal aimed at the adapter's group

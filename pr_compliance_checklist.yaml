@@ -97,9 +97,10 @@ pr_compliances:
       the turn was cancelled, which is silent.
     success_criteria: >
       Kills go through proc::kill_tree, or LiveChildren::kill_all on shutdown:
-      stop agy so it cannot start anything more, snapshot the process table while
-      agy is still alive to hold the parent links, kill every descendant, then
-      kill agy. The stop and the kill stay in one synchronous function.
+      stop agy so it cannot start anything more, read the process table while agy
+      is still alive to hold the parent links, stop what is found and read again
+      until nothing new appears, then kill the lot with agy last. The stop and
+      the kill stay in one synchronous function.
     failure_criteria: >
       A bare child.kill() on a kill path, killing agy before the snapshot is
       taken, splitting the SIGSTOP from its SIGKILL across an await, or replacing
