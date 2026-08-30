@@ -17,7 +17,7 @@ The few things worth picking up next. Each is a pointer; the detail lives below.
 - [Permission decisions ignore what a command actually does](#permission-decisions-ignore-what-a-command-actually-does)
   — one "Always allow" on `run_command` covers every later command.
 - [Confirm the path-field list for the tools not yet seen](#confirm-the-path-field-list-for-the-tools-not-yet-seen)
-  — five of fourteen tools checked; the rest could still carry an unknown field.
+  — found one missing field already; seven of fourteen tools checked.
 - [Rename the binary and crate](#rename-the-binary-and-crate) — cheaper now than
   after anyone else installs it.
 - [Configure the protected e2e environment](#configure-the-protected-e2e-environment)
@@ -46,13 +46,27 @@ Two things came out of it: the cancellation defect recorded below, and a live
 reproduction of the "Always allow" gap — approving `echo verification-one`
 auto-approved a later `rm -f other.txt` with no prompt, and the file was deleted.
 
-**Still untested: the reopened-thread path.** `session/load` and the load replay
-have only ever run under a scripted client. Note the adapter advertises both
-`loadSession` and `sessionCapabilities.resume`, and Paseo's ACP client knows both
-`session/load` and `session/resume` — which one it actually sends when a thread is
-reopened is unverified, so establish that first; testing the wrong method proves
-nothing. Close the agent in Paseo, reopen the thread, and confirm the transcript
-replays and the session keeps working. Concurrent sessions are also untested.
+Session restore across an adapter restart also works. Killing the `agy-acp`
+process out from under a live agent made Paseo respawn it, and the agent then
+answered two questions from the earlier transcript — the first command's output
+and a file's edited contents — with no tool calls. So the session was restored and
+agy's conversation continued.
+
+That is narrower than it sounds, and the remaining gap is worth stating exactly.
+It proves continuity via `--conversation`; it does *not* separately prove the
+adapter's own replay path (`db.rs`/`protobuf.rs` parsing agy's conversation DB to
+re-send history to the host), because Paseo keeps its own timeline and would show
+the prior messages either way. Nor does it establish which method Paseo sends —
+the adapter advertises both `loadSession` and `sessionCapabilities.resume`, and
+Paseo's ACP client knows both `session/load` and `session/resume`. To close it
+properly, tee the adapter's stdio and read which method arrives, then confirm the
+replayed updates match the DB. Concurrent sessions are also still untested.
+
+One cosmetic Paseo quirk, noted so it is not mistaken for an adapter bug: Paseo's
+normalized permission payload puts the tool-call *title* into the structured
+field, so a shell request arrives as `detail.command: "Run \`echo hi\`"` and an
+edit as `detail.filePath: "write_to_file /path/to/x"`, rather than the bare
+command or path. Our `rawInput` is passed through untouched.
 
 ### Configure the protected e2e environment
 
@@ -159,28 +173,47 @@ what the README promises, but it is worth deciding rather than inheriting.
 whatever their value looks like, and a field it does not know falls back to the
 shape tests, so a miss costs coverage quietly.
 
-Five tools have now been observed against real agy 1.1.22 traffic, and every path
-argument in them is already covered:
+Checking this against real agy 1.1.22 traffic found one, which is why the entry
+was worth keeping open: **`find_by_name` names its directory `SearchDirectory`**,
+which was not in the list. Fixed, with a test. The captured value was absolute so
+the shape tests happened to catch it, but a relative `SearchDirectory` has no
+leading `/`, no `~` and no `..` and would have been judged by nothing at all.
+
+Seven tools observed so far. Every path argument in the payloads captured is
+covered — one invocation per tool, so a tool taking a different path key on
+another code path would not have shown up:
 
 ```
-run_command           Cwd
-view_file             AbsolutePath
-grep_search           SearchPath   (and Query, correctly not a path)
-write_to_file         TargetFile
+run_command           Cwd                    view_file      AbsolutePath
+grep_search           SearchPath             list_dir       DirectoryPath
+write_to_file         TargetFile             find_by_name   SearchDirectory
 replace_file_content  TargetFile
 ```
 
-That is five of the fourteen tools this fork handles. Still unobserved:
-`view_code_item`, `list_dir`, `read_url_content`, `codebase_search`,
-`find_by_name`, `edit_file`, `propose_code`, `command_status`, `search_web`, and
-whatever agy uses to delete a file. The entry's premise — that an unseen tool may
-carry a path field under a name the list does not know — is therefore still live,
-so this stays open rather than being closed on the five.
+Still unobserved: `view_code_item`, `read_url_content`, `codebase_search`,
+`edit_file`, `propose_code`, `command_status`, `search_web`. Worth finishing,
+since the list was wrong once already. `codebase_search` and `view_code_item` are
+the most likely to carry a path under a new name.
+
+`FilePath` was added at the same time on different evidence: it is absent from
+`PATH_FIELDS` but `tools.rs:179` and `protobuf.rs:405` both already treat it as
+naming a location, so this fork's own modules disagreed about whether it is a
+path. Over-inclusion is the safe direction — a name that turns out not to hold a
+path resolves relative to the workspace, lands inside, and prompts nobody —
+whereas a missing name is silent. Candidates on the same reasoning, not yet
+added because nothing in this repo asserts they are paths: `TargetPath`,
+`DestinationPath`, `Directory`, `RootPath`, `Files`.
+
+Also learned: in the captured trace agy had **no dedicated delete tool** — asked
+to delete a file it shelled out to `rm` through `run_command`. That is one
+induced prompt rather than an enumeration of agy's tool registry, but if it
+holds, deletion is governed by the command path rather than by a path field — which
+puts it squarely behind plans/permission-command-keying.md rather than behind this
+entry.
 
 Capture the rest the same way: a `PreToolUse` hook that appends the payload and
 allows, driven by `agy -p ... --add-dir <ws> --dangerously-skip-permissions`. No
-adapter build and no Paseo needed. A prompt that lists a directory, searches by
-name, reads a URL and deletes a file should cover most of the gap.
+adapter build and no Paseo needed.
 
 #### Workspace-supplied hooks
 
@@ -210,7 +243,8 @@ proving it was created by this adapter.
 
 #### Cancelling a turn leaves the command running
 
-Found by the Paseo verification on 2026-08-30. `session/cancel` kills the `agy` child with `child.kill()`, which
+Found by the Paseo verification on 2026-08-30. `session/cancel` kills the `agy`
+child with `child.kill()`, which
 signals that one process and nothing beneath it. agy has already spawned a shell
 for the tool call, so the shell and the command it is running survive, get
 reparented to PID 1, and run to completion.
