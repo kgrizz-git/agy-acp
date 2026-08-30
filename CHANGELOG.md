@@ -44,6 +44,16 @@ below.
   prompt: ACP has no way to retract a request, and a host that cancels is
   expected to dismiss its own.
 
+  Applying a decision is gated on the turn that asked for it, which closes the
+  same leak by its other route. The host's answer resolves the request, but the
+  hook task that acts on that answer runs whenever the runtime next polls it —
+  possibly after the turn ended, by which point the pending entry is long gone
+  and draining it cannot help. A refusal applied then set the adapter-wide flag
+  after the turn that asked had already read it, so the *next* turn reported
+  `stopReason: "refusal"` having asked nobody anything, and an "always" applied
+  then became a standing permission for the turns that followed. Both are now
+  dropped unless the turn that asked is still the turn that is running.
+
 - Cancelling a turn stops the command, not just agy. `session/cancel` killed the
   `agy` process alone, and agy runs a tool call by shelling out, so the shell and
   its command were reparented to PID 1 and ran to completion — verified against

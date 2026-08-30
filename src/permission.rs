@@ -110,6 +110,14 @@ struct BridgeState {
     /// treating them as a refusal would let one hide a genuine provider failure
     /// later in the same turn.
     refused_during_prompt: bool,
+    /// Counts turns, so an answer can be matched to the turn that asked for it.
+    ///
+    /// A permission decision is applied by the hook task, which may not be polled
+    /// again until well after the turn ended -- a host answer resolves the oneshot
+    /// but the task that acts on it runs whenever the runtime gets to it. Without
+    /// this, that late work lands in whichever turn is running by then. See
+    /// [`PermissionBridge::mark_user_refusal`].
+    turn_generation: u64,
 }
 
 /// A `session/request_permission` the host has not answered yet.
@@ -203,6 +211,7 @@ impl PermissionBridge {
             return;
         }
         state.refused_during_prompt = false;
+        state.turn_generation = state.turn_generation.wrapping_add(1);
         // Every pending request belongs to a turn that is over, whatever session
         // asked it: `handle_session_prompt` runs under the adapter mutex, so one
         // turn runs at a time across the whole adapter, and this line is inside
@@ -239,8 +248,17 @@ impl PermissionBridge {
         self.state.lock().await.refused_during_prompt
     }
 
-    async fn mark_user_refusal(&self) {
-        self.state.lock().await.refused_during_prompt = true;
+    /// Records that the user refused a tool call, but only for the turn that
+    /// asked. `refused_during_prompt` is one flag for the adapter, and the turn
+    /// reads it at teardown, so a mark applied after that read is not merely
+    /// useless -- it is read by the *next* turn, which reports `stopReason:
+    /// "refusal"` having never asked anyone anything. Comparing generations
+    /// drops the mark instead of misfiling it.
+    async fn mark_user_refusal(&self, turn: u64) {
+        let mut state = self.state.lock().await;
+        if state.turn_generation == turn {
+            state.refused_during_prompt = true;
+        }
     }
 
     /// Answers every outstanding permission request for a session whose turn has
@@ -369,12 +387,17 @@ impl PermissionBridge {
 
         let always_key = (session_id.clone(), tool_name.clone());
         // Copied out before the branch: the body awaits the same mutex, and an
-        // `if let` scrutinee guard would still be held inside it.
-        let remembered = { self.state.lock().await.always.get(&always_key).copied() };
+        // `if let` scrutinee guard would still be held inside it. The turn this
+        // decision belongs to is read in the same breath, so everything below can
+        // tell whether it is still the turn that asked.
+        let (remembered, turn) = {
+            let state = self.state.lock().await;
+            (state.always.get(&always_key).copied(), state.turn_generation)
+        };
         if let Some(decision) = remembered {
             // A remembered deny applies immediately and unchanged.
             if decision == Decision::Deny {
-                self.mark_user_refusal().await;
+                self.mark_user_refusal(turn).await;
                 return (
                     Decision::Deny,
                     format!("Always rejected `{tool_name}` in this session."),
@@ -439,7 +462,7 @@ impl PermissionBridge {
             }
             _ => {
                 self.state.lock().await.pending.remove(&request_id);
-                self.mark_user_refusal().await;
+                self.mark_user_refusal(turn).await;
                 return (
                     Decision::Deny,
                     "agy-acp: timed out waiting for a permission decision".to_string(),
@@ -447,7 +470,7 @@ impl PermissionBridge {
             }
         };
 
-        self.apply_outcome(&outcome, always_key, &tool_name).await
+        self.apply_outcome(&outcome, always_key, &tool_name, turn).await
     }
 
     /// True when `args` leaves the workspace or names something sensitive — the
@@ -494,6 +517,7 @@ impl PermissionBridge {
         outcome: &Value,
         always_key: AlwaysKey,
         tool_name: &str,
+        turn: u64,
     ) -> (Decision, String) {
         let outcome = outcome.get("outcome").unwrap_or(outcome);
         let kind = outcome
@@ -501,7 +525,7 @@ impl PermissionBridge {
             .and_then(|v| v.as_str())
             .unwrap_or("cancelled");
         if kind != "selected" {
-            self.mark_user_refusal().await;
+            self.mark_user_refusal(turn).await;
             return (
                 Decision::Deny,
                 "Permission request was cancelled.".to_string(),
@@ -529,11 +553,19 @@ impl PermissionBridge {
         };
 
         if decision == Decision::Deny {
-            self.mark_user_refusal().await;
+            self.mark_user_refusal(turn).await;
         }
 
+        // Sticky answers are gated on the turn too. An "always" clicked on a
+        // prompt whose turn has since ended must not quietly configure the
+        // sessions that follow it -- the same rule a late answer already gets
+        // when `abandon_pending` won the race for the pending entry, applied
+        // whichever side won.
         if sticky {
-            self.state.lock().await.always.insert(always_key, decision);
+            let mut state = self.state.lock().await;
+            if state.turn_generation == turn {
+                state.always.insert(always_key, decision);
+            }
         }
         (decision, reason)
     }
@@ -2042,6 +2074,87 @@ mod tests {
         assert!(
             !bridge.refused_during_prompt().await,
             "and session-2 must not be reported as a refusal"
+        );
+    }
+
+    /// A permission decision is applied by the hook task, and that task can be
+    /// polled long after the turn that asked has ended -- the host answers, the
+    /// oneshot resolves, and the work that acts on it runs whenever the runtime
+    /// gets to it. That is a second route to the bug this branch fixes: the
+    /// pending entry is already gone, so draining cannot help, and the refusal
+    /// lands in a turn that never asked anybody anything.
+    #[tokio::test]
+    async fn a_decision_applied_after_its_turn_ended_does_not_refuse_the_next_one() {
+        let workspace = std::env::temp_dir().join("agy-acp-late-decision-turn-test");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let (bridge, _rx) = test_bridge(&workspace.display().to_string(), &[]).await;
+
+        bridge.set_active_session(Some("session-1")).await;
+        let asking_turn = bridge.state.lock().await.turn_generation;
+
+        // Session-1's turn ends and session-2's begins. Nothing is pending by
+        // now -- the host already answered, and only the applying is outstanding.
+        bridge.set_active_session(Some("session-2")).await;
+
+        let key = ("session-1".to_string(), "run_command".to_string());
+        let (decision, _) = bridge
+            .apply_outcome(
+                &json!({ "outcome": { "outcome": "selected", "optionId": "reject_once" } }),
+                key.clone(),
+                "run_command",
+                asking_turn,
+            )
+            .await;
+
+        assert_eq!(decision, Decision::Deny, "agy still must not run the tool");
+        assert!(
+            !bridge.refused_during_prompt().await,
+            "session-2 never asked anyone anything and must not report a refusal"
+        );
+
+        // And the same answer arriving during its own turn still counts.
+        let current_turn = bridge.state.lock().await.turn_generation;
+        bridge
+            .apply_outcome(
+                &json!({ "outcome": { "outcome": "selected", "optionId": "reject_once" } }),
+                key,
+                "run_command",
+                current_turn,
+            )
+            .await;
+        assert!(
+            bridge.refused_during_prompt().await,
+            "a refusal in the turn that asked is exactly what the flag is for"
+        );
+    }
+
+    /// The sticky half of the same window: an "always" clicked on a prompt whose
+    /// turn has ended must not configure the turns that follow it.
+    #[tokio::test]
+    async fn an_always_applied_after_its_turn_ended_does_not_stick() {
+        let workspace = std::env::temp_dir().join("agy-acp-late-always-turn-test");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let (bridge, _rx) = test_bridge(&workspace.display().to_string(), &[]).await;
+
+        bridge.set_active_session(Some("session-1")).await;
+        let asking_turn = bridge.state.lock().await.turn_generation;
+        bridge.set_active_session(Some("session-2")).await;
+
+        let key = ("session-1".to_string(), "run_command".to_string());
+        let (decision, _) = bridge
+            .apply_outcome(
+                &json!({ "outcome": { "outcome": "selected", "optionId": "allow_always" } }),
+                key.clone(),
+                "run_command",
+                asking_turn,
+            )
+            .await;
+
+        // The caller still hears the answer -- it asked, and this is the reply.
+        assert_eq!(decision, Decision::Allow);
+        assert!(
+            bridge.state.lock().await.always.is_empty(),
+            "a stale always must not survive as a standing permission"
         );
     }
 
