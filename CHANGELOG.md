@@ -52,7 +52,10 @@ below.
   after the turn that asked had already read it, so the *next* turn reported
   `stopReason: "refusal"` having asked nobody anything, and an "always" applied
   then became a standing permission for the turns that followed. Both are now
-  dropped unless the turn that asked is still the turn that is running.
+  dropped unless the turn that asked is still the turn that is running — where
+  "running" excludes the gap between one turn's teardown and the next turn's
+  start, since `always` is not reset by anything and a sticky answer applied in
+  that gap would outlive it.
 
 - Cancelling a turn stops the command, not just agy. `session/cancel` killed the
   `agy` process alone, and agy runs a tool call by shelling out, so the shell and

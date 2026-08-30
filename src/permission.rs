@@ -115,7 +115,9 @@ struct BridgeState {
     /// A permission decision is applied by the hook task, which may not be polled
     /// again until well after the turn ended -- a host answer resolves the oneshot
     /// but the task that acts on it runs whenever the runtime gets to it. Without
-    /// this, that late work lands in whichever turn is running by then. See
+    /// this, that late work lands in whichever turn is running by then, or in the
+    /// gap before one starts. Bumped at both edges of a turn, so "the turn that
+    /// asked is still running" is the only state that counts. See
     /// [`PermissionBridge::mark_user_refusal`].
     turn_generation: u64,
 }
@@ -207,11 +209,17 @@ impl PermissionBridge {
     pub async fn set_active_session(&self, session_id: Option<&str>) {
         let mut state = self.state.lock().await;
         state.active_session = session_id.map(str::to_string);
+        // The turn ends here, so nothing that was still deciding for it counts
+        // from here on. Bumping on the way out as well as on the way in matters:
+        // between one turn's teardown and the next turn's start there is no turn
+        // running, and a decision applied in that gap would otherwise still match
+        // the generation of the turn that just finished -- long enough to leave a
+        // sticky "always" behind, which nothing later clears.
+        state.turn_generation = state.turn_generation.wrapping_add(1);
         if state.active_session.is_none() {
             return;
         }
         state.refused_during_prompt = false;
-        state.turn_generation = state.turn_generation.wrapping_add(1);
         // Every pending request belongs to a turn that is over, whatever session
         // asked it: `handle_session_prompt` runs under the adapter mutex, so one
         // turn runs at a time across the whole adapter, and this line is inside
@@ -2125,6 +2133,52 @@ mod tests {
         assert!(
             bridge.refused_during_prompt().await,
             "a refusal in the turn that asked is exactly what the flag is for"
+        );
+    }
+
+    /// The gap between one turn's teardown and the next turn's start. No turn is
+    /// running here, so there is no later turn to mislead -- but `always` is not
+    /// reset by anything, so a sticky answer applied in the gap outlives it and
+    /// silently pre-approves the turns that follow.
+    #[tokio::test]
+    async fn an_answer_applied_between_turns_does_not_stick_either() {
+        let workspace = std::env::temp_dir().join("agy-acp-between-turns-test");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let (bridge, _rx) = test_bridge(&workspace.display().to_string(), &[]).await;
+
+        bridge.set_active_session(Some("session-1")).await;
+        let asking_turn = bridge.state.lock().await.turn_generation;
+
+        // The host answered just before teardown, so the request is already gone
+        // and `abandon_pending` has nothing to find. Only the applying is left.
+        bridge.set_active_session(None).await;
+
+        let key = ("session-1".to_string(), "run_command".to_string());
+        bridge
+            .apply_outcome(
+                &json!({ "outcome": { "outcome": "selected", "optionId": "allow_always" } }),
+                key.clone(),
+                "run_command",
+                asking_turn,
+            )
+            .await;
+        assert!(
+            bridge.state.lock().await.always.is_empty(),
+            "an always applied after teardown must not pre-approve the next turn"
+        );
+
+        // The refusing direction of the same gap.
+        bridge
+            .apply_outcome(
+                &json!({ "outcome": { "outcome": "selected", "optionId": "reject_once" } }),
+                key,
+                "run_command",
+                asking_turn,
+            )
+            .await;
+        assert!(
+            !bridge.refused_during_prompt().await,
+            "the turn that asked already read the flag and ended"
         );
     }
 
