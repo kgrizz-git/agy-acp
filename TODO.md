@@ -16,8 +16,8 @@ The few things worth picking up next. Each is a pointer; the detail lives below.
   reopened-thread path.
 - [Permission decisions ignore what a command actually does](#permission-decisions-ignore-what-a-command-actually-does)
   — one "Always allow" on `run_command` covers every later command.
-- [Confirm the path-field list for the tools not yet seen](#confirm-the-path-field-list-for-the-tools-not-yet-seen)
-  — found one missing field already; seven of fourteen tools checked.
+- [Path fields: what agy actually sends](#path-fields-what-agy-actually-sends)
+  — one field was missing; five names in our lists are for tools agy does not have.
 - [Rename the binary and crate](#rename-the-binary-and-crate) — cheaper now than
   after anyone else installs it.
 - [Configure the protected e2e environment](#configure-the-protected-e2e-environment)
@@ -167,53 +167,77 @@ Note the same absence has a visible consequence today: a session reloaded in the
 same process inherits the "Always" answers it was given earlier. That is within
 what the README promises, but it is worth deciding rather than inheriting.
 
-#### Confirm the path-field list for the tools not yet seen
+#### Path fields: what agy actually sends
 
 `PATH_FIELDS` in `permission.rs` decides which arguments are judged as paths
-whatever their value looks like, and a field it does not know falls back to the
-shape tests, so a miss costs coverage quietly.
+whatever their value looks like; a field it does not know falls back to the shape
+tests, so a miss costs coverage quietly.
 
-Checking this against real agy 1.1.22 traffic found one, which is why the entry
-was worth keeping open: **`find_by_name` names its directory `SearchDirectory`**,
-which was not in the list. Fixed, with a test. The captured value was absolute so
-the shape tests happened to catch it, but a relative `SearchDirectory` has no
-leading `/`, no `~` and no `..` and would have been judged by nothing at all.
+Checking this against real agy 1.1.22 found a hole, now fixed: `find_by_name`
+names its directory `SearchDirectory`, which was missing. The captured value was
+absolute so the shape tests caught it, but a relative one would have been judged
+by nothing.
 
-Seven tools observed so far. Every path argument in the payloads captured is
-covered — one invocation per tool, so a tool taking a different path key on
-another code path would not have shown up:
+**agy's real toolset is not the one this code assumes.** Asked to enumerate, agy
+1.1.22 lists seventeen tools:
 
 ```
-run_command           Cwd                    view_file      AbsolutePath
-grep_search           SearchPath             list_dir       DirectoryPath
-write_to_file         TargetFile             find_by_name   SearchDirectory
-replace_file_content  TargetFile
+view_file   run_command      manage_task    send_message   schedule
+list_dir    write_to_file    invoke_subagent define_subagent manage_subagents
+grep_search replace_file_content generate_image read_url_content search_web
+find_by_name ask_question
 ```
 
-Still unobserved: `view_code_item`, `read_url_content`, `codebase_search`,
-`edit_file`, `propose_code`, `command_status`, `search_web`. Worth finishing,
-since the list was wrong once already. `codebase_search` and `view_code_item` are
-the most likely to carry a path under a new name.
+Two mismatches follow, and both are worth acting on.
 
-`FilePath` was added at the same time on different evidence: it is absent from
-`PATH_FIELDS` but `tools.rs:179` and `protobuf.rs:405` both already treat it as
-naming a location, so this fork's own modules disagreed about whether it is a
-path. Over-inclusion is the safe direction — a name that turns out not to hold a
-path resolves relative to the workspace, lands inside, and prompts nobody —
-whereas a missing name is silent. Candidates on the same reasoning, not yet
-added because nothing in this repo asserts they are paths: `TargetPath`,
-`DestinationPath`, `Directory`, `RootPath`, `Files`.
+*Five names in `permission.rs` are dead.* `view_code_item`, `codebase_search`,
+`edit_file`, `propose_code` and `command_status` appear in `READ_TOOLS`,
+`SEARCH_TOOLS` or `tool_kind` but agy never emits them — they are upstream
+vocabulary this fork inherited. Harmless, but they make the auto-allow groups look
+broader than they are, and they sent this investigation chasing tools that do not
+exist. Worth deleting, or commenting as forward-compatibility.
 
-Also learned: in the captured trace agy had **no dedicated delete tool** — asked
-to delete a file it shelled out to `rm` through `run_command`. That is one
-induced prompt rather than an enumeration of agy's tool registry, but if it
-holds, deletion is governed by the command path rather than by a path field — which
-puts it squarely behind plans/permission-command-keying.md rather than behind this
-entry.
+*Seven agy tools are unclassified here:* `manage_task`, `send_message`,
+`schedule`, `invoke_subagent`, `define_subagent`, `manage_subagents`,
+`generate_image`. They fall through `tool_kind` to `"other"` and are in no
+auto-allow group, so they always prompt — fail-safe, which is the right default,
+but it is by omission rather than decision. `schedule` and `invoke_subagent`
+especially deserve a deliberate classification.
 
-Capture the rest the same way: a `PreToolUse` hook that appends the payload and
-allows, driven by `agy -p ... --add-dir <ws> --dangerously-skip-permissions`. No
-adapter build and no Paseo needed.
+Argument keys observed, all covered:
+
+```
+run_command Cwd    view_file AbsolutePath      grep_search SearchPath
+list_dir DirectoryPath   write_to_file TargetFile   find_by_name SearchDirectory
+replace_file_content TargetFile
+```
+
+Correctly *not* treated as paths: `read_url_content` takes `Url`, `search_web`
+takes `query` (lowercase, where `grep_search` uses `Query` — agy's casing is not
+consistent), and `find_by_name`'s `FullPath` is a **boolean**, not a path. That
+last one is why schema names are verified rather than trusted: it reads like a
+path field and is not one.
+
+One candidate remains unverified. agy reports `generate_image` as taking
+`ImagePaths`, which would be a path field this list does not have, but no call has
+produced it — it is presumably for input images. Add it when a payload shows it.
+`FilePath` was added without a sighting, but on stronger evidence: `tools.rs:179`
+and `protobuf.rs:405` already treat it as naming a location, so this fork
+contradicted itself. A model's description of its own schema is not that.
+
+#### generate_image writes outside the workspace, invisibly
+
+Found while enumerating the toolset. `generate_image` takes `ImageName` and
+`Prompt` and **no destination argument at all**; asked to "save it in this
+workspace" it wrote to `~/.gemini/antigravity-cli/brain/<conversation-id>/` and
+then told the user it had saved into the workspace, which was false.
+
+The bridge is not bypassed — `generate_image` is in no auto-allow group so the
+user is prompted — but the prompt cannot say where the file goes, and the
+workspace-containment promise in the README does not hold for it, because there is
+no path in the arguments to contain. Decide whether to say so in the README or to
+deny the tool by default. The same question applies to any future tool whose
+destination is implicit.
 
 #### Workspace-supplied hooks
 
