@@ -12,21 +12,24 @@ Both `kilo-hy3-brief.md` and `kilo-longcat-brief.md` accurately identified the p
 
 ### 1. Update `AlwaysKey` logic and UI Text (`src/permission.rs`)
 - Change the `AlwaysKey` type alias from `(String, String)` to `(String, String, Option<String>)`, representing `(session_id, tool_name, command_line)`.
-- In `is_always_allowed` and `remember_allow`, construct the key:
-  - If the tool is `run_command` or `command_status`, extract the `CommandLine` argument and pass it as `Some(command)`.
-  - For all other tools, pass `None`.
-- Update `permission_options(tool_name: &str)` to take an additional boolean parameter or the tool name directly to differentiate UI text. For command-executing tools (`run_command`, `command_status`), the text for `OPTION_ALLOW_ALWAYS` should be `"Allow Exact Command This Session"`, and `OPTION_REJECT_ALWAYS` should be `"Reject Exact Command This Session"`. For other tools, retain the `"Always allow {tool_name} this session"` and `"Always reject {tool_name} this session"` text.
-- This ensures exact-match string equality for commands, while preserving the existing tool-level behavior for path tools.
+- In the `decide` and `apply_outcome` methods, construct the key:
+  - Extract the `CommandLine` argument from `args` (`args.get("CommandLine").and_then(|v| v.as_str())`).
+  - If it exists, pass it as `Some(command.to_string())`.
+  - For all other tools that don't have a `CommandLine` argument, pass `None`.
+  - This avoids hardcoding `run_command` and handles any command-executing tool that uses `CommandLine` similarly to `tool_title`.
+- Update `permission_options(tool_name: &str, command: Option<&str>)` to differentiate UI text. When a command is present, the text for `OPTION_ALLOW_ALWAYS` should be `"Allow Exact Command This Session"`, and `OPTION_REJECT_ALWAYS` should be `"Reject Exact Command This Session"`. For other tools, retain the `"Always allow {tool_name} this session"` and `"Always reject {tool_name} this session"` text.
+- Similarly, update the outcome reason strings returned by `apply_outcome` **and** the cache-hit branch in `decide` to clearly state when an exact command is being remembered or applied, instead of the entire tool.
+- This ensures exact-match string equality for commands, while preserving the existing tool-level behavior for path tools and management tools.
 
 ### 2. Implement Session Eviction Cleanup (`src/adapter.rs` & `src/permission.rs`)
-- Add a method to the permission bridge (e.g., `pub fn forget_session(&self, session_id: &str)`) that removes all entries in `BridgeState.always` matching the given `session_id`.
-- In `src/adapter.rs`, update `Adapter::evict_if_needed` to call `forget_session` on the evicted session.
+- Add an async method to the permission bridge (e.g., `pub async fn forget_session(&self, session_id: &str)`) that removes all entries in `BridgeState.always` matching the given `session_id`. Use `state.always.retain(|(sid, _, _), _| sid != session_id);` to drop them efficiently.
+- In `src/adapter.rs`, update the synchronous `Adapter::evict_if_needed` method to spawn a background task (`tokio::spawn`) that clones the optional bridge and calls `forget_session` on the evicted session.
 
 ### 3. Update Tests (`src/permission.rs`)
-- Rewrite `always_allow_is_remembered_per_tool_not_per_command` to assert that:
+- Rename and rewrite `always_allow_is_remembered_per_tool_not_per_command` to `always_allow_is_remembered_per_command_for_command_tools` to assert that:
   - Allowing `run_command "ls"` does NOT auto-allow `run_command "rm -rf build"`.
   - Allowing `run_command "ls"` DOES auto-allow a subsequent `run_command "ls"`.
-- Rewrite `a_path_inside_a_command_string_is_invisible_to_the_containment_check` to reflect the new command-level keying behavior.
+- Rewrite `a_path_inside_a_command_string_is_invisible_to_the_containment_check` to reflect the new command-level keying behavior (since the command is explicitly matched, the vulnerability is mitigated even though the path is still invisible).
 - Add a new test verifying that `forget_session` successfully clears the remembered answers.
 
 ### 4. Update Documentation (`README.md`)
