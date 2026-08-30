@@ -130,6 +130,23 @@ graph makes the fingerprint follow wire key order. That direction is safe (a
 reordered payload reprompts rather than matches) but it would look like a
 flapping bug, so state the dependency in a comment next to the fingerprint.
 
+### D1d. Remembered *denies* narrow too
+
+Keying cuts both ways, and this half is user-visible. Today an "Always reject" on
+`run_command` blocks every later command in the session; afterwards it blocks only
+the exact command it was given, and a different command prompts again.
+
+That is the correct reading of the answer — the user rejected *that* command —
+and it is consistent with what the prompt says. But it is a real reduction in what
+a single reject covers, so it belongs in the README change of step 4 rather than
+being discovered later.
+
+Note also that a remembered deny returns immediately (`permission.rs:290-298`)
+without the `escapes_containment` re-check that a remembered allow gets. That
+asymmetry is correct and pre-existing — a deny cannot become unsafe by skipping a
+check that only ever *adds* prompts — and this change makes it narrower rather
+than broader. Nothing to fix; recorded so the next reader does not re-derive it.
+
 ### D2. No normalization
 
 Exact byte equality on the serialized args. No trimming, no whitespace
@@ -213,13 +230,26 @@ and the label does not need to carry the command.
   landing. State instead what D1 and D3 decide, and why (the D-block reasoning
   above about inert containment).
 - Add `fn args_fingerprint(args: &Value) -> String`: clone the argument object,
-  remove every key named in `UNKEYED_FIELDS` (D1b), and serialize with
-  `to_string()`. Do this in one place — the filtering and the serialization must
-  never be reachable separately, or the next reader will use the unfiltered form.
+  remove the `UNKEYED_FIELDS` keys (D1b) **at the top level only**, and serialize
+  with `to_string()`. Do this in one place: the filtering and the serialization
+  must never be reachable separately, or the next reader will use the unfiltered
+  form.
+
+  Top level and *not* a recursive walk, deliberately — an earlier revision of this
+  plan said recursive and was wrong. Recursion is over-normalization: it would
+  strip a nested `toolSummary` living inside some future structured argument where
+  the value does matter, merging two argument sets that are not the same into one
+  key. That is a hole. Leaving a nested volatile field in the key costs a reprompt
+  instead, which is the direction D2 and `TODO.md` both pick — under-normalizing
+  costs a prompt, over-normalizing is a hole. All three measured fields (D1c) are
+  top-level, so recursion buys nothing today and risks something real later.
+  Note the contrast with `path_field_args` (`permission.rs:763`), which *does*
+  recurse: it is looking for a reason to *ask*, so a deeper search is the
+  conservative direction there and the opposite direction here.
 - Add `fn sticky_scope(tool_name: &str, args: &Value) -> Option<String>`
   implementing D3, returning `Some(args_fingerprint(args))` when either detector
   fires and `None` only when both miss.
-- In `decide` (`permission.rs:289`), build
+- In `decide` (`permission.rs:286`), build
   `let scope = sticky_scope(&tool_name, &args);` and
   `let always_key = (session_id.clone(), tool_name.clone(), scope.clone());`.
 - Update the two cache-hit reason strings (`permission.rs:296` deny,
@@ -290,7 +320,18 @@ mutex. Add to `Adapter`:
 pending_forget: Arc<std::sync::Mutex<Vec<String>>>,
 ```
 
-`evict_if_needed` pushes each victim id. `main.rs` keeps a clone of the `Arc`
+`evict_if_needed` pushes each victim id, inside the loop body where the victim is
+removed from `sessions` (`adapter.rs:408`).
+
+Budget for the mechanical part: `Adapter` has no `Default`, and `src/tests.rs`
+builds it with **15 direct struct literals** (643, 680, 795, 940, 984, 1027,
+1063, 1098, 1131, 1681, 1701, 2108, 2163, 2213, 2240). Adding a field breaks
+every one of them. That is churn, not difficulty, but it is the bulk of the diff
+and it should not come as a surprise halfway through. Note `grep -c 'Adapter {'`
+returns 16 — it counts the `fn test_adapter() -> Adapter {` signature at
+`tests.rs:105`, which is not a literal.
+
+`main.rs` keeps a clone of the `Arc`
 and drains it at the single common point after the dispatcher's
 `let output = match ... ;` and before the write loop:
 
@@ -384,10 +425,13 @@ Add:
 - `sticky_answers_are_not_normalized` — `"ls"` and `"ls "` produce different
   keys and the second prompts. Pins D2.
 - `a_command_tool_is_detected_by_kind_and_by_argument` — `sticky_scope` returns
-  `Some` for `run_command` with no `CommandLine` at all (detector 1) and for an
-  unknown tool name carrying a nested `CommandLine` (detector 2), and `None` for
-  `view_file` with a `TargetFile`. Pins D3, including the nesting that a
-  top-level `args.get` would miss.
+  `Some` for `run_command` with no `CommandLine` at all (detector 1 alone), for an
+  unknown tool name carrying a nested `CommandLine` (detector 2 alone), and for
+  `run_command` carrying a `CommandLine` (both), and `None` for `view_file` with a
+  `TargetFile` (neither). All four cases, not two: asserting only the both-fire
+  and neither-fire cases would pass an implementation that wrote one detector and
+  dropped the other, which is the union this test exists to pin. Also covers the
+  nesting that a top-level `args.get` would miss.
 - `a_differing_cwd_is_a_different_command` — same `CommandLine`, different `Cwd`,
   prompts again. Pins D1's whole-args decision; without it, someone "simplifies"
   the fingerprint back to `CommandLine` and no test objects.
@@ -396,22 +440,37 @@ Add:
   Pins D1b with the measured values from D1c. Without it the fingerprint looks
   correct in review and "Always allow" quietly never matches in production, which
   is the failure this whole sub-decision exists to prevent.
+- `a_nested_volatile_field_stays_in_the_key` — two calls with identical
+  `CommandLine` and `Cwd`, differing only in a `toolSummary` nested inside a
+  structured argument, must **prompt**. This is the only test that pins
+  top-level-only stripping: `a_differing_tool_summary_is_the_same_command` passes
+  under either depth, so without this one a recursive implementation satisfies
+  the whole suite and the exclusion silently grows to every nested occurrence of
+  those names. Mark it clearly as pinning a security direction, not an
+  ergonomic one — the reprompt it asserts is the *desired* outcome.
 - `always_allow_still_applies_per_tool_for_path_tools` — `view_file` on one file
   still auto-allows a second file. Guards the ergonomics: fingerprinting *every*
   tool's args would make "Always" useless for reads, and this is the assertion
   that says so.
 - `forget_session_clears_remembered_answers` — approve with `allow_always`, call
   `bridge.forget_session(&session_id).await`, assert the next identical call
-  prompts.
+  prompts. Set up **two** sessions and assert the other one's answers survive: the
+  `retain` predicate is one typo away from clearing the whole map, and a
+  single-session test cannot tell the difference.
 - `readmitting_an_evicted_session_cancels_its_queued_forget` in `src/tests.rs` —
   evict an id, restore it with `restore_session_state`, and assert
   `pending_forget` no longer names it. Pins the rule above; without it the queue
-  is one race away from clearing a live session's answers.
+  is one race away from clearing a live session's answers. Assert the *safety
+  property* as well as the queue state: the session's remembered answers must
+  still be in the bridge afterwards. Queue state alone would pass an
+  implementation that cancels the forget and drops the answers anyway.
 - `evicting_a_session_queues_its_answers_for_forgetting` in `src/tests.rs`,
   alongside `evict_if_needed_drops_the_least_recently_used_session` — fill past
   `MAX_SESSIONS`, call `evict_if_needed()`, assert the victim id appears in
-  `pending_forget`. Stays a plain `#[test]`; no runtime needed, which is the
-  point of the queue.
+  `pending_forget`. Assert the queue holds *exactly* the victim, not merely that
+  it contains it — `contains` would pass an implementation that queues every
+  session id and forgets far more than it should. Stays a plain `#[test]`; no
+  runtime needed, which is the point of the queue.
 
 Existing tests that must stay green untouched:
 `always_allow_does_not_bypass_the_sensitive_path_check` (`permission.rs:1591`),
@@ -428,6 +487,10 @@ is *deleted* when the work lands and recorded in `CHANGELOG.md`.
 
 - **`README.md`**, *What "Always" remembers* (line 145). Rewrite: the answer is
   keyed by tool for path tools and by the exact arguments for command tools.
+  State the deny half explicitly too, per D1d — an "Always reject" now covers
+  only the command it was given, where today it blocks every later command on
+  that tool. That is a reduction in what one answer covers and a user reading
+  only the allow half would be misled.
   Remove the `[!WARNING]` at line 160 telling users to prefer **Allow** over
   **Always allow** for `run_command` — it describes the fixed behaviour. Keep
   the paragraph at line 158 explaining that containment does not see paths
@@ -503,6 +566,13 @@ session-wide grant. The safe-looking option removal is the unsafe one.
   change, not a substitute for it.
 - **A destructive-command denylist** (`TODO.md` option 3). Evaded by
   `cat .en"v"` or `cat $HOME/.env`. Depth, never the boundary.
+- **Bounding the fingerprint's size.** `args_fingerprint` serializes an argument
+  object of unbounded size into a map key, and `TODO.md`'s "Unbounded
+  input/output work" already records that hook payloads are not size-bounded.
+  This change does not create that exposure but it does widen it, adding a
+  retained copy per remembered answer. Not fixed here — the bound belongs with
+  the payload, not with this key — but it should be named in that TODO entry so
+  the two are fixed together.
 - **Bounding `always` by entry count.** Per-command keying turns one entry per
   tool into one per approved command, but every entry still costs a human click
   on "Always allow", so the map cannot be inflated by the model alone. Step 2
