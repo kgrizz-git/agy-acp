@@ -50,6 +50,8 @@ completion. When a piece of work gets a plan (kept under `plans/`):
 | Path | Purpose |
 |---|---|
 | `~/.openab/agy-acp/sessions.json` | Persisted session→conversation mapping (with `.lock` file for mutual exclusion). Capped at 256 entries, rewritten whole on every turn |
+| `~/.gemini/antigravity-cli/brain/<conversation-id>/` | Where agy writes generated artifacts. Not the workspace, and not visible to the bridge — `generate_image` takes no destination argument |
+| `dev-docs/agy-tool-surface.md` | What agy actually sends the permission bridge: its tools, their argument keys, which are paths, and how that was captured. Reference for `PATH_FIELDS` and the auto-allow groups |
 
 ## Test tiers
 

@@ -16,8 +16,8 @@ The few things worth picking up next. Each is a pointer; the detail lives below.
   reopened-thread path.
 - [Permission decisions ignore what a command actually does](#permission-decisions-ignore-what-a-command-actually-does)
   — one "Always allow" on `run_command` covers every later command.
-- [Path fields: what agy actually sends](#path-fields-what-agy-actually-sends)
-  — one field was missing; five names in our lists are for tools agy does not have.
+- [Reconcile the tool lists with agy's real toolset](#reconcile-the-tool-lists-with-agys-real-toolset)
+  — five names are for tools agy lacks; seven of its tools are unclassified.
 - [Rename the binary and crate](#rename-the-binary-and-crate) — cheaper now than
   after anyone else installs it.
 - [Configure the protected e2e environment](#configure-the-protected-e2e-environment)
@@ -167,77 +167,45 @@ Note the same absence has a visible consequence today: a session reloaded in the
 same process inherits the "Always" answers it was given earlier. That is within
 what the README promises, but it is worth deciding rather than inheriting.
 
-#### Path fields: what agy actually sends
+#### Reconcile the tool lists with agy's real toolset
 
-`PATH_FIELDS` in `permission.rs` decides which arguments are judged as paths
-whatever their value looks like; a field it does not know falls back to the shape
-tests, so a miss costs coverage quietly.
+Reference: [dev-docs/agy-tool-surface.md](dev-docs/agy-tool-surface.md), which
+records what agy 1.1.22 actually sends and how it was captured.
 
-Checking this against real agy 1.1.22 found a hole, now fixed: `find_by_name`
-names its directory `SearchDirectory`, which was missing. The captured value was
-absolute so the shape tests caught it, but a relative one would have been judged
-by nothing.
+Capturing it closed the path-field question — `SearchDirectory` was missing and is
+now fixed — but turned up a mismatch in both directions that is still open.
 
-**agy's real toolset is not the one this code assumes.** Asked to enumerate, agy
-1.1.22 lists seventeen tools:
+Five names in `permission.rs` are for tools agy does not have: `view_code_item`,
+`codebase_search`, `edit_file`, `propose_code`, `command_status`. They sit in
+`READ_TOOLS`, `SEARCH_TOOLS` and `tool_kind`, make the auto-allow groups look
+broader than they are, and cost real time — they sent one investigation chasing
+tools that do not exist. Delete them, or comment them as deliberate
+forward-compatibility.
 
-```
-view_file   run_command      manage_task    send_message   schedule
-list_dir    write_to_file    invoke_subagent define_subagent manage_subagents
-grep_search replace_file_content generate_image read_url_content search_web
-find_by_name ask_question
-```
-
-Two mismatches follow, and both are worth acting on.
-
-*Five names in `permission.rs` are dead.* `view_code_item`, `codebase_search`,
-`edit_file`, `propose_code` and `command_status` appear in `READ_TOOLS`,
-`SEARCH_TOOLS` or `tool_kind` but agy never emits them — they are upstream
-vocabulary this fork inherited. Harmless, but they make the auto-allow groups look
-broader than they are, and they sent this investigation chasing tools that do not
-exist. Worth deleting, or commenting as forward-compatibility.
-
-*Seven agy tools are unclassified here:* `manage_task`, `send_message`,
+Seven tools agy does have are unclassified: `manage_task`, `send_message`,
 `schedule`, `invoke_subagent`, `define_subagent`, `manage_subagents`,
-`generate_image`. They fall through `tool_kind` to `"other"` and are in no
-auto-allow group, so they always prompt — fail-safe, which is the right default,
-but it is by omission rather than decision. `schedule` and `invoke_subagent`
-especially deserve a deliberate classification.
+`generate_image`. They fall to `"other"` and always prompt, which is the right
+default but is reached by omission rather than decision. `schedule` and
+`invoke_subagent` are the two that most deserve a deliberate call, since one
+defers work past the current turn and the other spawns another agent.
 
-Argument keys observed, all covered:
+#### Generated artifacts land outside the workspace
 
-```
-run_command Cwd    view_file AbsolutePath      grep_search SearchPath
-list_dir DirectoryPath   write_to_file TargetFile   find_by_name SearchDirectory
-replace_file_content TargetFile
-```
+`generate_image` takes no destination argument and writes to
+`~/.gemini/antigravity-cli/brain/<conversation-id>/`. This is normal Antigravity
+behaviour — Gemini writes to its own internal workspace unless told otherwise —
+so the work here is not to treat it as a defect but to decide what this adapter
+says and does about it.
 
-Correctly *not* treated as paths: `read_url_content` takes `Url`, `search_web`
-takes `query` (lowercase, where `grep_search` uses `Query` — agy's casing is not
-consistent), and `find_by_name`'s `FullPath` is a **boolean**, not a path. That
-last one is why schema names are verified rather than trusted: it reads like a
-path field and is not one.
+Two consequences. The bridge cannot constrain a destination that is not in the
+arguments, so the README's "only inside the workspace" limit does not describe
+this tool and should say so. And the adapter passes the user's workspace with
+`--add-dir` without instructing agy to prefer it for artifacts; if generated files
+should land in the workspace, that has to be stated explicitly somewhere agy
+reads.
 
-One candidate remains unverified. agy reports `generate_image` as taking
-`ImagePaths`, which would be a path field this list does not have, but no call has
-produced it — it is presumably for input images. Add it when a payload shows it.
-`FilePath` was added without a sighting, but on stronger evidence: `tools.rs:179`
-and `protobuf.rs:405` already treat it as naming a location, so this fork
-contradicted itself. A model's description of its own schema is not that.
-
-#### generate_image writes outside the workspace, invisibly
-
-Found while enumerating the toolset. `generate_image` takes `ImageName` and
-`Prompt` and **no destination argument at all**; asked to "save it in this
-workspace" it wrote to `~/.gemini/antigravity-cli/brain/<conversation-id>/` and
-then told the user it had saved into the workspace, which was false.
-
-The bridge is not bypassed — `generate_image` is in no auto-allow group so the
-user is prompted — but the prompt cannot say where the file goes, and the
-workspace-containment promise in the README does not hold for it, because there is
-no path in the arguments to contain. Decide whether to say so in the README or to
-deny the tool by default. The same question applies to any future tool whose
-destination is implicit.
+Worth checking which other tools share the behaviour before deciding — anything
+that produces a file without taking a path is in the same position.
 
 #### Workspace-supplied hooks
 
