@@ -32,9 +32,10 @@ up a cancellation defect. Both are in [TODO.md](TODO.md).
 - Check `PATH_FIELDS` against real agy 1.1.22 traffic. One field was missing (see
   Fixed above); every other path argument observed is covered, and `Url`, `query`
   and the boolean `FullPath` are correctly not treated as paths. Also established
-  agy's real toolset, which does not match this fork's assumptions: five tool
-  names in `permission.rs` are for tools agy never emits, and seven tools it does
-  emit are unclassified here. Both recorded in [TODO.md](TODO.md).
+  agy's tool surface as observed in 1.1.22, which does not match this fork's
+  assumptions: five tool names in `permission.rs` match nothing agy emitted or
+  self-reported, and seven tools it does report are unclassified here. Both
+  recorded in [TODO.md](TODO.md).
 - Keep the Windows build portable by failing closed when the Unix-socket-based
   `--permission-prompts` feature is requested there.
 - Keep fork PRs from waiting on an e2e-environment approval they cannot use, and

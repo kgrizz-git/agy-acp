@@ -105,15 +105,23 @@ workspace, that has to be said explicitly.
 
 ## Mismatches with this fork's lists
 
-Five names in `src/permission.rs` are for tools agy does not have —
-`view_code_item`, `codebase_search`, `edit_file`, `propose_code`,
-`command_status`. They are upstream vocabulary this fork inherited.
+Five names in `src/permission.rs` — `view_code_item`, `codebase_search`,
+`edit_file`, `propose_code`, `command_status` — are absent from the self-reported
+list *and* never appeared in a captured payload, including on prompts that should
+have drawn them out: a request for semantic search produced `grep_search`, one to
+view a specific code item produced `view_file`, and one to edit produced
+`replace_file_content`. They read as upstream vocabulary this fork inherited.
+Stated that way deliberately: absence of evidence across two sources is strong,
+but it is not the same as knowing agy cannot emit them under some other
+configuration or version.
 
-Seven tools agy does have are unclassified — `manage_task`, `send_message`,
-`schedule`, `invoke_subagent`, `define_subagent`, `manage_subagents`,
-`generate_image`. They fall through `tool_kind` to `"other"` and belong to no
-auto-allow group, so they always prompt. That is the right default, but it is
-reached by omission.
+Seven tools in the self-reported list are unclassified here — `manage_task`,
+`send_message`, `schedule`, `invoke_subagent`, `define_subagent`,
+`manage_subagents`, `generate_image`. Only `generate_image` has been observed in
+a payload; the rest are self-reported and unobserved. All seven fall through
+`tool_kind` to `"other"` and belong to no auto-allow group, so they always
+prompt — the right default, but reached by omission, and that is true whether or
+not the self-report is complete.
 
 agy has **no dedicated delete tool**: asked to delete a file it shells out to
 `rm` via `run_command`, so deletion is governed by the command path.

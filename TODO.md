@@ -175,19 +175,19 @@ records what agy 1.1.22 actually sends and how it was captured.
 Capturing it closed the path-field question — `SearchDirectory` was missing and is
 now fixed — but turned up a mismatch in both directions that is still open.
 
-Five names in `permission.rs` are for tools agy does not have: `view_code_item`,
-`codebase_search`, `edit_file`, `propose_code`, `command_status`. They sit in
-`READ_TOOLS`, `SEARCH_TOOLS` and `tool_kind`, make the auto-allow groups look
-broader than they are, and cost real time — they sent one investigation chasing
-tools that do not exist. Delete them, or comment them as deliberate
-forward-compatibility.
+Five names in `permission.rs` match no tool agy was observed to emit and none it
+self-reports: `view_code_item`, `codebase_search`, `edit_file`, `propose_code`,
+`command_status`. They sit in `READ_TOOLS`, `SEARCH_TOOLS` and `tool_kind`, make
+the auto-allow groups look broader than they are, and cost real time — they sent
+one investigation chasing tools that were never produced. Delete them, or comment
+them as deliberate forward-compatibility.
 
-Seven tools agy does have are unclassified: `manage_task`, `send_message`,
-`schedule`, `invoke_subagent`, `define_subagent`, `manage_subagents`,
-`generate_image`. They fall to `"other"` and always prompt, which is the right
-default but is reached by omission rather than decision. `schedule` and
-`invoke_subagent` are the two that most deserve a deliberate call, since one
-defers work past the current turn and the other spawns another agent.
+Seven tools in agy's self-reported list are unclassified here: `manage_task`,
+`send_message`, `schedule`, `invoke_subagent`, `define_subagent`,
+`manage_subagents`, `generate_image`. They fall to `"other"` and always prompt,
+which is the right default but is reached by omission rather than decision.
+`schedule` and `invoke_subagent` most deserve a deliberate call, since one defers
+work past the current turn and the other spawns another agent.
 
 #### Generated artifacts land outside the workspace
 
