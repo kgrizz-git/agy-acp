@@ -289,11 +289,29 @@ mod tests {
     use tokio::io::{AsyncBufReadExt, BufReader};
     use tokio::process::Command;
 
-    /// `true` while the pid names a process we could signal.
+    /// `true` while the pid names a process that is still running.
+    ///
+    /// A zombie does not count. `kill(pid, 0)` succeeds for one, and these are
+    /// grandchildren this process never reaps -- so on a machine whose PID 1 is
+    /// slow to reap, or is a test runner that never does, a killed process would
+    /// look alive forever and the tests would fail for the wrong reason.
     fn alive(pid: u32) -> bool {
         // SAFETY: signal 0 performs the permission and existence checks without
         // delivering anything.
-        unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+        if unsafe { libc::kill(pid as libc::pid_t, 0) != 0 } {
+            return false;
+        }
+        !ps_field(pid, "state=").is_some_and(|state| state.starts_with('Z'))
+    }
+
+    /// One `ps` column for one pid, or `None` if it has gone entirely.
+    fn ps_field(pid: u32, field: &str) -> Option<String> {
+        let output = std::process::Command::new("ps")
+            .args(["-p", &pid.to_string(), "-o", field])
+            .output()
+            .ok()?;
+        let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        (!value.is_empty()).then_some(value)
     }
 
     /// Reproduces agy's shape: `agy -> zsh -c '<command>' -> <command>`, with the
@@ -302,16 +320,20 @@ mod tests {
     ///
     /// Two levels below the child on purpose. A one-level tree would let a walk
     /// that only looks at direct children pass here and still miss the command
-    /// agy is actually running. `perl` is what does the `setpgrp`; it ships with
-    /// macOS and the CI runner images, and `exec` keeps the pid the shell
-    /// printed. The `; :` stops the inner `sh` from `exec`ing `sleep` in place,
-    /// which is the whole point -- it has to be a separate process.
+    /// agy is actually running. `set -m` turns on job control, which is what puts
+    /// the background subshell in a group of its own -- no external interpreter
+    /// needed for it. The `; :` stops that subshell from `exec`ing `sleep` in
+    /// place, which is the whole point: it has to be a separate process.
+    ///
+    /// The detachment is asserted rather than assumed. A shell that ignored
+    /// `set -m` would leave the subshell in our group and quietly turn this into
+    /// a weaker test than it looks.
     ///
     /// Returns the child, the middle pid, and the deepest pid.
     async fn spawn_detached_tree() -> (Child, u32, u32) {
         let mut child = Command::new("sh")
             .arg("-c")
-            .arg(r#"perl -e 'setpgrp; exec("sh", "-c", "sleep 30; :")' & echo $!; sleep 30"#)
+            .arg(r#"set -m; (sleep 30; :) & echo $!; sleep 30"#)
             .stdout(std::process::Stdio::piped())
             .spawn()
             .expect("spawn sh");
@@ -334,6 +356,14 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
         };
         assert!(alive(middle) && alive(deepest), "the tree must be up first");
+
+        let child_group = ps_field(child.id().expect("child pid"), "pgid=");
+        let middle_group = ps_field(middle, "pgid=");
+        assert!(
+            middle_group.is_some() && middle_group != child_group,
+            "the middle process must lead a group of its own, as agy's shells do \
+             (child {child_group:?}, middle {middle_group:?})"
+        );
         (child, middle, deepest)
     }
 
@@ -346,7 +376,7 @@ mod tests {
             if !alive(pid) {
                 return true;
             }
-            tokio::time::sleep(Duration::from_millis(20)).await;
+            tokio::time::sleep(Duration::from_millis(50)).await;
         }
         false
     }
