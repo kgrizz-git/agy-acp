@@ -47,7 +47,10 @@ def main():
     WORKSPACE.mkdir()
     marker = WORKSPACE / "marker.txt"
 
-    adapter = subprocess.Popen(
+    # An argument list with no shell, so there is nothing to inject into, and the
+    # only non-literal element is this script's own repo path from `__file__`.
+    # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-audit
+    adapter = subprocess.Popen(  # noqa: S603
         [str(BINARY), "--permission-prompts"],
         cwd=WORKSPACE,
         stdin=subprocess.PIPE,
