@@ -112,6 +112,16 @@ The label does not repeat the command because the prompt's `title` is already
 inside an option label wraps badly in a host's button. "this exact command"
 refers to the one shown directly above it.
 
+**This rests on an unverified host assumption.** "this exact command" is only
+meaningful if the host actually renders the tool-call `title` next to the
+options. Paseo's ACP integration reports that it hands back *normalized*
+permission payloads (`list_pending_permissions`), and nothing here has confirmed
+that the `title` survives normalization into the UI. Check it during the capture
+trip: with a prompt pending, read `list_pending_permissions` and confirm both the
+`title` and the four option `name` strings are present. If the title does not
+survive, the label must carry the command itself (truncated), because otherwise
+"this exact command" names something the user cannot see.
+
 ## Implementation
 
 ### 1. Key and wording (`src/permission.rs`)
@@ -365,3 +375,15 @@ step 3 that only checks for reprompts.
 End-to-end, the check that matters is the one in `TODO.md`'s Paseo item: drive a
 real agent through **Always allow** on one command, then a second, different
 command, and confirm the second prompts.
+
+Two host-side preconditions for that run, both established by inspecting the
+local Paseo 0.6.1 install:
+
+- The `agy` provider (`agents.providers.agy` in `~/.paseo/config.json`) extends
+  Paseo's generic `acp` provider, which exposes an **Auto Accept** toggle —
+  "Automatically approves ACP permission prompts". It is currently off, and it
+  must stay off for any of this to be observable: with it on, Paseo answers
+  every `session/request_permission` itself and no keying behaviour is
+  exercised. Confirm with `inspect_provider agy` before the run.
+- The binary the provider launches is `agy-acp` from `PATH`. Rebuild and
+  reinstall before testing — see the corrected note in `TODO.md`.
