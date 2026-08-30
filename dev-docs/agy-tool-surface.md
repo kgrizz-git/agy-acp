@@ -71,6 +71,20 @@ whether it appeared at all.
 `ImagePaths` is the one worth watching: if it holds paths it belongs in
 `PATH_FIELDS`, but no call has produced it, so it is not there yet.
 
+On whether to add a candidate before seeing it: the two failure directions are
+not symmetric, but neither is free. A missing name fails **silently** — the value
+is judged only by shape, so a relative path that escapes through a symlink is
+never checked. An extra name fails **loudly**, as a spurious prompt, and only for
+values that resolve outside the workspace; a plain relative value resolves inside
+and is not prompted. (Strictly, that holds once a workspace root is set. With no
+root the bridge fails closed and returns the first path-field value it finds
+without a containment check, so there an extra name prompts on anything — still
+the safe direction, and the adapter sets a root before the first hook call.) So over-inclusion is the safer error, not a costless one, and
+it is worth it when something independent says the field names a path — as with
+`FilePath`, which `tools.rs` and `protobuf.rs` already treat as a location. agy
+describing its own schema is not that: `FullPath` reads exactly like a path field
+and holds a boolean.
+
 ## Where agy writes
 
 `generate_image` takes no destination argument. Asked to save into the
