@@ -15,9 +15,9 @@ noted at the end so the next reader does not re-derive them.
 
 Both briefs (`dev-docs/investigations/kilo-hy3-brief.md`,
 `dev-docs/investigations/kilo-longcat-brief.md`) reach the same conclusion, and
-it holds up: exact-match keying needs an equivalence test, not a shell parser. Option 2 can never be
-complete — a path it fails to extract is a path that gets allowed — and option 3
-is evaded by `cat .en"v"`.
+it holds up: exact-match keying needs an equivalence test, not a shell parser.
+Option 2 can never be complete — a path it fails to extract is a path that gets
+allowed — and option 3 is evaded by `cat .en"v"`.
 
 The governing rule, from `TODO.md`: **the sticky key should be as specific as the
 checks that still apply to a remembered allow.** Tool-level keying is defensible
