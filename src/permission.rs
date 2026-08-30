@@ -88,7 +88,7 @@ struct BridgeState {
     /// The session is kept alongside the sender so that cancelling a turn can
     /// find that turn's requests. Without it a cancelled request keeps waiting
     /// for its full timeout, which then lands in whatever turn is running by
-    /// then -- see [`PermissionBridge::cancel_session`].
+    /// then -- see [`PermissionBridge::abandon_pending`].
     pending: HashMap<String, PendingRequest>,
     /// Sticky answers from "always" options.
     always: HashMap<AlwaysKey, Decision>,
@@ -199,21 +199,27 @@ impl PermissionBridge {
     pub async fn set_active_session(&self, session_id: Option<&str>) {
         let mut state = self.state.lock().await;
         state.active_session = session_id.map(str::to_string);
-        let Some(started) = state.active_session.clone() else {
+        if state.active_session.is_none() {
             return;
-        };
+        }
         state.refused_during_prompt = false;
-        // Anything still pending for this session belongs to a turn that is over,
-        // since turns for one session run one at a time. Clearing it here as well
-        // as at teardown is deliberate: teardown is a call that a future edit
-        // could drop, and this is the one place every turn must pass through, so
-        // a stale request cannot reach the flag this line just reset.
-        let stale: Vec<String> = state
-            .pending
-            .iter()
-            .filter(|(_, request)| request.session_id == started)
-            .map(|(id, _)| id.clone())
-            .collect();
+        // Every pending request belongs to a turn that is over, whatever session
+        // asked it: `handle_session_prompt` runs under the adapter mutex, so one
+        // turn runs at a time across the whole adapter, and this line is inside
+        // the turn that just took that lock. Nothing else can have a request in
+        // flight right now.
+        //
+        // Draining all of them, rather than only this session's, is the point.
+        // `refused_during_prompt` is one flag for the adapter, not one per
+        // session, so a request left behind by session A times out into
+        // whichever turn is running 540 seconds later -- session B's. Filtering
+        // by session here would leave exactly that case uncovered.
+        //
+        // Clearing here as well as at teardown is deliberate: teardown is a call
+        // a future edit could drop, and this is the one place every turn must
+        // pass through, so a stale request cannot reach the flag this line just
+        // reset.
+        let stale: Vec<String> = state.pending.keys().cloned().collect();
         for id in &stale {
             if let Some(request) = state.pending.remove(id) {
                 let _ = request.answer.send(Answer::Abandoned);
@@ -1986,6 +1992,49 @@ mod tests {
         assert!(
             !bridge.refused_during_prompt().await,
             "and it must not have marked the new turn a refusal"
+        );
+    }
+
+    /// The case a session-scoped drain leaves open. `refused_during_prompt` is
+    /// one flag for the whole adapter, so a request stranded by session A does
+    /// not time out into session A -- it times out into whatever turn is running
+    /// 540 seconds later. Starting *any* turn has to clear it.
+    #[tokio::test]
+    async fn starting_a_turn_clears_a_request_stranded_by_a_different_session() {
+        let workspace = std::env::temp_dir().join("agy-acp-turn-start-other-session-test");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let (bridge, mut rx) = test_bridge(&workspace.display().to_string(), &[]).await;
+
+        // Belongs to session-1, via the conv-1 mapping test_bridge installs.
+        let stranded = {
+            let bridge = bridge.clone();
+            tokio::spawn(async move {
+                bridge
+                    .decide(&json!({
+                        "conversationId": "conv-1",
+                        "toolCall": { "name": "run_command", "args": { "CommandLine": "ls" } },
+                    }))
+                    .await
+            })
+        };
+        expect_permission_request(&mut rx).await;
+
+        // Session-1's turn ended without draining, and the next turn is a
+        // different session's. Nothing here mentions session-1.
+        bridge.set_active_session(Some("session-2")).await;
+
+        let (decision, _) = tokio::time::timeout(std::time::Duration::from_secs(5), stranded)
+            .await
+            .expect("session-1's leftover must not survive into session-2's turn")
+            .unwrap();
+        assert_eq!(decision, Decision::Deny);
+        assert!(
+            bridge.state.lock().await.pending.is_empty(),
+            "nothing may be left to time out during session-2's turn"
+        );
+        assert!(
+            !bridge.refused_during_prompt().await,
+            "and session-2 must not be reported as a refusal"
         );
     }
 

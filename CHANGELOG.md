@@ -33,13 +33,16 @@ below.
   same consequence, and nothing else would ever have cleared it. A late answer
   from the host is dropped rather than applied, so an "always allow" arriving
   afterwards cannot become sticky for the rest of the session. Starting a turn
-  clears anything still pending for that session as well, in the same place the
-  refusal flag is reset — turns for one session run one at a time, so a leftover
-  there can only belong to a turn that is over, and routing it through the one
-  point every turn must pass keeps a dropped teardown call from being enough to
-  bring the bug back. The host may still
-  be showing the prompt: ACP has no way to retract a request, and a host that
-  cancels is expected to dismiss its own.
+  clears everything still pending as well, in the same place the refusal flag is
+  reset — one turn runs at a time across the whole adapter, so a leftover there
+  can only belong to a turn that is over, and routing it through the one point
+  every turn must pass keeps a dropped teardown call from being enough to bring
+  the bug back. It clears every session's, not just the starting session's:
+  the refusal flag is one flag for the adapter rather than one per session, so a
+  request stranded by one session times out into whichever turn is running nine
+  minutes later, which is somebody else's. The host may still be showing the
+  prompt: ACP has no way to retract a request, and a host that cancels is
+  expected to dismiss its own.
 
 - Cancelling a turn stops the command, not just agy. `session/cancel` killed the
   `agy` process alone, and agy runs a tool call by shelling out, so the shell and
