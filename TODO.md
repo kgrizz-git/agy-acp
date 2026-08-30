@@ -58,6 +58,8 @@ When it becomes useful to run paid e2e on pull requests:
 
 #### Permission decisions ignore what a command actually does
 
+Plan: plans/permission-command-keying.md
+
 Remembered answers are keyed by `(session, tool name)`, so one "Always allow" on
 `run_command` approves every later command in that session. The containment and
 sensitive-path checks do still run on a remembered allow, but they read arguments
