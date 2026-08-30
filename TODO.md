@@ -16,8 +16,8 @@ The few things worth picking up next. Each is a pointer; the detail lives below.
   reopened-thread path.
 - [Permission decisions ignore what a command actually does](#permission-decisions-ignore-what-a-command-actually-does)
   — one "Always allow" on `run_command` covers every later command.
-- [Confirm the path-field list for the tools not yet seen](#confirm-the-path-field-list-for-the-tools-not-yet-seen)
-  — five of fourteen tools checked; the rest could still carry an unknown field.
+- [Reconcile the tool lists with agy's real toolset](#reconcile-the-tool-lists-with-agys-real-toolset)
+  — five names are for tools agy lacks; seven of its tools are unclassified.
 - [Rename the binary and crate](#rename-the-binary-and-crate) — cheaper now than
   after anyone else installs it.
 - [Configure the protected e2e environment](#configure-the-protected-e2e-environment)
@@ -46,13 +46,27 @@ Two things came out of it: the cancellation defect recorded below, and a live
 reproduction of the "Always allow" gap — approving `echo verification-one`
 auto-approved a later `rm -f other.txt` with no prompt, and the file was deleted.
 
-**Still untested: the reopened-thread path.** `session/load` and the load replay
-have only ever run under a scripted client. Note the adapter advertises both
-`loadSession` and `sessionCapabilities.resume`, and Paseo's ACP client knows both
-`session/load` and `session/resume` — which one it actually sends when a thread is
-reopened is unverified, so establish that first; testing the wrong method proves
-nothing. Close the agent in Paseo, reopen the thread, and confirm the transcript
-replays and the session keeps working. Concurrent sessions are also untested.
+Session restore across an adapter restart also works. Killing the `agy-acp`
+process out from under a live agent made Paseo respawn it, and the agent then
+answered two questions from the earlier transcript — the first command's output
+and a file's edited contents — with no tool calls. So the session was restored and
+agy's conversation continued.
+
+That is narrower than it sounds, and the remaining gap is worth stating exactly.
+It proves continuity via `--conversation`; it does *not* separately prove the
+adapter's own replay path (`db.rs`/`protobuf.rs` parsing agy's conversation DB to
+re-send history to the host), because Paseo keeps its own timeline and would show
+the prior messages either way. Nor does it establish which method Paseo sends —
+the adapter advertises both `loadSession` and `sessionCapabilities.resume`, and
+Paseo's ACP client knows both `session/load` and `session/resume`. To close it
+properly, tee the adapter's stdio and read which method arrives, then confirm the
+replayed updates match the DB. Concurrent sessions are also still untested.
+
+One cosmetic Paseo quirk, noted so it is not mistaken for an adapter bug: Paseo's
+normalized permission payload puts the tool-call *title* into the structured
+field, so a shell request arrives as `detail.command: "Run \`echo hi\`"` and an
+edit as `detail.filePath: "write_to_file /path/to/x"`, rather than the bare
+command or path. Our `rawInput` is passed through untouched.
 
 ### Configure the protected e2e environment
 
@@ -153,34 +167,45 @@ Note the same absence has a visible consequence today: a session reloaded in the
 same process inherits the "Always" answers it was given earlier. That is within
 what the README promises, but it is worth deciding rather than inheriting.
 
-#### Confirm the path-field list for the tools not yet seen
+#### Reconcile the tool lists with agy's real toolset
 
-`PATH_FIELDS` in `permission.rs` decides which arguments are judged as paths
-whatever their value looks like, and a field it does not know falls back to the
-shape tests, so a miss costs coverage quietly.
+Reference: [dev-docs/agy-tool-surface.md](dev-docs/agy-tool-surface.md), which
+records what agy 1.1.22 actually sends and how it was captured.
 
-Five tools have now been observed against real agy 1.1.22 traffic, and every path
-argument in them is already covered:
+Capturing it closed the path-field question — `SearchDirectory` was missing and is
+now fixed — but turned up a mismatch in both directions that is still open.
 
-```
-run_command           Cwd
-view_file             AbsolutePath
-grep_search           SearchPath   (and Query, correctly not a path)
-write_to_file         TargetFile
-replace_file_content  TargetFile
-```
+Five names in `permission.rs` match no tool agy was observed to emit and none it
+self-reports: `view_code_item`, `codebase_search`, `edit_file`, `propose_code`,
+`command_status`. They sit in `READ_TOOLS`, `SEARCH_TOOLS` and `tool_kind`, make
+the auto-allow groups look broader than they are, and cost real time — they sent
+one investigation chasing tools that were never produced. Delete them, or comment
+them as deliberate forward-compatibility.
 
-That is five of the fourteen tools this fork handles. Still unobserved:
-`view_code_item`, `list_dir`, `read_url_content`, `codebase_search`,
-`find_by_name`, `edit_file`, `propose_code`, `command_status`, `search_web`, and
-whatever agy uses to delete a file. The entry's premise — that an unseen tool may
-carry a path field under a name the list does not know — is therefore still live,
-so this stays open rather than being closed on the five.
+Seven tools in agy's self-reported list are unclassified here: `manage_task`,
+`send_message`, `schedule`, `invoke_subagent`, `define_subagent`,
+`manage_subagents`, `generate_image`. They fall to `"other"` and always prompt,
+which is the right default but is reached by omission rather than decision.
+`schedule` and `invoke_subagent` most deserve a deliberate call, since one defers
+work past the current turn and the other spawns another agent.
 
-Capture the rest the same way: a `PreToolUse` hook that appends the payload and
-allows, driven by `agy -p ... --add-dir <ws> --dangerously-skip-permissions`. No
-adapter build and no Paseo needed. A prompt that lists a directory, searches by
-name, reads a URL and deletes a file should cover most of the gap.
+#### Generated artifacts land outside the workspace
+
+`generate_image` takes no destination argument and writes to
+`~/.gemini/antigravity-cli/brain/<conversation-id>/`. This is normal Antigravity
+behaviour — Gemini writes to its own internal workspace unless told otherwise —
+so the work here is not to treat it as a defect but to decide what this adapter
+says and does about it.
+
+Two consequences. The bridge cannot constrain a destination that is not in the
+arguments, so the README's "only inside the workspace" limit does not describe
+this tool and should say so. And the adapter passes the user's workspace with
+`--add-dir` without instructing agy to prefer it for artifacts; if generated files
+should land in the workspace, that has to be stated explicitly somewhere agy
+reads.
+
+Worth checking which other tools share the behaviour before deciding — anything
+that produces a file without taking a path is in the same position.
 
 #### Workspace-supplied hooks
 
@@ -210,7 +235,8 @@ proving it was created by this adapter.
 
 #### Cancelling a turn leaves the command running
 
-Found by the Paseo verification on 2026-08-30. `session/cancel` kills the `agy` child with `child.kill()`, which
+Found by the Paseo verification on 2026-08-30. `session/cancel` kills the `agy`
+child with `child.kill()`, which
 signals that one process and nothing beneath it. agy has already spawned a shell
 for the tool call, so the shell and the command it is running survive, get
 reparented to PID 1, and run to completion.

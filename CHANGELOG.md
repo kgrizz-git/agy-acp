@@ -17,13 +17,25 @@ session. The reopened-thread path (`session/load` or `session/resume` — which
 Paseo sends is not yet established) is still untested, and the verification turned
 up a cancellation defect. Both are in [TODO.md](TODO.md).
 
+### Fixed
+
+- Judge `find_by_name`'s `SearchDirectory`, and `FilePath`, as paths.
+  `SearchDirectory` was missing from `PATH_FIELDS`, so a relative value — with no
+  leading `/`, no `~` and no `..` — was judged by neither the field-name test nor
+  the shape tests, and a search directory that left the workspace through a
+  symlink would not have been prompted. Found by capturing real agy traffic.
+  `FilePath` was added on separate evidence: `tools.rs` and `protobuf.rs` already
+  treated it as naming a location while `PATH_FIELDS` did not.
+
 ### Maintenance
 
-- Check `PATH_FIELDS` against real agy 1.1.22 traffic for `run_command`,
-  `view_file`, `grep_search`, `write_to_file` and `replace_file_content`. Every
-  path argument those five send is already covered, and `Query` is correctly not
-  treated as one, so no change was needed. Nine of the fourteen handled tools
-  remain unchecked; the item stays open in [TODO.md](TODO.md).
+- Check `PATH_FIELDS` against real agy 1.1.22 traffic. One field was missing (see
+  Fixed above); every other path argument observed is covered, and `Url`, `query`
+  and the boolean `FullPath` are correctly not treated as paths. Also established
+  agy's tool surface as observed in 1.1.22, which does not match this fork's
+  assumptions: five tool names in `permission.rs` match nothing agy emitted or
+  self-reported, and seven tools it does report are unclassified here. Both
+  recorded in [TODO.md](TODO.md).
 - Keep the Windows build portable by failing closed when the Unix-socket-based
   `--permission-prompts` feature is requested there.
 - Keep fork PRs from waiting on an e2e-environment approval they cannot use, and

@@ -754,8 +754,10 @@ fn resolve(path: &Path) -> Option<PathBuf> {
 const PATH_FIELDS: &[&str] = &[
     "AbsolutePath",
     "TargetFile",
+    "FilePath",
     "DirectoryPath",
     "SearchPath",
+    "SearchDirectory",
     "Cwd",
     "Paths",
 ];
@@ -1530,6 +1532,22 @@ mod tests {
             outside_workspace(&json!({ "AbsolutePath": "link/secret.txt" }), &roots).as_deref(),
             Some("link/secret.txt"),
             "a plain relative path field still leaves through the symlink"
+        );
+        // `find_by_name` names its directory `SearchDirectory`, seen in real agy
+        // traffic. A relative value has no leading `/`, no `~` and no `..`, so the
+        // shape tests pass it; only the field name catches it.
+        assert_eq!(
+            outside_workspace(&json!({ "SearchDirectory": "link" }), &roots).as_deref(),
+            Some("link"),
+            "a relative SearchDirectory that leaves through a symlink is outside"
+        );
+        // `FilePath` has not been seen in agy traffic, but `tools.rs` and
+        // `protobuf.rs` both already treat it as naming a location, and the two
+        // lists disagreeing is the kind of gap this test exists to catch.
+        assert_eq!(
+            outside_workspace(&json!({ "FilePath": "link" }), &roots).as_deref(),
+            Some("link"),
+            "a relative FilePath that leaves through a symlink is outside"
         );
         assert_eq!(
             outside_workspace(&json!({ "Query": "link/secret.txt" }), &roots),
