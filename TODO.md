@@ -18,6 +18,8 @@ The few things worth picking up next. Each is a pointer; the detail lives below.
   — five names are for tools agy lacks; seven of its tools are unclassified.
 - [Automated quality gates: coverage, lint, complexity, size](#automated-quality-gates-coverage-lint-complexity-size)
   — nothing enforces tests, lint or size today; review habit is the only gate.
+- [Split the two files and the one function that have outgrown reading](#split-the-two-files-and-the-one-function-that-have-outgrown-reading)
+  — `handle_session_prompt` is 322 lines and is where every turn-lifecycle bug has been.
 - [Rename the binary and crate](#rename-the-binary-and-crate) — cheaper now than
   after anyone else installs it.
 - [Configure the protected e2e environment](#configure-the-protected-e2e-environment)
@@ -317,15 +319,55 @@ Wanted, roughly in order of value:
   lints and would need `#![warn(...)]` opt-in. Worth trying against
   `handle_session_prompt`, which is the one function that has grown past easy
   reading.
-- **File size.** `src/tests.rs` is 2419 lines and `src/permission.rs` is 2207. A
-  cap would force a split; whether that split improves anything is the question to
-  answer first, since both files are cohesive and the tests are already grouped by
-  subject.
+- **File size.** See the refactoring entry below; a cap is only worth setting once
+  the shape the code should end up in is decided.
+- **SonarCloud.** It has never analyzed this repo and never will as configured.
+  Automatic Analysis "is available for all of SonarQube Cloud's supported
+  languages except for Objective-C, Dart, and Rust", and separately requires 20%
+  of the project to be in a supported language — this repo is 96% Rust, with
+  Python and Shell together under 3%. Rust *is* supported by CI-based analysis,
+  so getting anything out of Sonar means a workflow running the scanner with a
+  `SONAR_TOKEN`, and it is worth deciding whether it earns its place next to
+  clippy and llvm-cov rather than turning it on because the account exists.
 
 Hooks and CI serve different ends here and both are wanted: a local hook gives
 the fast signal while writing (fmt, clippy, the unit tier), CI is what actually
 blocks a merge. A hook that duplicates CI slowly is worse than no hook, so scope
 the local one to what is quick.
+
+#### Split the two files and the one function that have outgrown reading
+
+Sizes as of this entry, from `wc -l` and a scan of function lengths:
+
+| Unit | Lines |
+|---|---|
+| `src/tests.rs` | 2419 |
+| `src/permission.rs` | 2207 |
+| `adapter.rs::handle_session_prompt` | 322 |
+| `permission.rs::decide` | 141 |
+
+`handle_session_prompt` is the one that actually hurts. It spawns agy, wires two
+reader tasks, runs the `select!` that races the child against cancellation, kills
+the tree, drains both readers, binds the conversation id, tears down the bridge,
+persists the session and builds the response — and it holds the single adapter
+mutex across all of it, which is its own entry above. Every recent bug in the
+turn lifecycle has been somewhere in this function, and each fix has had to be
+argued against the whole of it. Splitting the spawn/drain/teardown phases apart
+would let them be tested without a real agy, which is the gap review keeps
+finding: the call sites in there are covered by nothing.
+
+`decide` is long but linear — a policy cascade, read top to bottom. Lower value.
+
+The two big files are cohesive, so a split is only worth it with a real seam.
+`permission.rs` has an obvious one: the containment and path logic
+(`outside_workspace`, `is_inside`, `resolve`, `lexical_normalize`, `PATH_FIELDS`)
+is self-contained and heavily tested, and would move out whole. `tests.rs` is
+large because it is one flat module per subject; splitting it by subject is
+mechanical and would make the permission tests findable, which they currently are
+not.
+
+Do not do this while a behavioural change is in flight -- a move that touches
+every line makes the next real diff unreviewable.
 
 #### Replay without agy's private schema
 
