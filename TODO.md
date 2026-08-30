@@ -10,12 +10,14 @@ carries no work items.
 
 The few things worth picking up next. Each is a pointer; the detail lives below.
 
-- [Verify the port under Paseo](#verify-the-port-under-paseo) — the provider is
-  already wired up, but the installed binary predates the port.
+- [Cancelling a turn leaves the command running](#cancelling-a-turn-leaves-the-command-running)
+  — verified under Paseo: `child.kill()` orphans the shell it spawned.
+- [Verify the port under Paseo](#verify-the-port-under-paseo) — done except the
+  reopened-thread path.
 - [Permission decisions ignore what a command actually does](#permission-decisions-ignore-what-a-command-actually-does)
   — one "Always allow" on `run_command` covers every later command.
-- [Confirm the path-field list against real agy traffic](#confirm-the-path-field-list-against-real-agy-traffic)
-  — a path field this fork has not seen is judged only by how its value looks.
+- [Confirm the path-field list for the tools not yet seen](#confirm-the-path-field-list-for-the-tools-not-yet-seen)
+  — five of fourteen tools checked; the rest could still carry an unknown field.
 - [Rename the binary and crate](#rename-the-binary-and-crate) — cheaper now than
   after anyone else installs it.
 - [Configure the protected e2e environment](#configure-the-protected-e2e-environment)
@@ -25,34 +27,32 @@ The few things worth picking up next. Each is a pointer; the detail lives below.
 
 ### Verify the port under Paseo
 
-The stream-json port merged as `bf6e81b`. Everything verified so far was driven by
-a scripted ACP client: the four permission scenarios, load replay across
-processes, and the test suite. Nothing on `main` has run under Paseo itself, and
-cancellation (upstream's `child.kill()` path), concurrent sessions and subagent
-events are untested anywhere.
+Mostly done on 2026-08-30, against the binary built from `11e2b48` and installed
+to `~/.local/bin/agy-acp`. Driven through Paseo 0.6.1 as a real `agy` agent
+(`gemini-3.7-flash-low`) in a scratch workspace.
 
-This is a *reinstall*, not a first install — the earlier wording here ("installed
-nowhere yet") was wrong. Inspecting the local Paseo 0.6.1 install found:
+Confirmed end to end, by checking the filesystem rather than trusting the
+transcript: the permission bridge, `run_command` (`rm` deleted its file),
+`write_to_file` and `replace_file_content` (`draft.txt` was created reading
+`first draft` and then edited to `second draft`), `view_file`, and remembered
+"Always allow". Conversation *continuation* within one session works — the child
+was invoked with `--conversation <id>` across turns — which is not the same as the
+reopened-thread path below. The live process tree showed
+`agy --add-dir <ws> --add-dir <hook root> --output-format stream-json
+--conversation <id> --dangerously-skip-permissions`, which is the port running
+for real rather than inferred from the binary's contents.
 
-- `~/.local/bin/agy-acp` already exists, built 2026-08-21. It predates the
-  stream-json port (2026-08-24): no `stream-json` string in the binary. It has
-  the permission bridge but not the port, `PATH_FIELDS`, or anything from PR #3.
-- Paseo is already wired to it. `agents.providers.agy` in `~/.paseo/config.json`
-  is a user-defined provider extending Paseo's generic `acp` provider, with
-  `command: ["agy-acp", "--permission-prompts"]`, and it reports
-  `status: "available"`. So the provider setup is done; only the binary is stale.
-- That generic `acp` provider exposes an **Auto Accept** feature toggle,
-  "Automatically approves ACP permission prompts" (currently off). It is a
-  host-side answer to `session/request_permission`, so with it on the adapter
-  still gates but the user never sees a prompt. Keep it off for any permission
-  testing, and note the README currently says the adapter "becomes the only gate
-  on tool execution" without mentioning that a host can auto-answer.
-- Paseo reports `modes: []` for `agy` — no session-mode UI, unlike its Claude and
-  Copilot providers. Relates to "More ACP configuration" below.
+Two things came out of it: the cancellation defect recorded below, and a live
+reproduction of the "Always allow" gap — approving `echo verification-one`
+auto-approved a later `rm -f other.txt` with no prompt, and the file was deleted.
 
-So: rebuild, install to `~/.local/bin` with `codesign -f -s -`, restart the
-daemon, then drive one real agent through a permission prompt, a reopened thread,
-and a cancellation.
+**Still untested: the reopened-thread path.** `session/load` and the load replay
+have only ever run under a scripted client. Note the adapter advertises both
+`loadSession` and `sessionCapabilities.resume`, and Paseo's ACP client knows both
+`session/load` and `session/resume` — which one it actually sends when a thread is
+reopened is unverified, so establish that first; testing the wrong method proves
+nothing. Close the agent in Paseo, reopen the thread, and confirm the transcript
+replays and the session keeps working. Concurrent sessions are also untested.
 
 ### Configure the protected e2e environment
 
@@ -91,6 +91,12 @@ pinned by tests that assert today's behaviour deliberately
 (`always_allow_is_remembered_per_tool_not_per_command` and
 `a_path_inside_a_command_string_is_invisible_to_the_containment_check`), so
 closing the gap turns them red and forces the README to be updated with it.
+
+Reproduced live under Paseo on 2026-08-30, which is worth more than the test that
+asserts it: **Always allow** was given to `echo verification-one`, and a later
+`rm -f other.txt` then ran with no prompt at all and deleted the file. Nothing
+adversarial was involved — it was an ordinary follow-up request in the same
+session, which is the point.
 
 Documented in the README under "What 'Always' remembers", with a warning to
 prefer **Allow** over **Always allow** for `run_command`. Three ways out, roughly
@@ -147,46 +153,34 @@ Note the same absence has a visible consequence today: a session reloaded in the
 same process inherits the "Always" answers it was given earlier. That is within
 what the README promises, but it is worth deciding rather than inheriting.
 
-#### Confirm the path-field list against real agy traffic
+#### Confirm the path-field list for the tools not yet seen
 
 `PATH_FIELDS` in `permission.rs` decides which arguments are judged as paths
-whatever their value looks like. It was assembled from the field names this
-repository already handles — `AbsolutePath`, `TargetFile`, `DirectoryPath`,
-`SearchPath`, `Cwd`, `Paths` — not from agy's schema, which is not published.
-A field it does not know keeps the shape-based tests and nothing else, so a
-miss costs coverage quietly and never announces itself.
+whatever their value looks like, and a field it does not know falls back to the
+shape tests, so a miss costs coverage quietly.
 
-Partly done. A capture against agy 1.1.22 (hook that appends the payload and
-allows, driven by `agy -p ... --add-dir <ws> --dangerously-skip-permissions` —
-no adapter build and no Paseo needed) exercised three tools:
+Five tools have now been observed against real agy 1.1.22 traffic, and every path
+argument in them is already covered:
 
 ```
-run_command  args: CommandLine, Cwd, WaitMsBeforeAsync, toolAction, toolSummary
-view_file    args: AbsolutePath, toolAction, toolSummary
-grep_search  args: Query, SearchPath, toolAction, toolSummary
+run_command           Cwd
+view_file             AbsolutePath
+grep_search           SearchPath   (and Query, correctly not a path)
+write_to_file         TargetFile
+replace_file_content  TargetFile
 ```
 
-Every path argument there is already in `PATH_FIELDS` (`AbsolutePath`,
-`SearchPath`, `Cwd`) and `Query` is correctly not, so for these three the
-shape-based fallback is not quietly carrying the load. The non-path additions
-(`toolAction`, `toolSummary`, `WaitMsBeforeAsync`) are model-authored display and
-pacing fields.
+That is five of the fourteen tools this fork handles. Still unobserved:
+`view_code_item`, `list_dir`, `read_url_content`, `codebase_search`,
+`find_by_name`, `edit_file`, `propose_code`, `command_status`, `search_web`, and
+whatever agy uses to delete a file. The entry's premise — that an unseen tool may
+carry a path field under a name the list does not know — is therefore still live,
+so this stays open rather than being closed on the five.
 
-What is left is the write side — the edit, create and delete tools, plus
-`list_dir` and the network tools — which this capture never triggered. Repeat it
-with a prompt that writes and deletes files.
-
-No adapter change is needed to capture them. The `session/request_permission`
-request already carries the full argument object as `rawInput`, and the default
-auto-allow list is only `ask_question`, so nearly every tool call prompts and
-every prompt shows its arguments. Point the Paseo provider's `command` at a
-wrapper script that runs the real binary through `tee` and read the captured
-JSON-RPC afterwards, rather than adding payload logging to the adapter — a debug
-switch that writes command lines to disk is not something to carry in the tree.
-
-It also answered the open question in
-[plans/permission-command-keying.md](plans/permission-command-keying.md):
-`run_command` does carry `Cwd`, so the sticky key has to cover it.
+Capture the rest the same way: a `PreToolUse` hook that appends the payload and
+allows, driven by `agy -p ... --add-dir <ws> --dangerously-skip-permissions`. No
+adapter build and no Paseo needed. A prompt that lists a directory, searches by
+name, reads a URL and deletes a file should cover most of the gap.
 
 #### Workspace-supplied hooks
 
@@ -213,6 +207,43 @@ never recursively delete a merely prefix-matching stale directory without
 proving it was created by this adapter.
 
 ### Reliability and lifecycle
+
+#### Cancelling a turn leaves the command running
+
+Found by the Paseo verification on 2026-08-30. `session/cancel` kills the `agy` child with `child.kill()`, which
+signals that one process and nothing beneath it. agy has already spawned a shell
+for the tool call, so the shell and the command it is running survive, get
+reparented to PID 1, and run to completion.
+
+Observed directly. With `sleep 45 && echo finished-sleeping` running under a
+cancelled turn:
+
+```
+after cancel:
+  agy child procs:  0                                   <- killed
+  adapter procs:    1                                   <- still serving, correct
+  94091  ppid=1     zsh -c sleep 45 && echo ...         <- orphaned, still running
+  94092  ppid=94091 sleep 45                            <- still running
+```
+
+`sleep` is harmless. A long build, a `curl`, a `rm -rf`, or anything with side
+effects is not: the user is told the turn was cancelled while the work continues,
+which is worse than not offering cancellation at all, because it is silent.
+
+The fix is to put `agy` in its own process group at spawn and signal the group
+rather than the pid — `process_group(0)` on the `Command`, then `killpg` — with
+a fallback to the current single-process kill where that is unavailable. Note
+Paseo hit this exact class of bug in its own Claude provider and solved it with a
+`terminateWithTreeKill` helper, commented "the SDK's internal cleanup may only
+kill the direct child process", so the shape of the fix is not controversial.
+
+Adapter shutdown is worse, not merely the same. `child.kill()` at
+`adapter.rs:954` is the *only* kill in the codebase — there is no signal handler,
+no `Drop` impl and no `kill_on_drop`, so when the adapter exits it does not kill
+agy at all and the whole tree is orphaned silently. The fix is therefore "every
+kill path is a group kill, and there needs to be one on exit", not "add the group
+flag to the existing shutdown kill" — a reader who goes looking for shutdown kill
+code will not find any.
 
 #### Global prompt serialization
 

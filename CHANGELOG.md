@@ -10,14 +10,20 @@ of its own yet, so everything below is unreleased.
 
 ## Unreleased
 
-The stream-json port merged as `bf6e81b` (PR #1) and has not been installed
-anywhere yet — though an *older* build of the adapter is installed at
-`~/.local/bin/agy-acp` and Paseo is already wired to it, so verifying the port is
-a reinstall rather than a first install. See "Verify the port under Paseo" in
-[TODO.md](TODO.md).
+The stream-json port merged as `bf6e81b` (PR #1) and was first installed and
+exercised under Paseo on 2026-08-30. The permission bridge and the read, write and
+edit tools all work, and a conversation continues correctly across turns within a
+session. The reopened-thread path (`session/load` or `session/resume` — which
+Paseo sends is not yet established) is still untested, and the verification turned
+up a cancellation defect. Both are in [TODO.md](TODO.md).
 
 ### Maintenance
 
+- Check `PATH_FIELDS` against real agy 1.1.22 traffic for `run_command`,
+  `view_file`, `grep_search`, `write_to_file` and `replace_file_content`. Every
+  path argument those five send is already covered, and `Query` is correctly not
+  treated as one, so no change was needed. Nine of the fourteen handled tools
+  remain unchecked; the item stays open in [TODO.md](TODO.md).
 - Keep the Windows build portable by failing closed when the Unix-socket-based
   `--permission-prompts` feature is requested there.
 - Keep fork PRs from waiting on an e2e-environment approval they cannot use, and

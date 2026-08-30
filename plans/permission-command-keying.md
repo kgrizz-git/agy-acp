@@ -116,6 +116,60 @@ grep_search  args: Query, SearchPath, toolAction, toolSummary
 Payload top level: `conversationId`, `stepIdx`, `toolCall`, `modelName`,
 `workspacePaths`, `transcriptPath`, `artifactDirectoryPath`.
 
+Extended on 2026-08-30 by driving a real Paseo agent and reading `rawInput` off
+the `session/request_permission` requests, which reaches the same arguments by a
+different route and agreed exactly on the three tools above. It added the write
+side:
+
+```
+write_to_file         args: TargetFile, CodeContent, Description, Overwrite,
+                            ArtifactMetadata{RequestFeedback,Summary,UserFacing},
+                            toolAction, toolSummary
+replace_file_content  args: TargetFile, TargetContent, ReplacementContent,
+                            Instruction, StartLine, EndLine, AllowMultiple,
+                            Description, toolAction, toolSummary
+```
+
+Three things worth carrying forward.
+
+**D1b is what makes the key work, and here is the measurement.** Eight calls of
+the byte-identical command `echo drift-test`, across four turns and three
+separate conversations:
+
+```
+distinct key sets                                  1
+distinct toolSummary values                        8   <- one per call
+distinct WaitMsBeforeAsync values                  2   (500, 1000)
+distinct fingerprints AFTER stripping UNKEYED_FIELDS   1
+  {"CommandLine": "echo drift-test", "Cwd": "/tmp/agy-drift-..."}
+```
+
+`toolSummary` varied on *every single call* — it even numbered itself "Echo
+drift-test 1" through "5" within one turn. So the unstripped fingerprint would
+have produced eight different keys for one command, and "Always allow" would have
+matched exactly never. Stripping the three fields collapses all eight to one
+stable key. The feature works, but only because of D1b.
+
+**Command-tool arguments do not drift structurally.** All eight calls carried the
+same five keys. An earlier revision of this section claimed the key *set* drifts
+and that "Always allow" would therefore re-prompt more often than exact matching
+implies — that was overstated, generalized from a single `write_to_file`
+observation where an original and its retry differed by the presence of
+`ArtifactMetadata`. That remains true of that pair and is recorded below, but it
+was a retry of a failed call, not two ordinary calls, and nothing like it appears
+in `run_command` traffic. For command tools the fingerprint is stable, and the
+sticky answer should hit reliably.
+
+**agy does nest model-authored prose.** `ArtifactMetadata.Summary` and
+`Description` are the same class as `toolSummary`. This does not affect the design
+— `write_to_file` is not a command tool, neither D3 detector fires, and it keeps
+tool-level keying with no fingerprint at all — but anyone later extending
+fingerprinting to path tools will meet it immediately. Note the shape of the fix
+if that happens: strip the whole `ArtifactMetadata` object by its top-level name.
+Do *not* reach for recursion and a `Summary` entry in `UNKEYED_FIELDS`; stripping
+every field named `Summary` at any depth is precisely the over-normalization the
+top-level rule exists to prevent.
+
 Two things follow beyond the key design. Every observed path argument is already
 in `PATH_FIELDS` (`AbsolutePath`, `SearchPath`, `Cwd`), and `Query` is correctly
 *not* — so the shape-based fallback is not silently carrying the load for these
