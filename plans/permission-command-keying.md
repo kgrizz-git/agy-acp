@@ -89,7 +89,14 @@ Detect with the union of two cheap tests, and take per-command keying if
 
 Detector 1 catches a command tool whose argument shape the fork has not seen;
 detector 2 catches a command-executing tool whose *name* the fork has not seen.
-Either miss falls back to today's tool-level keying — unchanged behaviour, still
+
+To be unambiguous, because this is the sentence an implementer will act on:
+`sticky_scope` returns `Some(args.to_string())` when **either** detector fires.
+It returns `None` only when **both** miss. Reading this as an AND would leave a
+known command tool with an unfamiliar argument shape on the old tool-only key,
+which is the exact bypass this plan exists to close.
+
+Both missing falls back to today's tool-level keying — unchanged behaviour, still
 documented, not a regression, but also silent. Note that in the code comment.
 
 The earlier draft chose detector 2 alone on the grounds that it follows
@@ -229,9 +236,27 @@ an `.await`, so it cannot deadlock with the async mutex.
 The `Arc` also covers the spawned-prompt path: `handle_session_prompt` calls
 `restore_session_state` → `evict_if_needed` from inside the spawned task, so
 those victims are queued while no dispatcher iteration is in flight and get
-drained on the next one. Cleanup lagging an eviction by one dispatch is
-harmless — session ids are fresh UUIDs and are never reused, so a stale entry in
-the window can only match a session that no longer exists.
+drained on the next one.
+
+**A queued id can come back before it is drained**, so the queue needs one more
+rule. An earlier draft of this plan justified the lag with "session ids are fresh
+UUIDs and are never reused" — that is wrong. It is true of `session/new`, which
+mints a UUID, but `session/load`, `session/resume` and prompt restoration all
+take a *caller-supplied* id that was persisted in `sessions.json`. So the id of
+an evicted session can be readmitted to the map, by the host, inside the drain
+window.
+
+The fix is not a generation counter. It is to cancel the queued forget when the
+id comes back: at both session insert sites — `handle_session_new`
+(`adapter.rs:467`) and `restore_session_state` (`adapter.rs:432`) — remove that
+id from `pending_forget` before inserting. Sync, inside the adapter, no lock
+ordering to reason about, and it states the intent directly: forget this
+session's answers unless the session came back.
+
+Note that the residual harm without this rule is bounded — a wrongly drained id
+costs the user a prompt and can never grant one, because forgetting only ever
+removes remembered answers. It is still worth closing: a permission map that
+silently empties under a race is the kind of thing that gets debugged twice.
 
 Add `pub async fn forget_session(&self, session_id: &str)` to the bridge:
 
@@ -294,6 +319,10 @@ Add:
 - `forget_session_clears_remembered_answers` — approve with `allow_always`, call
   `bridge.forget_session(&session_id).await`, assert the next identical call
   prompts.
+- `readmitting_an_evicted_session_cancels_its_queued_forget` in `src/tests.rs` —
+  evict an id, restore it with `restore_session_state`, and assert
+  `pending_forget` no longer names it. Pins the rule above; without it the queue
+  is one race away from clearing a live session's answers.
 - `evicting_a_session_queues_its_answers_for_forgetting` in `src/tests.rs`,
   alongside `evict_if_needed_drops_the_least_recently_used_session` — fill past
   `MAX_SESSIONS`, call `evict_if_needed()`, assert the victim id appears in

@@ -7,6 +7,14 @@
 
 ---
 
+> **Superseded on one point.** This brief is kept as the investigation record, not
+> as the specification. Its R1 keys the sticky answer by the `CommandLine` string
+> alone; [plans/permission-command-keying.md](../../plans/permission-command-keying.md)
+> supersedes that with a fingerprint of the *whole* argument object, because
+> keying on `CommandLine` alone drops security-relevant siblings such as `Cwd`
+> from the scope of what the user approved. Implement the plan, not this. The
+> rest of the analysis here stands, and the plan is built on it.
+
 ## 1. Problem Statement
 
 The permission bridge's "Always allow" / "Always reject" feature remembers decisions
