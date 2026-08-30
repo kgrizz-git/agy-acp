@@ -14,10 +14,32 @@ The stream-json port merged as `bf6e81b` (PR #1) and was first installed and
 exercised under Paseo on 2026-08-30. The permission bridge and the read, write and
 edit tools all work, and a conversation continues correctly across turns within a
 session. The reopened-thread path (`session/load` or `session/resume` — which
-Paseo sends is not yet established) is still untested, and the verification turned
-up a cancellation defect. Both are in [TODO.md](TODO.md).
+Paseo sends is not yet established) is still untested; it is in
+[TODO.md](TODO.md). The cancellation defect the verification turned up is fixed
+below.
 
 ### Fixed
+
+- Cancelling a turn stops the command, not just agy. `session/cancel` killed the
+  `agy` process alone, and agy runs a tool call by shelling out, so the shell and
+  its command were reparented to PID 1 and ran to completion — verified against
+  agy 1.1.22 by cancelling `sleep 45 && touch marker` and watching the marker
+  appear 45 seconds later, and by the same route a build, a `curl` or an `rm -rf`
+  would have finished too. A cancel now kills agy's whole process tree: agy is
+  stopped so it cannot start anything else, the process table is read while agy
+  is still alive to hold the parent links, whatever is found is stopped too and
+  the table read again until a read turns up nothing new — stopping agy does not
+  stop the shell it already started, and that shell can fork its next command
+  between two reads — and then the lot is killed, agy last. Killing agy's *process group* would have been the obvious
+  fix and does not work: agy puts each command it runs into a process group of
+  its own, so `killpg` on agy reaches agy and nothing else. agy is still spawned
+  into its own group, but only so that a signal aimed at the adapter's group
+  cannot kill agy first — which would erase the parent links the walk needs. The
+  adapter also kills those trees on `SIGTERM`, `SIGINT` and `SIGHUP`; previously
+  there was no kill on exit at all, no signal handler and no `Drop`, so
+  terminating the adapter orphaned the whole tree silently. On a non-Unix target there is no process table to
+  walk, so a cancel kills the direct child as it always did, and there is no
+  shutdown kill at all.
 
 - Judge `find_by_name`'s `SearchDirectory`, and `FilePath`, as paths.
   `SearchDirectory` was missing from `PATH_FIELDS`, so a relative value — with no
@@ -29,6 +51,9 @@ up a cancellation defect. Both are in [TODO.md](TODO.md).
 
 ### Maintenance
 
+- `pr_compliance_checklist.yaml` gains a rule for what a cancel has to reach, so
+  an automated review that sees `child.kill()` reappear on a kill path, or the
+  walk swapped back for `killpg`, has the measurement to judge it by.
 - Check `PATH_FIELDS` against real agy 1.1.22 traffic. One field was missing (see
   Fixed above); every other path argument observed is covered, and `Url`, `query`
   and the boolean `FullPath` are correctly not treated as paths. Also established

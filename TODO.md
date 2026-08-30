@@ -10,8 +10,6 @@ carries no work items.
 
 The few things worth picking up next. Each is a pointer; the detail lives below.
 
-- [Cancelling a turn leaves the command running](#cancelling-a-turn-leaves-the-command-running)
-  — verified under Paseo: `child.kill()` orphans the shell it spawned.
 - [Verify the port under Paseo](#verify-the-port-under-paseo) — done except the
   reopened-thread path.
 - [Permission decisions ignore what a command actually does](#permission-decisions-ignore-what-a-command-actually-does)
@@ -231,45 +229,38 @@ created with `create_dir_all` and made read-only only after writing
 never recursively delete a merely prefix-matching stale directory without
 proving it was created by this adapter.
 
+Related: the hook root is deleted by `HookRoot`'s `Drop`, and the signal handler
+added with the cancellation fix ends the process with `std::process::exit`, which
+runs no destructors. A signalled adapter therefore leaves its hook root behind,
+and the bridge's socket with it. This is not a regression — an unhandled
+`SIGTERM` skipped the same `Drop` — but handling the signal is what makes
+cleaning up there possible at all.
+
 ### Reliability and lifecycle
 
-#### Cancelling a turn leaves the command running
+#### A cancel leaves an open permission request unanswered
 
-Found by the Paseo verification on 2026-08-30. `session/cancel` kills the `agy`
-child with `child.kill()`, which
-signals that one process and nothing beneath it. agy has already spawned a shell
-for the tool call, so the shell and the command it is running survive, get
-reparented to PID 1, and run to completion.
+Cancelling a turn now kills agy's whole process tree, which includes the
+`PreToolUse` hook waiting on a decision. The bridge task behind it is not told:
+it stays in `pending`, the host keeps showing a permission prompt for a turn that
+is already dead, and nothing arrives to answer it until the 540 s timeout in
+`decide()` fires (`src/permission.rs:343`).
 
-Observed directly. With `sleep 45 && echo finished-sleeping` running under a
-cancelled turn:
+That timeout then calls `mark_user_refusal()`, and `refused_during_prompt` is
+only reset when a *new* prompt starts (`src/permission.rs:184`). So a timeout
+that fires in the middle of a later turn makes that turn report
+`stopReason: "refusal"` when nobody refused anything. A host that follows ACP and
+answers the outstanding request with `outcome: "cancelled"` hits the same path
+via `apply_outcome` (`src/permission.rs:408`).
 
-```
-after cancel:
-  agy child procs:  0                                   <- killed
-  adapter procs:    1                                   <- still serving, correct
-  94091  ppid=1     zsh -c sleep 45 && echo ...         <- orphaned, still running
-  94092  ppid=94091 sleep 45                            <- still running
-```
+Two things to decide: whether a cancel should resolve its own pending requests
+(and, if so, without counting as a refusal), and whether a *timeout* should mark
+a refusal at all — the field's own doc comment says the bridge's fail-closed
+denials deliberately do not count, and a timeout is one of those.
 
-`sleep` is harmless. A long build, a `curl`, a `rm -rf`, or anything with side
-effects is not: the user is told the turn was cancelled while the work continues,
-which is worse than not offering cancellation at all, because it is silent.
-
-The fix is to put `agy` in its own process group at spawn and signal the group
-rather than the pid — `process_group(0)` on the `Command`, then `killpg` — with
-a fallback to the current single-process kill where that is unavailable. Note
-Paseo hit this exact class of bug in its own Claude provider and solved it with a
-`terminateWithTreeKill` helper, commented "the SDK's internal cleanup may only
-kill the direct child process", so the shape of the fix is not controversial.
-
-Adapter shutdown is worse, not merely the same. `child.kill()` at
-`adapter.rs:954` is the *only* kill in the codebase — there is no signal handler,
-no `Drop` impl and no `kill_on_drop`, so when the adapter exits it does not kill
-agy at all and the whole tree is orphaned silently. The fix is therefore "every
-kill path is a group kill, and there needs to be one on exit", not "add the group
-flag to the existing shutdown kill" — a reader who goes looking for shutdown kill
-code will not find any.
+Note this is not new with the tree kill. Before it, the hook survived the cancel
+and the same prompt stayed open with the same timeout; killing the hook only
+removes the chance that an answer is consumed cleanly.
 
 #### Global prompt serialization
 

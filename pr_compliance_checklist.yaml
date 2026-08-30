@@ -88,6 +88,25 @@ pr_compliances:
       without a result event as success, or reporting a user's refusal as a
       provider error.
 
+  - title: "Cancelling a turn stops everything agy started"
+    compliance_label: true
+    objective: >
+      agy runs a tool call by shelling out, and puts each command it runs into a
+      process group of its own. Killing agy's pid -- or its group -- therefore
+      leaves the command running under PID 1 while the host has already been told
+      the turn was cancelled, which is silent.
+    success_criteria: >
+      Kills go through proc::kill_tree, or LiveChildren::kill_all on shutdown:
+      stop agy so it cannot start anything more, read the process table while agy
+      is still alive to hold the parent links, stop what is found and read again
+      until nothing new appears, then kill the lot with agy last. The stop and
+      the kill stay in one synchronous function.
+    failure_criteria: >
+      A bare child.kill() on a kill path, killing agy before the snapshot is
+      taken, splitting the SIGSTOP from its SIGKILL across an await, or replacing
+      the walk with killpg on agy's group -- measured against agy 1.1.22, that
+      reaches agy and nothing else.
+
   - title: "Provider data is parsed with checked arithmetic"
     compliance_label: true
     objective: >

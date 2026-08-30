@@ -11,6 +11,7 @@ mod permission;
 #[cfg(not(unix))]
 #[path = "permission_unsupported.rs"]
 mod permission;
+mod proc;
 mod protobuf;
 mod streaming;
 mod tools;
@@ -69,6 +70,47 @@ async fn start_permission_prompts(
     Ok((bridge, hook_root))
 }
 
+/// Kills agy and everything it started if the adapter is signalled.
+///
+/// There was no kill on exit at all before this: no signal handler, no `Drop`,
+/// no `kill_on_drop`, so a terminated adapter left a whole turn's command tree
+/// running with nothing attached to it. Only the signals a host would actually
+/// use to stop the adapter are handled; `SIGKILL` cannot be, and a tree orphaned
+/// that way is beyond reach.
+///
+/// Note this makes a signalled shutdown do work before it exits -- reading the
+/// process table and killing -- where it used to be immediate. That is the cost
+/// of not orphaning the tree, but a supervisor with a short patience will see it.
+#[cfg(unix)]
+fn install_shutdown_killer(live_children: proc::LiveChildren) {
+    use tokio::signal::unix::{signal, SignalKind};
+
+    for (kind, signum) in [
+        (SignalKind::terminate(), libc::SIGTERM),
+        (SignalKind::interrupt(), libc::SIGINT),
+        (SignalKind::hangup(), libc::SIGHUP),
+    ] {
+        // One task per signal rather than one `select!` over all three, so that a
+        // handler that cannot be installed costs only its own signal.
+        let live_children = live_children.clone();
+        tokio::spawn(async move {
+            let mut stream = match signal(kind) {
+                Ok(stream) => stream,
+                Err(e) => {
+                    eprintln!("agy-acp: cannot handle signal {signum}: {e}");
+                    return;
+                }
+            };
+            stream.recv().await;
+            live_children.kill_all();
+            std::process::exit(128 + signum);
+        });
+    }
+}
+
+#[cfg(not(unix))]
+fn install_shutdown_killer(_live_children: proc::LiveChildren) {}
+
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
@@ -84,6 +126,8 @@ async fn main() {
         Adapter::new()
     };
     let adapter = Arc::new(tokio::sync::Mutex::new(adapter));
+    let live_children = adapter.lock().await.live_children();
+    install_shutdown_killer(live_children.clone());
     let active_cancellations: cancel::CancelRegistry = cancel::CancelRegistry::default();
 
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
@@ -307,4 +351,9 @@ async fn main() {
         }
         let _ = stdout.flush();
     }
+
+    // The loop above waits for in-flight prompts, so normally there is nothing
+    // left to kill. This covers the paths that do not wait -- a closed output
+    // channel, or any future early return from the loop.
+    live_children.kill_all();
 }

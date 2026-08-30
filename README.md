@@ -7,7 +7,7 @@ An [Agent Client Protocol (ACP)](https://agentclientprotocol.com) stdio adapter 
 - **Real-Time Streaming**: Directly streams NDJSON events from `agy --output-format stream-json` to deliver fast, incremental text updates.
 - **Thinking / Thought Streaming**: Streams model reasoning blocks as ACP thought updates, allowing compatible hosts to render the model's thought process in real time.
 - **Rich Tool Execution**: Maps `agy` tool operations (`read`, `edit`, `delete`, `move`, `search`, `execute`, `fetch`, etc.) into structured ACP tool calls with target file paths, line ranges, and formatted outputs (such as directory listings and grep search results).
-- **Session Cancellation**: Handles `session/cancel` by cleanly aborting in-flight prompts and terminating the underlying `agy` subprocess.
+- **Session Cancellation**: Handles `session/cancel` by cleanly aborting in-flight prompts and terminating the underlying `agy` subprocess along with every process it started, so a command still running under it stops too. Reaching the whole tree needs a Unix process table; on other platforms only `agy` itself is killed, and a command it started outlives the cancel.
 - **Dynamic Model Selection**: Automatically queries models via `agy models` on startup and exposes them as ACP configuration options. Supports both `session/set_model` and `session/setConfigOption`.
 - **Session Persistence & Resume**: Saves conversation mappings to disk with atomic writes and file locking, allowing sessions to resume seamlessly across restarts.
 - **Narration Filtering**: Provides a `--skip-naration` CLI flag to filter out leading narrative chatter (e.g., *"I will..."*) before model actions.
