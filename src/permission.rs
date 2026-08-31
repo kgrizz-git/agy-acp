@@ -479,10 +479,9 @@ impl PermissionBridge {
                 self.mark_user_refusal(turn).await;
                 return (
                     Decision::Deny,
-                    if scope.is_some() {
-                        "Always rejected this exact command in this session.".to_string()
-                    } else {
-                        format!("Always rejected `{tool_name}` in this session.")
+                    match always_scope.noun() {
+                        Some(noun) => format!("Always rejected {noun} in this session."),
+                        None => format!("Always rejected `{tool_name}` in this session."),
                     },
                 );
             }
@@ -493,10 +492,9 @@ impl PermissionBridge {
             if !self.escapes_containment(&args).await {
                 return (
                     Decision::Allow,
-                    if scope.is_some() {
-                        "Always allowed this exact command in this session.".to_string()
-                    } else {
-                        format!("Always allowed `{tool_name}` in this session.")
+                    match always_scope.noun() {
+                        Some(noun) => format!("Always allowed {noun} in this session."),
+                        None => format!("Always allowed `{tool_name}` in this session."),
                     },
                 );
             }
@@ -2886,6 +2884,52 @@ mod tests {
             )
             .await;
         assert_eq!(asking.await.unwrap().0, Decision::Deny);
+    }
+
+    /// The reason a *remembered* answer carries has to use the same noun the
+    /// button used, or the explanation contradicts the consent it came from. This
+    /// is a third site, reached on the second and every later call, and it drifted
+    /// while the first two were being fixed.
+    #[tokio::test]
+    async fn a_remembered_answer_is_explained_in_the_words_it_was_given_in() {
+        let workspace = std::env::temp_dir().join("agy-acp-remembered-wording-test");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let (bridge, mut rx) = test_bridge(&workspace.display().to_string(), &[]).await;
+
+        let call = json!({
+            "conversationId": "conv-1",
+            "toolCall": {
+                "name": "read_url_content",
+                "args": { "Url": "https://example.com/readme" },
+            },
+        });
+
+        // First call: answer "always allow" at the prompt.
+        let asking = {
+            let bridge = bridge.clone();
+            let call = call.clone();
+            tokio::spawn(async move { bridge.decide(&call).await })
+        };
+        let request = expect_permission_request(&mut rx).await;
+        bridge
+            .resolve_response(
+                &request["id"],
+                Some(json!({ "outcome": { "outcome": "selected", "optionId": "allow_always" } })),
+            )
+            .await;
+        let (decision, reason) = asking.await.unwrap();
+        assert_eq!(decision, Decision::Allow);
+        assert!(reason.contains("this exact call"), "at the prompt: {reason}");
+
+        // Second call: the remembered answer applies with no prompt, and explains
+        // itself the same way.
+        let (decision, reason) = bridge.decide(&call).await;
+        assert_eq!(decision, Decision::Allow);
+        assert_eq!(reason, "Always allowed this exact call in this session.");
+        assert!(
+            !reason.contains("command"),
+            "a URL fetch is not a command: {reason}"
+        );
     }
 
     /// The wording is chosen by [`AlwaysScope`], and the enum is what keeps the
