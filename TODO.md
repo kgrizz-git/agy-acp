@@ -10,12 +10,25 @@ carries no work items.
 
 The few things worth picking up next. Each is a pointer; the detail lives below.
 
+In rough order. The first three are sequenced deliberately: the security hole
+outranks readability, and the gates come before the refactor so the refactor has
+a net under it — the same code that keeps producing turn-lifecycle bugs is the
+code whose coverage nobody measures.
+
+- [Permission decisions ignore what a command actually does](#permission-decisions-ignore-what-a-command-actually-does)
+  — one "Always allow" on `run_command` covers every later command. Verified live:
+  approving `echo` auto-approved a later `rm -f`, and the file was deleted.
+- [Automated quality gates: coverage, lint, complexity, size](#automated-quality-gates-coverage-lint-complexity-size)
+  — nothing enforces tests, lint or size today; review habit is the only gate.
+- [Split the two files and the one function that have outgrown reading](#split-the-two-files-and-the-one-function-that-have-outgrown-reading)
+  — `handle_session_prompt` is 322 lines and is where every turn-lifecycle bug has been.
 - [Verify the port under Paseo](#verify-the-port-under-paseo) — done except the
   reopened-thread path.
-- [Permission decisions ignore what a command actually does](#permission-decisions-ignore-what-a-command-actually-does)
-  — one "Always allow" on `run_command` covers every later command.
 - [Reconcile the tool lists with agy's real toolset](#reconcile-the-tool-lists-with-agys-real-toolset)
   — five names are for tools agy lacks; seven of its tools are unclassified.
+- [SonarCloud analyses nothing today](#sonarcloud-analyses-nothing-today-and-only-ci-based-analysis-can-change-that)
+  — decide it with the quality gates above; the two overlap and running both gives
+  two sources of truth for the same findings.
 - [Rename the binary and crate](#rename-the-binary-and-crate) — cheaper now than
   after anyone else installs it.
 - [Configure the protected e2e environment](#configure-the-protected-e2e-environment)
@@ -238,30 +251,6 @@ cleaning up there possible at all.
 
 ### Reliability and lifecycle
 
-#### A cancel leaves an open permission request unanswered
-
-Cancelling a turn now kills agy's whole process tree, which includes the
-`PreToolUse` hook waiting on a decision. The bridge task behind it is not told:
-it stays in `pending`, the host keeps showing a permission prompt for a turn that
-is already dead, and nothing arrives to answer it until the 540 s timeout in
-`decide()` fires (`src/permission.rs:343`).
-
-That timeout then calls `mark_user_refusal()`, and `refused_during_prompt` is
-only reset when a *new* prompt starts (`src/permission.rs:184`). So a timeout
-that fires in the middle of a later turn makes that turn report
-`stopReason: "refusal"` when nobody refused anything. A host that follows ACP and
-answers the outstanding request with `outcome: "cancelled"` hits the same path
-via `apply_outcome` (`src/permission.rs:408`).
-
-Two things to decide: whether a cancel should resolve its own pending requests
-(and, if so, without counting as a refusal), and whether a *timeout* should mark
-a refusal at all — the field's own doc comment says the bridge's fail-closed
-denials deliberately do not count, and a timeout is one of those.
-
-Note this is not new with the tree kill. Before it, the hook survived the cancel
-and the same prompt stayed open with the same timeout; killing the hook only
-removes the chance that an answer is consumed cleanly.
-
 #### Global prompt serialization
 
 `handle_session_prompt()` holds the one adapter mutex through the entire child
@@ -269,6 +258,40 @@ process, so every session is serialized and state operations queue behind a
 long-running prompt. Decide whether this is intentional; if not, split short
 state mutations from per-session runtime state without weakening permission
 routing.
+
+Anything done here has to account for the permission bridge, which now depends on
+this serialization rather than merely tolerating it. `set_active_session` drains
+*every* session's pending requests at turn start, and that is only safe because
+one turn runs at a time adapter-wide. `refused_during_prompt` is likewise one flag
+for the adapter, not one per session. Allowing turns to run concurrently means
+making both per-session first, and the session-scoped drain that follows reopens
+a hole of its own — a request stranded by one session times out into whichever
+turn is running nine minutes later. `permission.rs` says this at the line that
+depends on it; it is repeated here because this is the entry that would break it.
+
+#### A hook cannot say which turn it belongs to
+
+Within one session, consecutive turns share an agy conversation id, and the hook
+payload carries nothing else that identifies a turn. So a hook task delayed across
+a turn boundary *of the same session* is indistinguishable from one belonging to
+the turn now running: it passes the active-session check and adopts the running
+turn's generation. Its denial can mark that turn refused, and an "always" can
+stick for it.
+
+Everything else in this area is closed — a request for a different session, or
+arriving when no turn is running, is denied without asking. This case is the
+residue, and it cannot be closed with information the adapter currently has.
+
+The fix is to stamp turn identity into the hook environment when agy is spawned
+(agy spawns the hook as a child, so an env var set on agy's `Command` is
+inherited) and have the hook echo it in its payload. That is a hook protocol
+change, it depends on agy propagating the environment rather than sanitising it,
+and it needs the version skew handled — an old hook binary sends no stamp. Worth
+doing when this area is next opened, not on its own.
+
+Reachability is narrow: agy from the previous turn must be gone (it exits, or the
+cancel path kills its tree) while the accepted socket task lingers into the next
+turn of the same session.
 
 #### Unbounded input/output work
 
@@ -310,6 +333,118 @@ installs ambiguous. Renaming touches `Cargo.toml`, the `agy-acp permission-hook`
 subcommand the hook shells out to, the Paseo provider command in
 `~/.paseo/config.json`, and the README. Existing state lives in `~/.openab/agy-
 acp/`, so decide whether to migrate it or leave it in place.
+
+#### Automated quality gates: coverage, lint, complexity, size
+
+Nothing enforces any of this today. `ci.yml` runs `cargo build`, `cargo test` and
+the ignored I/O tier; the only git hook is `pre-push`, a fork guard; there are no
+Claude Code hooks. Every quality property this fork cares about is currently held
+up by review habit alone, which is why a test that passed while proving nothing
+had to be caught by hand.
+
+Wanted, roughly in order of value:
+
+- **Coverage.** `cargo llvm-cov` in CI. Report the number before gating on it: a
+  threshold set today would mostly measure the non-Unix fallbacks that cannot run
+  on the Linux runner and the e2e tier CI skips, and would push toward tests
+  written to move a percentage. What is actually wanted is a check that new code
+  arrives with tests, which a raw number only approximates.
+- **Lint.** `cargo clippy` is not run anywhere. It currently reports one warning
+  (`very complex type`, from the `(u32, u32)` process-table pair), so the gate can
+  go in at `-D warnings` after that one is addressed.
+- **Type checks.** Nothing to add: `cargo build` on stable and 1.70, on Linux and
+  Windows, already type-checks every `cfg` combination this fork ships. Recorded
+  here so the question is not asked again.
+- **Formatting.** Deliberately absent — CI says so, and the tree is not
+  rustfmt-clean (`cargo fmt --check` reports drift in two files). Either adopt it
+  in one sweep or keep the exemption; leaving it undecided is the bad option.
+- **Complexity.** Clippy's `cognitive_complexity` and `too_many_lines` are nursery
+  lints and would need `#![warn(...)]` opt-in. Worth trying against
+  `handle_session_prompt`, which is the one function that has grown past easy
+  reading.
+- **File size.** See the refactoring entry below; a cap is only worth setting once
+  the shape the code should end up in is decided.
+- **SonarCloud.** Has never analyzed this repo and cannot as configured. Its own
+  entry below.
+
+Hooks and CI serve different ends here and both are wanted: a local hook gives
+the fast signal while writing (fmt, clippy, the unit tier), CI is what actually
+blocks a merge. A hook that duplicates CI slowly is worse than no hook, so scope
+the local one to what is quick.
+
+#### SonarCloud analyses nothing today, and only CI-based analysis can change that
+
+The account has Automatic Analysis switched on and the project has never been
+analyzed. That is not a misconfiguration to hunt for — it cannot work here, for
+two independent reasons in Sonar's own documentation:
+
+- Automatic Analysis "is available for all of SonarQube Cloud's supported
+  languages except for Objective-C, Dart, and Rust".
+- Eligibility separately requires at least 20% of the project to be in a
+  supported language. GitHub measures this repo as 96% Rust, with Python and
+  Shell together under 3%.
+
+Rust *is* analyzed by SonarQube Cloud, but only through CI-based analysis. What
+that needs, from the Rust language page:
+
+- The SonarScanner CLI on the runner, plus `cargo` and `clippy`
+  (`rustup component add clippy`) — the analyzer shells out to Clippy itself
+  rather than importing a report, and `sonar.rust.clippy.enabled=false` turns
+  that off.
+- `SONAR_TOKEN` as a repository secret, and a project key and organization.
+  `sonar.rust.cargo.manifestPaths` is only needed when the manifest is not at the
+  root, which here it is.
+- Coverage import accepts LCOV and Cobertura. The exact property name was not
+  confirmed from the docs — check it before writing the workflow rather than
+  guessing at `sonar.rust.lcov.reportPaths`.
+- Automatic Analysis has to be turned off first. With CI-based analysis
+  configured as well, Sonar fails the build.
+
+One caveat found while checking: the Rust language page reads as though Clippy
+runs under automatic analysis when a root `Cargo.toml` is present, which
+contradicts the automatic-analysis page's explicit exclusion of Rust. The
+evidence here favours the exclusion — automatic analysis is enabled and has
+produced nothing.
+
+The decision, before any of the above: Sonar would run Clippy and import coverage,
+which is most of what the quality-gates entry above wants from `cargo clippy` and
+`cargo llvm-cov` directly. Running both means two sources of truth for the same
+findings and a second place to silence a lint. Worth picking one deliberately
+rather than adding Sonar because the account is already there.
+
+#### Split the two files and the one function that have outgrown reading
+
+Sizes as of this entry, from `wc -l` and a scan of function lengths:
+
+| Unit | Lines |
+|---|---|
+| `src/tests.rs` | 2419 |
+| `src/permission.rs` | 2207 |
+| `adapter.rs::handle_session_prompt` | 322 |
+| `permission.rs::decide` | 141 |
+
+`handle_session_prompt` is the one that actually hurts. It spawns agy, wires two
+reader tasks, runs the `select!` that races the child against cancellation, kills
+the tree, drains both readers, binds the conversation id, tears down the bridge,
+persists the session and builds the response — and it holds the single adapter
+mutex across all of it, which is its own entry above. Every recent bug in the
+turn lifecycle has been somewhere in this function, and each fix has had to be
+argued against the whole of it. Splitting the spawn/drain/teardown phases apart
+would let them be tested without a real agy, which is the gap review keeps
+finding: the call sites in there are covered by nothing.
+
+`decide` is long but linear — a policy cascade, read top to bottom. Lower value.
+
+The two big files are cohesive, so a split is only worth it with a real seam.
+`permission.rs` has an obvious one: the containment and path logic
+(`outside_workspace`, `is_inside`, `resolve`, `lexical_normalize`, `PATH_FIELDS`)
+is self-contained and heavily tested, and would move out whole. `tests.rs` is
+large because it is one flat module per subject; splitting it by subject is
+mechanical and would make the permission tests findable, which they currently are
+not.
+
+Do not do this while a behavioural change is in flight -- a move that touches
+every line makes the next real diff unreviewable.
 
 #### Replay without agy's private schema
 

@@ -244,6 +244,9 @@ async fn main() {
                     let params = req.params.unwrap_or(json!({}));
                     if let Some(session_id) = params.get("sessionId").and_then(|v| v.as_str()) {
                         active_cancellations.cancel(session_id);
+                        if let Some(bridge) = bridge.as_ref() {
+                            bridge.abandon_pending(session_id).await;
+                        }
                     }
                 }
                 continue;
@@ -310,6 +313,12 @@ async fn main() {
                 let params = req.params.unwrap_or(json!({}));
                 if let Some(session_id) = params.get("sessionId").and_then(|v| v.as_str()) {
                     active_cancellations.cancel(session_id);
+                    // Before the turn's own teardown: an unanswered permission
+                    // request left in place outlives this turn and lands its
+                    // timeout in the next one.
+                    if let Some(bridge) = bridge.as_ref() {
+                        bridge.abandon_pending(session_id).await;
+                    }
                 }
                 let r = JsonRpcResponse {
                     jsonrpc: "2.0",

@@ -1015,6 +1015,11 @@ impl Adapter {
                 bridge.register_conversation(conv_id, session_id).await;
             }
             bridge.set_active_session(None).await;
+            // The turn is over, so nothing can answer a prompt it left open. Left
+            // in place it would wait out its timeout and mark a refusal, which
+            // would land in a later turn. Cancellation clears these too, but a
+            // turn can also end because agy died or its output became unreadable.
+            bridge.abandon_pending(session_id).await;
         }
         if bound_conv_id.is_some() {
             let model_id = self

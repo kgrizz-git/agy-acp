@@ -39,6 +39,10 @@ impl PermissionBridge {
         false
     }
 
+    pub async fn abandon_pending(&self, _session_id: &str) -> usize {
+        0
+    }
+
     pub async fn resolve_response(
         &self,
         _id: &serde_json::Value,

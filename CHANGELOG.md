@@ -20,6 +20,53 @@ below.
 
 ### Fixed
 
+- A turn no longer leaves its permission request behind when it ends. An
+  outstanding `session/request_permission` was keyed only by its JSON-RPC id, so
+  nothing could find it again: the call sat waiting for its full 540-second
+  timeout, and that timeout marks a refusal, landing in whatever turn happened to
+  be running nine minutes later and reporting `stopReason: "refusal"` for a turn
+  nobody refused. Pending requests now carry the session that asked, and both
+  cancellation and ordinary turn teardown answer their own — denying, because agy
+  must not run the tool, but not as a refusal, since nobody declined anything.
+  Clearing it at teardown as well as on cancel matters: a turn that ends because
+  agy died or its output became unreadable left the same request behind, with the
+  same consequence, and nothing else would ever have cleared it. A late answer
+  from the host is dropped rather than applied, so an "always allow" arriving
+  afterwards cannot become sticky for the rest of the session. Starting a turn
+  clears everything still pending as well, in the same place the refusal flag is
+  reset — one turn runs at a time across the whole adapter, so a leftover there
+  can only belong to a turn that is over, and routing it through the one point
+  every turn must pass keeps a dropped teardown call from being enough to bring
+  the bug back. It clears every session's, not just the starting session's:
+  the refusal flag is one flag for the adapter rather than one per session, so a
+  request stranded by one session times out into whichever turn is running nine
+  minutes later, which is somebody else's. The host may still be showing the
+  prompt: ACP has no way to retract a request, and a host that cancels is
+  expected to dismiss its own.
+
+  Applying a decision is gated on the turn that asked for it, which closes the
+  same leak by its other route. The host's answer resolves the request, but the
+  hook task that acts on that answer runs whenever the runtime next polls it —
+  possibly after the turn ended, by which point the pending entry is long gone
+  and draining it cannot help. A refusal applied then set the adapter-wide flag
+  after the turn that asked had already read it, so the *next* turn reported
+  `stopReason: "refusal"` having asked nobody anything, and an "always" applied
+  then became a standing permission for the turns that followed. Both are now
+  dropped unless the turn that asked is still the turn that is running — where
+  "running" excludes the gap between one turn's teardown and the next turn's
+  start, since `always` is not reset by anything and a sticky answer applied in
+  that gap would outlive it.
+
+  Nothing is decided on behalf of a turn that is not the one running. A hook task
+  is not polled on any schedule of the adapter's: it can first reach the decision
+  path after its own turn tore down, or after the next turn started. Left alone it
+  would raise a prompt for a turn that no longer exists — and, worse, adopt the
+  running turn's identity, so answering it counted against a turn that never asked.
+  Such a request is now denied without asking anyone, and registering the question
+  revalidates that rather than trusting the check: the two are separate lock
+  acquisitions with work in between, so the turn can end in the gap, and teardown's
+  drain would run before the entry exists to be drained.
+
 - Cancelling a turn stops the command, not just agy. `session/cancel` killed the
   `agy` process alone, and agy runs a tool call by shelling out, so the shell and
   its command were reparented to PID 1 and ran to completion — verified against
