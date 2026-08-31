@@ -400,6 +400,20 @@ impl PermissionBridge {
         // tell whether it is still the turn that asked.
         let (remembered, turn) = {
             let state = self.state.lock().await;
+            // Nothing may be decided on behalf of a turn that is not the one
+            // running. A hook task is not polled on any schedule of ours: it can
+            // first reach this line after its own turn has torn down, or after
+            // the next turn has started. Reading `turn_generation` without this
+            // check would hand the stale request whichever turn is current and
+            // let its answer count for that one -- and prompting the user at all
+            // is already wrong, because the turn that would have used the answer
+            // is gone.
+            if state.active_session.as_deref() != Some(session_id.as_str()) {
+                return (
+                    Decision::Deny,
+                    "agy-acp: the turn ended before this was asked".to_string(),
+                );
+            }
             (state.always.get(&always_key).copied(), state.turn_generation)
         };
         if let Some(decision) = remembered {
@@ -1137,6 +1151,7 @@ mod tests {
         // The user's own answer.
         bridge.set_active_session(Some("session-1")).await;
         bridge.register_conversation("conv-1", "session-1").await;
+        bridge.set_active_session(Some("session-1")).await;
         let asking = {
             let bridge = bridge.clone();
             tokio::spawn(async move {
@@ -1179,6 +1194,7 @@ mod tests {
             socket_path: Arc::new(PathBuf::from("/tmp/unused.sock")),
         };
         bridge.register_conversation("conv-1", "session-1").await;
+        bridge.set_active_session(Some("session-1")).await;
 
         let asking = {
             let bridge = bridge.clone();
@@ -1219,6 +1235,7 @@ mod tests {
             socket_path: Arc::new(PathBuf::from("/tmp/unused.sock")),
         };
         bridge.register_conversation("conv-1", "session-1").await;
+        bridge.set_active_session(Some("session-1")).await;
 
         let payload = json!({
             "conversationId": "conv-1",
@@ -1275,6 +1292,7 @@ mod tests {
             socket_path: Arc::new(PathBuf::from("/tmp/unused.sock")),
         };
         bridge.register_conversation("conv-1", "session-1").await;
+        bridge.set_active_session(Some("session-1")).await;
         bridge
             .set_hook_root(Path::new("/tmp/agy-acp-hooks-42"))
             .await;
@@ -1335,6 +1353,10 @@ mod tests {
             socket_path: Arc::new(PathBuf::from("/tmp/unused.sock")),
         };
         bridge.register_conversation("conv-1", "session-1").await;
+        // Every `decide` in production happens inside a running turn --
+        // `handle_session_prompt` sets this before agy is spawned. A test that
+        // left it unset would be exercising a state the adapter cannot reach.
+        bridge.set_active_session(Some("session-1")).await;
         bridge.set_workspace_root(workspace).await;
         (bridge, rx)
     }
@@ -2136,6 +2158,74 @@ mod tests {
         );
     }
 
+    /// A hook task is not polled on any schedule of ours. If it first reaches
+    /// `decide` after its own turn tore down, it must not raise a prompt: the
+    /// turn that would have used the answer is gone, so the only thing a prompt
+    /// can do is confuse the user and leave an entry to time out.
+    #[tokio::test]
+    async fn a_request_arriving_after_its_turn_ended_is_not_asked_about() {
+        let workspace = std::env::temp_dir().join("agy-acp-request-after-teardown-test");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let (bridge, mut rx) = test_bridge(&workspace.display().to_string(), &[]).await;
+
+        // The turn tears down before the hook task gets to run.
+        bridge.set_active_session(None).await;
+
+        let (decision, reason) = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            bridge.decide(&json!({
+                "conversationId": "conv-1",
+                "toolCall": { "name": "run_command", "args": { "CommandLine": "ls" } },
+            })),
+        )
+        .await
+        .expect("it must answer at once, not sit in pending waiting for a timeout");
+
+        assert_eq!(decision, Decision::Deny, "agy must not run the tool");
+        assert!(reason.contains("turn ended"), "say why: {reason}");
+        assert!(
+            rx.try_recv().is_err(),
+            "the user must not be prompted for a turn that is over"
+        );
+        assert!(
+            bridge.state.lock().await.pending.is_empty(),
+            "and nothing may be left behind to time out"
+        );
+    }
+
+    /// The same lateness, but the next turn has already started. Reading the
+    /// current generation here would adopt the stale request into the running
+    /// turn, and its answer would count against a turn that never asked.
+    #[tokio::test]
+    async fn a_request_from_a_previous_turn_does_not_join_the_running_one() {
+        let workspace = std::env::temp_dir().join("agy-acp-request-wrong-turn-test");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let (bridge, mut rx) = test_bridge(&workspace.display().to_string(), &[]).await;
+
+        // conv-1 belongs to session-1; session-2's turn is the one running.
+        bridge.set_active_session(Some("session-2")).await;
+
+        let (decision, _) = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            bridge.decide(&json!({
+                "conversationId": "conv-1",
+                "toolCall": { "name": "run_command", "args": { "CommandLine": "ls" } },
+            })),
+        )
+        .await
+        .expect("it must answer at once");
+
+        assert_eq!(decision, Decision::Deny);
+        assert!(
+            rx.try_recv().is_err(),
+            "session-2's user must not be asked about session-1's tool call"
+        );
+        assert!(
+            !bridge.refused_during_prompt().await,
+            "and session-2 must not be reported as a refusal"
+        );
+    }
+
     /// The gap between one turn's teardown and the next turn's start. No turn is
     /// running here, so there is no later turn to mislead -- but `always` is not
     /// reset by anything, so a sticky answer applied in the gap outlives it and
@@ -2450,6 +2540,7 @@ mod tests {
             socket_path: Arc::new(PathBuf::from("/tmp/unused.sock")),
         };
         bridge.register_conversation("conv-1", "session-1").await;
+        bridge.set_active_session(Some("session-1")).await;
 
         let asking = {
             let bridge = bridge.clone();

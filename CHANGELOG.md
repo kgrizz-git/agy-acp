@@ -57,6 +57,13 @@ below.
   start, since `always` is not reset by anything and a sticky answer applied in
   that gap would outlive it.
 
+  Nothing is decided on behalf of a turn that is not the one running. A hook task
+  is not polled on any schedule of the adapter's: it can first reach the decision
+  path after its own turn tore down, or after the next turn started. Left alone it
+  would raise a prompt for a turn that no longer exists — and, worse, adopt the
+  running turn's identity, so answering it counted against a turn that never asked.
+  Such a request is now denied without asking anyone.
+
 - Cancelling a turn stops the command, not just agy. `session/cancel` killed the
   `agy` process alone, and agy runs a tool call by shelling out, so the shell and
   its command were reparented to PID 1 and ran to completion — verified against
