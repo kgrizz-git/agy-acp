@@ -127,6 +127,9 @@ async fn main() {
     };
     let adapter = Arc::new(tokio::sync::Mutex::new(adapter));
     let live_children = adapter.lock().await.live_children();
+    // Cloned out once. Draining through the adapter mutex would put every cancel
+    // behind a running prompt, which is why this has its own lock.
+    let pending_forget = Arc::clone(&adapter.lock().await.pending_forget);
     install_shutdown_killer(live_children.clone());
     let active_cancellations: cancel::CancelRegistry = cancel::CancelRegistry::default();
 
@@ -354,6 +357,17 @@ async fn main() {
             }
             None => continue,
         };
+
+        // Sessions evicted during this iteration -- by any arm, including the
+        // spawned prompt task, which reaches `evict_if_needed` through
+        // `restore_session_state`. Their remembered answers go now that we are
+        // somewhere async.
+        let victims: Vec<String> = std::mem::take(&mut *pending_forget.lock().unwrap());
+        for id in victims {
+            if let Some(bridge) = bridge.as_ref() {
+                bridge.forget_session(&id).await;
+            }
+        }
 
         for line in output {
             let _ = writeln!(stdout, "{}", line);

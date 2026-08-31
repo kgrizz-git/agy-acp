@@ -651,6 +651,7 @@ fn test_session_load_restores_persisted_session() {
         hook_root_dir: None,
         session_tick: 0,
         live_children: Default::default(),
+        pending_forget: Default::default(),
     };
     adapter.persist_session("sess-1", Some("conv-abc"), 5, None);
 
@@ -689,6 +690,7 @@ fn test_session_load_rejects_unknown_session() {
         hook_root_dir: None,
         session_tick: 0,
         live_children: Default::default(),
+        pending_forget: Default::default(),
     };
 
     let output = adapter.handle_session_load(json!(9), &json!({"sessionId": "missing"}));
@@ -805,6 +807,7 @@ fn test_session_load_replays_conversation_history() {
         hook_root_dir: None,
         session_tick: 0,
         live_children: Default::default(),
+        pending_forget: Default::default(),
     };
     adapter.persist_session("sess-replay", Some("conv-replay"), 8, None);
 
@@ -951,6 +954,7 @@ fn test_session_resume_restores_persisted_session() {
         hook_root_dir: None,
         session_tick: 0,
         live_children: Default::default(),
+        pending_forget: Default::default(),
     };
     adapter.persist_session("sess-r1", Some("conv-xyz"), 3, None);
 
@@ -996,6 +1000,7 @@ fn test_session_resume_rejects_unknown_session() {
         hook_root_dir: None,
         session_tick: 0,
         live_children: Default::default(),
+        pending_forget: Default::default(),
     };
 
     let response = adapter.handle_session_resume(json!(11), &json!({"sessionId": "nope"}));
@@ -1040,6 +1045,7 @@ fn test_session_resume_accepts_in_memory_session() {
         hook_root_dir: None,
         session_tick: 0,
         live_children: Default::default(),
+        pending_forget: Default::default(),
     };
     adapter.sessions.insert(
         "sess-memory".to_string(),
@@ -1077,6 +1083,7 @@ fn test_session_load_accepts_in_memory_session_without_replay() {
         hook_root_dir: None,
         session_tick: 0,
         live_children: Default::default(),
+        pending_forget: Default::default(),
     };
     adapter.sessions.insert(
         "sess-memory-load".to_string(),
@@ -1113,6 +1120,7 @@ fn test_session_resume_does_not_replay_history() {
         hook_root_dir: None,
         session_tick: 0,
         live_children: Default::default(),
+        pending_forget: Default::default(),
     };
     adapter.persist_session("sess-nr", Some("conv-nr"), 10, None);
 
@@ -1147,6 +1155,7 @@ fn test_persist_and_restore_session() {
         hook_root_dir: None,
         session_tick: 0,
         live_children: Default::default(),
+        pending_forget: Default::default(),
     };
 
     adapter.persist_session("sess-1", Some("conv-abc"), 7, None);
@@ -1698,6 +1707,7 @@ fn test_session_set_model_persists() {
         hook_root_dir: None,
         session_tick: 0,
         live_children: Default::default(),
+        pending_forget: Default::default(),
     };
 
     adapter.persist_session("sess-m1", Some("conv-m1"), 0, None);
@@ -1719,6 +1729,7 @@ fn test_session_set_model_persists() {
         hook_root_dir: None,
         session_tick: 0,
         live_children: Default::default(),
+        pending_forget: Default::default(),
     };
     let restored = adapter2.restore_session("sess-m1");
     assert_eq!(
@@ -2127,6 +2138,7 @@ fn persist_session_prunes_unbindable_entries_first() {
         hook_root_dir: None,
         session_tick: 0,
         live_children: Default::default(),
+        pending_forget: Default::default(),
     };
     for i in 0..300 {
         // Most entries can never be resumed; they must be the first to go.
@@ -2183,6 +2195,7 @@ fn persist_session_keeps_the_entry_it_just_wrote() {
         hook_root_dir: None,
         session_tick: 0,
         live_children: Default::default(),
+        pending_forget: Default::default(),
     };
     for i in 0..400 {
         adapter.persist_session(
@@ -2234,6 +2247,7 @@ fn stored_sessions_without_updated_at_load_as_oldest() {
         hook_root_dir: None,
         session_tick: 0,
         live_children: Default::default(),
+        pending_forget: Default::default(),
     };
     let store = adapter.load_store();
     assert_eq!(store.sessions.len(), 2, "both legacy entries should load");
@@ -2262,6 +2276,7 @@ fn evict_if_needed_drops_the_least_recently_used_session() {
         hook_root_dir: None,
         session_tick: 0,
         live_children: Default::default(),
+        pending_forget: Default::default(),
     };
     for i in 0..64 {
         adapter.sessions.insert(
@@ -2298,6 +2313,109 @@ fn evict_if_needed_drops_the_least_recently_used_session() {
     assert!(
         !adapter.sessions.contains_key("sess-0"),
         "the untouched, oldest-used session is the one evicted"
+    );
+}
+
+/// Stays a plain `#[test]` with no runtime, which is the point of the queue:
+/// `evict_if_needed` is sync and must not need one.
+#[test]
+fn evicting_a_session_queues_its_answers_for_forgetting() {
+    use crate::types::Session;
+
+    let mut adapter = Adapter {
+        sessions: HashMap::new(),
+        working_dir: "/tmp".to_string(),
+        state_file: PathBuf::from("/tmp/nonexistent-agy-acp-sessions.json"),
+        conversations_dir: PathBuf::from("/tmp/conversations"),
+        available_models: vec![],
+        skip_naration: false,
+        permission_bridge: None,
+        hook_root_dir: None,
+        session_tick: 0,
+        live_children: Default::default(),
+        pending_forget: Default::default(),
+    };
+    for i in 0..64 {
+        adapter.sessions.insert(
+            format!("sess-{i}"),
+            Session {
+                conversation_id: None,
+                last_step_idx: -1,
+                model_id: None,
+                last_used: i as u64,
+            },
+        );
+    }
+    adapter.evict_if_needed();
+
+    // Exactly the victim, not merely containing it: `contains` would pass an
+    // implementation that queued every session id and forgot far more than it
+    // should.
+    let queued = adapter.pending_forget.lock().unwrap().clone();
+    assert_eq!(
+        queued,
+        vec!["sess-0".to_string()],
+        "only the evicted session may be queued"
+    );
+}
+
+/// An evicted id can be readmitted before the drain runs -- `session/load`,
+/// `session/resume` and prompt restoration all take a caller-supplied id out of
+/// `sessions.json`, so only `session/new` mints a fresh one. Without this the
+/// queue is one race away from clearing a live session's answers.
+#[test]
+fn readmitting_an_evicted_session_cancels_its_queued_forget() {
+    use crate::types::Session;
+
+    let dir = std::env::temp_dir().join("agy-acp-readmit-test");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let mut adapter = Adapter {
+        sessions: HashMap::new(),
+        working_dir: dir.to_string_lossy().to_string(),
+        state_file: dir.join("sessions.json"),
+        conversations_dir: dir.join("conversations"),
+        available_models: vec![],
+        skip_naration: false,
+        permission_bridge: None,
+        hook_root_dir: None,
+        session_tick: 0,
+        live_children: Default::default(),
+        pending_forget: Default::default(),
+    };
+    // Persisted, so it can be restored after eviction.
+    adapter.persist_session("sess-0", Some("conv-abc"), 5, None);
+    for i in 0..64 {
+        adapter.sessions.insert(
+            format!("sess-{i}"),
+            Session {
+                conversation_id: None,
+                last_step_idx: -1,
+                model_id: None,
+                last_used: i as u64,
+            },
+        );
+    }
+    adapter.evict_if_needed();
+    assert_eq!(
+        adapter.pending_forget.lock().unwrap().clone(),
+        vec!["sess-0".to_string()],
+        "precondition: the eviction queued it"
+    );
+
+    // The host asks for it again before the dispatcher drains.
+    assert!(adapter.restore_session_state("sess-0"));
+
+    assert!(
+        adapter.pending_forget.lock().unwrap().is_empty(),
+        "the queued forget must be cancelled when the session comes back"
+    );
+    // The safety property, not just the queue state: queue state alone would pass
+    // an implementation that cancels the forget and drops the answers anyway.
+    assert!(
+        adapter.sessions.contains_key("sess-0"),
+        "and the session is live again"
     );
 }
 

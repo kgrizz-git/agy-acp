@@ -43,6 +43,8 @@ impl PermissionBridge {
         0
     }
 
+    pub async fn forget_session(&self, _session_id: &str) {}
+
     pub async fn resolve_response(
         &self,
         _id: &serde_json::Value,

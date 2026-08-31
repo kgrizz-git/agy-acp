@@ -76,6 +76,18 @@ pub struct Adapter {
     /// The agy children running right now, so that shutdown can kill the same
     /// trees a cancel would.
     pub live_children: LiveChildren,
+    /// Sessions dropped by [`Adapter::evict_if_needed`], waiting for their
+    /// remembered permission answers to be forgotten.
+    ///
+    /// `evict_if_needed` is sync and the bridge's state is behind an async mutex,
+    /// so ids are queued here and drained by the dispatcher, which is already
+    /// async. Its own lock rather than a plain field on purpose: two dispatcher
+    /// arms deliberately do not take the adapter mutex — `session/cancel` handles
+    /// cancellation without it, and `session/prompt` holds it for a whole turn —
+    /// so draining through the adapter mutex would make every cancel block behind
+    /// a running prompt, turning a cleanup into a cancellation regression. The
+    /// lock is held only for a `mem::take` and never across an await.
+    pub pending_forget: Arc<std::sync::Mutex<Vec<String>>>,
 }
 
 /// Print-mode timeout used when permission prompts are on. Must outlast the
@@ -137,6 +149,7 @@ impl Adapter {
             hook_root_dir: None,
             session_tick: 0,
             live_children: LiveChildren::default(),
+            pending_forget: Arc::new(std::sync::Mutex::new(Vec::new())),
         }
     }
 
@@ -415,10 +428,28 @@ impl Adapter {
             match victim {
                 Some(key) => {
                     self.sessions.remove(&key);
+                    // Its remembered answers go too, so "this session" means as
+                    // long as the session is live rather than as long as the
+                    // process is. Queued because this function is sync.
+                    self.pending_forget.lock().unwrap().push(key);
                 }
                 None => break,
             }
         }
+    }
+
+    /// Cancels a queued forget for an id that has come back.
+    ///
+    /// An evicted id can be readmitted before the drain runs: only `session/new`
+    /// mints a fresh UUID, while `session/load`, `session/resume` and prompt
+    /// restoration all take a caller-supplied id out of `sessions.json`. Removing
+    /// it here states the intent directly — forget this session's answers unless
+    /// the session came back.
+    fn keep_session_answers(&mut self, session_id: &str) {
+        self.pending_forget
+            .lock()
+            .unwrap()
+            .retain(|queued| queued != session_id);
     }
 
     /// Build a `Session` stamped with the current recency tick. Every insert goes
@@ -452,6 +483,7 @@ impl Adapter {
             last_step_idx,
             model_id.as_deref().map(Self::sanitize_model_id),
         );
+        self.keep_session_answers(session_id);
         self.sessions.insert(session_id.to_string(), session);
         true
     }
@@ -477,6 +509,7 @@ impl Adapter {
         let session_id = Uuid::new_v4().to_string();
         self.evict_if_needed();
         let session = self.make_session(None, -1, None);
+        self.keep_session_answers(&session_id);
         self.sessions.insert(session_id.clone(), session);
         let result = self.session_config_result_json(&session_id, None);
         JsonRpcResponse {

@@ -341,6 +341,24 @@ impl PermissionBridge {
         true
     }
 
+    /// Forgets a session's remembered answers, so "this session" means as long as
+    /// the session is live rather than as long as the process is.
+    ///
+    /// Called when a session is evicted. A session restored from `sessions.json`
+    /// afterwards is asked again, which is the safe direction: it also drops
+    /// remembered *denies*, so the user is prompted rather than auto-denied.
+    ///
+    /// Deliberately leaves `active_session` and `pending` alone. A pending request
+    /// belongs to a turn that is still running and its oneshot must resolve;
+    /// eviction says nothing about that.
+    pub async fn forget_session(&self, session_id: &str) {
+        let mut state = self.state.lock().await;
+        state.always.retain(|(sid, _, _), _| sid != session_id);
+        // Dropped too, or a dead conversation id keeps resolving to a session
+        // that no longer exists.
+        state.conversations.retain(|_, sid| sid != session_id);
+    }
+
     /// Routes an incoming JSON-RPC response back to the waiting hook. Returns
     /// `true` if the id belonged to this bridge.
     pub async fn resolve_response(&self, id: &Value, result: Option<Value>) -> bool {
@@ -3108,6 +3126,75 @@ mod tests {
             Decision::Deny,
             "a nested volatile field stays in the key -- under-normalizing costs a prompt"
         );
+    }
+
+    /// Two sessions on purpose. The `retain` predicate is one typo away from
+    /// clearing the whole map, and a single-session test cannot tell the
+    /// difference between "forgot the right one" and "forgot everything".
+    #[tokio::test]
+    async fn forget_session_clears_only_that_sessions_answers() {
+        let workspace = std::env::temp_dir().join("agy-acp-forget-session-test");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let (bridge, mut rx) = test_bridge(&workspace.display().to_string(), &[]).await;
+        bridge.register_conversation("conv-2", "session-2").await;
+
+        // An "always allow" for each session, for the same command.
+        for (conv, session) in [("conv-1", "session-1"), ("conv-2", "session-2")] {
+            bridge.set_active_session(Some(session)).await;
+            let asking = {
+                let bridge = bridge.clone();
+                tokio::spawn(async move {
+                    bridge
+                        .decide(&json!({
+                            "conversationId": conv,
+                            "toolCall": { "name": "run_command", "args": { "CommandLine": "ls" } },
+                        }))
+                        .await
+                })
+            };
+            let request = expect_permission_request(&mut rx).await;
+            bridge
+                .resolve_response(
+                    &request["id"],
+                    Some(
+                        json!({ "outcome": { "outcome": "selected", "optionId": "allow_always" } }),
+                    ),
+                )
+                .await;
+            assert_eq!(asking.await.unwrap().0, Decision::Allow);
+        }
+        assert_eq!(bridge.state.lock().await.always.len(), 2);
+
+        bridge.forget_session("session-1").await;
+
+        {
+            let state = bridge.state.lock().await;
+            assert_eq!(
+                state.always.len(),
+                1,
+                "only the evicted session's answers may go"
+            );
+            assert!(
+                state.always.keys().all(|(sid, _, _)| sid == "session-2"),
+                "session-2's answer must survive"
+            );
+            assert!(
+                !state.conversations.contains_key("conv-1"),
+                "a dead conversation id must not keep resolving to an evicted session"
+            );
+            assert!(state.conversations.contains_key("conv-2"));
+        }
+
+        // Session-2 is still auto-allowed with no prompt.
+        bridge.set_active_session(Some("session-2")).await;
+        let (decision, reason) = bridge
+            .decide(&json!({
+                "conversationId": "conv-2",
+                "toolCall": { "name": "run_command", "args": { "CommandLine": "ls" } },
+            }))
+            .await;
+        assert_eq!(decision, Decision::Allow, "{reason}");
+        assert!(rx.try_recv().is_err(), "session-2 must not be asked again");
     }
 
     /// The ergonomic guard. Fingerprinting every tool's arguments would make
