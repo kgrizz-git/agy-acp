@@ -383,9 +383,12 @@ impl PermissionBridge {
             .and_then(|v| v.as_str())
             .unwrap_or("");
 
-        let session_id = {
+        // Resolved and checked together, before any path that can decide: a stale
+        // hook must not be waved through by the auto-allow policy either, which
+        // it was when this check sat further down.
+        let (session_id, turn) = {
             let state = self.state.lock().await;
-            match state
+            let session_id = match state
                 .conversations
                 .get(conversation_id)
                 .or(state.active_session.as_ref())
@@ -399,7 +402,18 @@ impl PermissionBridge {
                         "agy-acp: no ACP session to ask for permission".to_string(),
                     )
                 }
+            };
+            // Nothing may be decided on behalf of a turn that is not the one
+            // running. A hook task is not polled on any schedule of ours: it can
+            // first reach this line after its own turn has torn down, or after the
+            // next turn has started.
+            if state.active_session.as_deref() != Some(session_id.as_str()) {
+                return (
+                    Decision::Deny,
+                    "agy-acp: the turn ended before this was asked".to_string(),
+                );
             }
+            (session_id, state.turn_generation)
         };
 
         // The hook lives in a directory agy is given as a workspace root, so the model
@@ -424,27 +438,8 @@ impl PermissionBridge {
 
         let always_key = (session_id.clone(), tool_name.clone());
         // Copied out before the branch: the body awaits the same mutex, and an
-        // `if let` scrutinee guard would still be held inside it. The turn this
-        // decision belongs to is read in the same breath, so everything below can
-        // tell whether it is still the turn that asked.
-        let (remembered, turn) = {
-            let state = self.state.lock().await;
-            // Nothing may be decided on behalf of a turn that is not the one
-            // running. A hook task is not polled on any schedule of ours: it can
-            // first reach this line after its own turn has torn down, or after
-            // the next turn has started. Reading `turn_generation` without this
-            // check would hand the stale request whichever turn is current and
-            // let its answer count for that one -- and prompting the user at all
-            // is already wrong, because the turn that would have used the answer
-            // is gone.
-            if state.active_session.as_deref() != Some(session_id.as_str()) {
-                return (
-                    Decision::Deny,
-                    "agy-acp: the turn ended before this was asked".to_string(),
-                );
-            }
-            (state.always.get(&always_key).copied(), state.turn_generation)
-        };
+        // `if let` scrutinee guard would still be held inside it.
+        let remembered = { self.state.lock().await.always.get(&always_key).copied() };
         if let Some(decision) = remembered {
             // A remembered deny applies immediately and unchanged.
             if decision == Decision::Deny {
@@ -2190,6 +2185,39 @@ mod tests {
             bridge.refused_during_prompt().await,
             "a refusal in the turn that asked is exactly what the flag is for"
         );
+    }
+
+    /// The auto-allow policy is a decision like any other, so it must not run
+    /// for a turn that is over -- it was reachable before the staleness check.
+    #[tokio::test]
+    async fn a_stale_request_is_not_waved_through_by_the_auto_allow_policy() {
+        let workspace = std::env::temp_dir().join("agy-acp-stale-auto-allow-test");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let (bridge, _rx) = test_bridge(&workspace.display().to_string(), &["ask_question"]).await;
+
+        // Sanity: this tool is auto-allowed while the turn is running.
+        let (live, _) = bridge
+            .decide(&json!({
+                "conversationId": "conv-1",
+                "toolCall": { "name": "ask_question", "args": {} },
+            }))
+            .await;
+        assert_eq!(live, Decision::Allow, "auto-allow works during a turn");
+
+        bridge.set_active_session(None).await;
+
+        let (decision, reason) = bridge
+            .decide(&json!({
+                "conversationId": "conv-1",
+                "toolCall": { "name": "ask_question", "args": {} },
+            }))
+            .await;
+        assert_eq!(
+            decision,
+            Decision::Deny,
+            "a turn that is over gets no decisions, auto-allowed or not"
+        );
+        assert!(reason.contains("turn ended"), "say why: {reason}");
     }
 
     /// The window between deciding to ask and registering the question. The turn

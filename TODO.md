@@ -269,6 +269,30 @@ a hole of its own — a request stranded by one session times out into whichever
 turn is running nine minutes later. `permission.rs` says this at the line that
 depends on it; it is repeated here because this is the entry that would break it.
 
+#### A hook cannot say which turn it belongs to
+
+Within one session, consecutive turns share an agy conversation id, and the hook
+payload carries nothing else that identifies a turn. So a hook task delayed across
+a turn boundary *of the same session* is indistinguishable from one belonging to
+the turn now running: it passes the active-session check and adopts the running
+turn's generation. Its denial can mark that turn refused, and an "always" can
+stick for it.
+
+Everything else in this area is closed — a request for a different session, or
+arriving when no turn is running, is denied without asking. This case is the
+residue, and it cannot be closed with information the adapter currently has.
+
+The fix is to stamp turn identity into the hook environment when agy is spawned
+(agy spawns the hook as a child, so an env var set on agy's `Command` is
+inherited) and have the hook echo it in its payload. That is a hook protocol
+change, it depends on agy propagating the environment rather than sanitising it,
+and it needs the version skew handled — an old hook binary sends no stamp. Worth
+doing when this area is next opened, not on its own.
+
+Reachability is narrow: agy from the previous turn must be gone (it exits, or the
+cancel path kills its tree) while the accepted socket task lingers into the next
+turn of the same session.
+
 #### Unbounded input/output work
 
 stdin JSON-RPC lines, hook payloads, pending permission requests, and stream-
