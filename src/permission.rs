@@ -302,6 +302,35 @@ impl PermissionBridge {
         ids.len()
     }
 
+    /// Registers a request to be answered, unless its turn ended while the
+    /// caller was deciding whether to ask at all. Returns whether it was
+    /// registered.
+    ///
+    /// The generation is the whole check. It moves at both edges of a turn, so
+    /// "unchanged" means the turn that decided to ask is still the turn running
+    /// -- a stronger statement than comparing the active session, which would
+    /// also hold for a later turn of that same session.
+    async fn register_pending(
+        &self,
+        request_id: &str,
+        session_id: &str,
+        turn: u64,
+        answer: oneshot::Sender<Answer>,
+    ) -> bool {
+        let mut state = self.state.lock().await;
+        if state.turn_generation != turn {
+            return false;
+        }
+        state.pending.insert(
+            request_id.to_string(),
+            PendingRequest {
+                session_id: session_id.to_string(),
+                answer,
+            },
+        );
+        true
+    }
+
     /// Routes an incoming JSON-RPC response back to the waiting hook. Returns
     /// `true` if the id belonged to this bridge.
     pub async fn resolve_response(&self, id: &Value, result: Option<Value>) -> bool {
@@ -439,13 +468,18 @@ impl PermissionBridge {
 
         let request_id = format!("{REQUEST_ID_PREFIX}{}", Uuid::new_v4());
         let (tx, rx) = oneshot::channel();
-        self.state.lock().await.pending.insert(
-            request_id.clone(),
-            PendingRequest {
-                session_id: session_id.clone(),
-                answer: tx,
-            },
-        );
+        // Checking the turn above and registering here are two lock acquisitions
+        // with `escapes_containment` awaiting in between, so the turn can end in
+        // the gap -- and teardown's drain would run before this entry exists to
+        // be drained. Registering revalidates rather than assuming the check
+        // still holds, which is what makes the pair atomic in the only sense that
+        // matters: the entry is never created for a turn that is over.
+        if !self.register_pending(&request_id, &session_id, turn, tx).await {
+            return (
+                Decision::Deny,
+                "agy-acp: the turn ended before this was asked".to_string(),
+            );
+        }
 
         let request = json!({
             "jsonrpc": "2.0",
@@ -2156,6 +2190,60 @@ mod tests {
             bridge.refused_during_prompt().await,
             "a refusal in the turn that asked is exactly what the flag is for"
         );
+    }
+
+    /// The window between deciding to ask and registering the question. The turn
+    /// can end in that gap -- `escapes_containment` awaits the same mutex in
+    /// between -- and teardown's drain would run before the entry exists to be
+    /// drained, leaving a prompt on the user's screen for a turn that is over.
+    ///
+    /// Driven through `register_pending` rather than by racing two tasks: the
+    /// interleaving this guards against is real but not schedulable on demand,
+    /// and a test that only passes when the runtime cooperates is not a test.
+    #[tokio::test]
+    async fn a_question_is_not_registered_if_its_turn_ended_while_deciding() {
+        let workspace = std::env::temp_dir().join("agy-acp-register-after-teardown-test");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let (bridge, _rx) = test_bridge(&workspace.display().to_string(), &[]).await;
+
+        let turn = bridge.state.lock().await.turn_generation;
+
+        // What teardown does, in the gap between the check and the registration.
+        bridge.set_active_session(None).await;
+        assert_eq!(bridge.abandon_pending("session-1").await, 0, "nothing to drain yet");
+
+        let (tx, _rx_answer) = oneshot::channel();
+        assert!(
+            !bridge
+                .register_pending("agyacp-perm-late", "session-1", turn, tx)
+                .await,
+            "the turn ended while we were deciding, so there is nothing to ask"
+        );
+        assert!(
+            bridge.state.lock().await.pending.is_empty(),
+            "no entry may outlive the drain that already ran"
+        );
+
+        // The next turn starting is also enough, not just teardown.
+        bridge.set_active_session(Some("session-1")).await;
+        let stale = bridge.state.lock().await.turn_generation.wrapping_sub(1);
+        let (tx, _rx_answer2) = oneshot::channel();
+        assert!(
+            !bridge
+                .register_pending("agyacp-perm-late-2", "session-1", stale, tx)
+                .await,
+            "a question from the previous turn does not join this one"
+        );
+
+        // And the ordinary case still registers.
+        let current = bridge.state.lock().await.turn_generation;
+        let (tx, _rx_answer3) = oneshot::channel();
+        assert!(
+            bridge
+                .register_pending("agyacp-perm-ok", "session-1", current, tx)
+                .await
+        );
+        assert_eq!(bridge.state.lock().await.pending.len(), 1);
     }
 
     /// A hook task is not polled on any schedule of ours. If it first reaches

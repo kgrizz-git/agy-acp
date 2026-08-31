@@ -62,7 +62,10 @@ below.
   path after its own turn tore down, or after the next turn started. Left alone it
   would raise a prompt for a turn that no longer exists — and, worse, adopt the
   running turn's identity, so answering it counted against a turn that never asked.
-  Such a request is now denied without asking anyone.
+  Such a request is now denied without asking anyone, and registering the question
+  revalidates that rather than trusting the check: the two are separate lock
+  acquisitions with work in between, so the turn can end in the gap, and teardown's
+  drain would run before the entry exists to be drained.
 
 - Cancelling a turn stops the command, not just agy. `session/cancel` killed the
   `agy` process alone, and agy runs a tool call by shelling out, so the shell and
