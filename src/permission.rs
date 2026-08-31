@@ -62,8 +62,9 @@ impl Decision {
     }
 }
 
-/// Remembered "always" answers, keyed by session, tool name, and — for tools that
-/// execute a command — a fingerprint of the arguments.
+/// Remembered "always" answers, keyed by session, tool name, and — whenever the
+/// checks that still run cannot constrain the arguments — a fingerprint of those
+/// arguments.
 ///
 /// In memory only: they are scoped to one session id and die with the process,
 /// so a reloaded session in a fresh process asks again. A session's answers are
@@ -73,15 +74,17 @@ impl Decision {
 /// stating plainly. The sticky key must be as specific as the checks that still
 /// apply to a remembered allow. For a path-argument tool like `view_file`,
 /// containment and the sensitive-path list do still constrain a remembered
-/// allow, so the tool name is a defensible scope. For a command tool those
-/// checks are inert — `escapes_containment` reads arguments as paths, and a
-/// command line is one opaque string — so the key is the *only* thing scoping
-/// the answer, and it has to carry the command. Without it, "always allow" on
-/// `echo hello` also allowed `rm -rf build`.
+/// allow, so the tool name is a defensible scope. Where they cannot, the key is
+/// the *only* thing scoping the answer and it has to carry the arguments.
 ///
-/// `None` means today's tool-level keying, which is correct for the tools whose
-/// arguments the checks can actually read, and is what [`sticky_scope`] falls
-/// back to when it cannot tell that a tool executes anything.
+/// "Where they cannot" is wider than command tools, and reading it narrowly is
+/// how the hole gets reopened. `escapes_containment` reads arguments as paths, so
+/// it is inert against a command line (one opaque string the shell reinterprets)
+/// *and* against a URL (not on the filesystem at all) *and* against whatever an
+/// unrecognised tool does with arguments this fork has never seen. All three get
+/// the fingerprint; see [`sticky_scope`], which grants `None` only to a tool that
+/// has earned it. Without this, "always allow" on `echo hello` also allowed
+/// `rm -rf build`, and "always allow" on one URL allowed every other.
 type AlwaysKey = (String, String, Option<String>);
 
 #[derive(Default)]
@@ -704,7 +707,8 @@ const OPTION_REJECT_ALWAYS: &str = "reject_always";
 /// Derived once, in `decide`, from the same `sticky_scope` result that builds the
 /// key, and then handed to both the prompt and [`PermissionBridge::apply_outcome`]
 /// -- so the button, the stored key and the reason string cannot disagree about
-/// scope. They are computed in three places and nothing else ties them together.
+/// scope. They were previously derived independently in those three places, with
+/// nothing tying them together, and the label drifted from the key.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum AlwaysScope {
     /// Every later call to this tool, for this session. What the answer covers
