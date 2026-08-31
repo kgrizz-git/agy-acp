@@ -2363,6 +2363,12 @@ fn evicting_a_session_queues_its_answers_for_forgetting() {
 /// `session/resume` and prompt restoration all take a caller-supplied id out of
 /// `sessions.json`, so only `session/new` mints a fresh one. Without this the
 /// queue is one race away from clearing a live session's answers.
+///
+/// "Before the drain" is the whole of what this pins, and the whole of what
+/// `keep_session_answers` can promise: the cancel is a removal from the queue,
+/// so it does nothing once the drain has taken the queue and is awaiting the
+/// bridge lock. That residual window is left open on purpose -- see the drain in
+/// `main.rs` -- because it can only forget an answer, never grant one.
 #[test]
 fn readmitting_an_evicted_session_cancels_its_queued_forget() {
     use crate::types::Session;

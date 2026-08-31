@@ -177,6 +177,28 @@ async fn main() {
             break;
         }
 
+        // Sessions evicted since the last iteration -- by any arm, including the
+        // spawned prompt task, which reaches `evict_if_needed` through
+        // `restore_session_state`. Their remembered answers go now that we are
+        // somewhere async. This sits at the top of the loop rather than beside
+        // the dispatch arms because most iterations end in a `continue` -- every
+        // notification drained from `out_rx` does -- and a drain placed after
+        // them would run only on iterations that dispatched a request with an id.
+        //
+        // `keep_session_answers` cancels a queued forget only up to the take
+        // below; a session readmitted while `forget_session` is already awaiting
+        // the bridge lock still loses its remembered answers. Closing that would
+        // mean holding the adapter mutex across the await, and `session/prompt`
+        // holds that mutex for a whole turn, so the dispatcher would stall behind
+        // every turn to save a prompt. The race only ever forgets, never grants,
+        // so it costs an extra prompt and is left open deliberately.
+        let victims: Vec<String> = std::mem::take(&mut *pending_forget.lock().unwrap());
+        for id in victims {
+            if let Some(bridge) = bridge.as_ref() {
+                bridge.forget_session(&id).await;
+            }
+        }
+
         let line = if stdin_open {
             tokio::select! {
                 output = out_rx.recv() => {
@@ -357,17 +379,6 @@ async fn main() {
             }
             None => continue,
         };
-
-        // Sessions evicted during this iteration -- by any arm, including the
-        // spawned prompt task, which reaches `evict_if_needed` through
-        // `restore_session_state`. Their remembered answers go now that we are
-        // somewhere async.
-        let victims: Vec<String> = std::mem::take(&mut *pending_forget.lock().unwrap());
-        for id in victims {
-            if let Some(bridge) = bridge.as_ref() {
-                bridge.forget_session(&id).await;
-            }
-        }
 
         for line in output {
             let _ = writeln!(stdout, "{}", line);

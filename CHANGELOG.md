@@ -20,6 +20,37 @@ below.
 
 ### Fixed
 
+- One "Always allow" on a command tool no longer approves every later command.
+  Remembered answers were keyed by `(session, tool name)`, so approving
+  `echo verification-one` silently approved a later `rm -f other.txt` — reproduced
+  live under Paseo on 2026-08-30, with the file deleted and no second prompt. The
+  key now carries a fingerprint of the arguments as well, and the narrow key is
+  the default: a tool has to *earn* tool-level keying by being a read, edit or
+  search tool whose arguments name nothing but paths, which is exactly the case
+  where the containment and sensitive-path checks still constrain a remembered
+  allow. An unknown tool gets the stronger key, and so does any call carrying a
+  command line or a URL — `read_url_content` is classified as a read, but a `Url`
+  is not a path field, so keying it by tool would have let one "Always allow" on
+  a trusted URL cover every later one. Comparison is exact — no
+  tokenizing, no shell semantics — because under-matching costs a prompt while
+  over-matching is a hole; only agy's own presentational fields (`toolAction`,
+  `toolSummary`, `WaitMsBeforeAsync`) are excluded, since they do not change what
+  runs. Remembered **rejects** narrow identically, so rejecting one command
+  forever rejects that command rather than the tool. The prompt labels say which
+  is which: **Always allow this exact command this session** for command tools,
+  **Always allow \<tool\> this session** otherwise.
+
+- A session's remembered answers are now forgotten when the session is evicted.
+  `BridgeState.always` and `BridgeState.conversations` accumulated for the life of
+  the process and nothing ever removed an entry, so a session id recycled after
+  eviction inherited answers it was never given. `evict_if_needed` is synchronous
+  and cannot await the bridge's lock, so it queues the victim id and the
+  dispatcher drains the queue between requests; re-admitting the same id before
+  the drain cancels the pending forget. Forgetting can only ever remove an
+  answer, so the worst case is an extra prompt. This also bounds the bridge by the
+  same 64 sessions as the map, and gives "this session" a defensible meaning: the
+  answer lasts as long as the session is live in memory.
+
 - A turn no longer leaves its permission request behind when it ends. An
   outstanding `session/request_permission` was keyed only by its JSON-RPC id, so
   nothing could find it again: the call sat waiting for its full 540-second

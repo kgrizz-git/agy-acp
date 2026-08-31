@@ -1089,12 +1089,17 @@ fn args_fingerprint(args: &Value) -> String {
 /// silently restore the bug this exists to close; being wrong the other way costs
 /// a reprompt. Under-normalizing costs a prompt, over-normalizing is a hole.
 ///
-/// The `CommandLine` walk stays as a second line: a tool whose *kind* looks like a
-/// path tool but which carries a command anyway is keyed per command. The walk is
-/// nested rather than a top-level `args.get`, since a nested or renamed command
-/// field would otherwise inherit the path tool's weaker key.
+/// [`has_unconstrained_reach`] stays as a second line, and it is not redundant
+/// with the kind list: kind is a *display* classification, and a tool can be
+/// classified `"read"` while reaching somewhere the path checks cannot see.
+/// `read_url_content` is exactly that — kind `"read"`, but its argument is a
+/// `Url`, which is not a path field, so containment and the sensitive-path list
+/// are as inert against it as they are against a command line. Keying it by tool
+/// would let one "Always allow" on a trusted URL cover every later URL. The walk
+/// is nested rather than a top-level `args.get`, since a nested or renamed field
+/// would otherwise inherit the path tool's weaker key.
 fn sticky_scope(tool_name: &str, args: &Value) -> Option<String> {
-    if !KEYED_BY_TOOL_KINDS.contains(&tool_kind(tool_name)) || has_command_field(args) {
+    if !KEYED_BY_TOOL_KINDS.contains(&tool_kind(tool_name)) || has_unconstrained_reach(args) {
         return Some(args_fingerprint(args));
     }
     None
@@ -1108,13 +1113,22 @@ fn sticky_scope(tool_name: &str, args: &Value) -> Option<String> {
 /// know, and an unknown tool must get the stronger key, not the weaker one.
 const KEYED_BY_TOOL_KINDS: &[&str] = &["read", "edit", "search"];
 
-/// Whether a `CommandLine` field appears anywhere in the arguments.
-fn has_command_field(args: &Value) -> bool {
+/// Whether the arguments reach somewhere the path checks cannot follow.
+///
+/// Two shapes, both of which make `escapes_containment` and the sensitive-path
+/// list inert: a `CommandLine`, which is one opaque string the shell will
+/// reinterpret, and a `Url`, which names a resource that is not on the filesystem
+/// at all. A bare `://` anywhere in a string value counts too, so a tool that
+/// takes a URL under some other field name is still caught. That last test also
+/// fires on a search query that happens to contain `://`, which costs a reprompt
+/// and is the direction to be wrong in.
+fn has_unconstrained_reach(args: &Value) -> bool {
     match args {
-        Value::Array(items) => items.iter().any(has_command_field),
-        Value::Object(map) => map
-            .iter()
-            .any(|(key, value)| key == "CommandLine" || has_command_field(value)),
+        Value::String(s) => s.contains("://"),
+        Value::Array(items) => items.iter().any(has_unconstrained_reach),
+        Value::Object(map) => map.iter().any(|(key, value)| {
+            key == "CommandLine" || key == "Url" || has_unconstrained_reach(value)
+        }),
         _ => false,
     }
 }
@@ -2884,6 +2898,33 @@ mod tests {
 
         // Web fetches are not path-checked either, so they are keyed per query.
         assert!(sticky_scope("search_web", &json!({ "query": "anything" })).is_some());
+
+        // `read_url_content` is kind `"read"`, so the kind list alone would hand
+        // it the weaker key -- but a `Url` is not a path field, so containment and
+        // the sensitive-path list see nothing to constrain. One "Always allow" on
+        // a trusted URL would otherwise cover every later URL. Kind is a display
+        // classification; it is not on its own evidence that the checks apply.
+        assert!(sticky_scope(
+            "read_url_content",
+            &json!({ "Url": "https://example.com/readme" })
+        )
+        .is_some());
+        assert_ne!(
+            sticky_scope("read_url_content", &json!({ "Url": "https://example.com/a" })),
+            sticky_scope("read_url_content", &json!({ "Url": "https://evil.test/b" })),
+            "two different URLs must not share a remembered answer"
+        );
+
+        // A URL reached under some other field name, or nested, is caught too --
+        // the field name is not what makes it unconstrained.
+        assert!(sticky_scope("view_file", &json!({ "Source": "https://evil.test/x" })).is_some());
+        assert!(
+            sticky_scope("list_dir", &json!({ "opts": { "Url": "http://evil.test" } })).is_some()
+        );
+
+        // The ordinary path tools keep the tool-level key: for them the checks
+        // really do read the argument as a path.
+        assert!(sticky_scope("view_file", &json!({ "AbsolutePath": "/ws/a.txt" })).is_none());
 
         // Path tools keep tool-level keying: containment and the sensitive-path
         // list still constrain a remembered allow for them.

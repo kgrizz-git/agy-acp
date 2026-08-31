@@ -20,14 +20,19 @@ pr_compliances:
       inside the adapter's private hook root -- deny. Changes must not widen what
       is approved without asking.
 
-      One gap is known and tracked in TODO.md rather than claimed as solved: a
-      remembered "always allow" is keyed by tool name alone, and while the
-      containment and sensitive-path checks do re-run on it, they read arguments
-      as paths and a command line is one opaque string, so they are inert for
-      `run_command`. Closing that is a fix, not a regression. The other gap this
-      file used to record is closed: `outside_workspace()` no longer looks only
-      at absolute paths -- home-relative and `..`-bearing arguments are judged
-      against the workspace roots, and an unset root contains nothing.
+      A remembered "always" answer must stay as specific as the checks that still
+      apply to it. Tool-level keying is only safe where containment and the
+      sensitive-path list constrain the answer -- tools of kind read, edit or
+      search whose arguments name nothing but paths. An ACP tool kind is a display
+      classification and is not on its own evidence that the checks apply: an
+      argument carrying a command line or a URL reaches past them and must be
+      keyed by the arguments, whatever the kind says. So must any tool whose kind
+      is not on the list; widening a key, or adding a field to the unkeyed denylist without
+      showing it cannot change what runs, is a regression. Both gaps this file
+      used to record are now closed: keys carry the command, and
+      `outside_workspace()` no longer looks only at absolute paths -- home-
+      relative and `..`-bearing arguments are judged against the workspace roots,
+      and an unset root contains nothing.
     failure_criteria: >
       A hook response with no decision field (agy then hangs until print-mode
       timeout), a default-allow branch, or an "always allow" answer that bypasses
