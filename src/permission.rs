@@ -2886,6 +2886,62 @@ mod tests {
         assert_eq!(asking.await.unwrap().0, Decision::Deny);
     }
 
+    /// Forgetting a session drops its conversation binding as well as its
+    /// answers, and the drain can do that to a session that has just been
+    /// readmitted -- the cancel in `keep_session_answers` only reaches a forget
+    /// still sitting in the queue. The question that matters is what the loss of
+    /// the binding costs, since a misrouted hook would be a real defect where an
+    /// extra prompt is not.
+    ///
+    /// It costs nothing. A session is readmitted by its own turn, and the adapter
+    /// runs one turn at a time, so throughout the window where the binding is
+    /// missing that session is the active one and the fallback resolves to it by
+    /// construction. The binding is re-registered at turn teardown
+    /// (`adapter.rs`), so the window closes with the turn. The fallback can only
+    /// name a *different* session if some other session's turn is running, which
+    /// is the thing serialization rules out.
+    #[tokio::test]
+    async fn a_forgotten_binding_still_reaches_its_own_running_turn() {
+        let workspace = std::env::temp_dir().join("agy-acp-forgotten-binding-test");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let (bridge, mut rx) = test_bridge(&workspace.display().to_string(), &[]).await;
+
+        // The drain wins the race: the binding goes while session-1's turn runs.
+        bridge.forget_session("session-1").await;
+        assert!(
+            !bridge
+                .state
+                .lock()
+                .await
+                .conversations
+                .contains_key("conv-1"),
+            "the binding must actually be gone for this to prove anything"
+        );
+
+        let asking = {
+            let bridge = bridge.clone();
+            tokio::spawn(async move {
+                bridge
+                    .decide(&json!({
+                        "conversationId": "conv-1",
+                        "toolCall": { "name": "run_command", "args": { "CommandLine": "ls" } },
+                    }))
+                    .await
+            })
+        };
+
+        // Asked, not denied, and asked of the session whose turn is running.
+        let request = expect_permission_request(&mut rx).await;
+        assert_eq!(request["params"]["sessionId"], "session-1");
+        bridge
+            .resolve_response(
+                &request["id"],
+                Some(json!({ "outcome": { "outcome": "selected", "optionId": "allow_once" } })),
+            )
+            .await;
+        assert_eq!(asking.await.unwrap().0, Decision::Allow);
+    }
+
     /// The reason a *remembered* answer carries has to use the same noun the
     /// button used, or the explanation contradicts the consent it came from. This
     /// is a third site, reached on the second and every later call, and it drifted
