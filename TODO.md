@@ -10,16 +10,25 @@ carries no work items.
 
 The few things worth picking up next. Each is a pointer; the detail lives below.
 
-- [Verify the port under Paseo](#verify-the-port-under-paseo) — done except the
-  reopened-thread path.
+In rough order. The first three are sequenced deliberately: the security hole
+outranks readability, and the gates come before the refactor so the refactor has
+a net under it — the same code that keeps producing turn-lifecycle bugs is the
+code whose coverage nobody measures.
+
 - [Permission decisions ignore what a command actually does](#permission-decisions-ignore-what-a-command-actually-does)
-  — one "Always allow" on `run_command` covers every later command.
-- [Reconcile the tool lists with agy's real toolset](#reconcile-the-tool-lists-with-agys-real-toolset)
-  — five names are for tools agy lacks; seven of its tools are unclassified.
+  — one "Always allow" on `run_command` covers every later command. Verified live:
+  approving `echo` auto-approved a later `rm -f`, and the file was deleted.
 - [Automated quality gates: coverage, lint, complexity, size](#automated-quality-gates-coverage-lint-complexity-size)
   — nothing enforces tests, lint or size today; review habit is the only gate.
 - [Split the two files and the one function that have outgrown reading](#split-the-two-files-and-the-one-function-that-have-outgrown-reading)
   — `handle_session_prompt` is 322 lines and is where every turn-lifecycle bug has been.
+- [Verify the port under Paseo](#verify-the-port-under-paseo) — done except the
+  reopened-thread path.
+- [Reconcile the tool lists with agy's real toolset](#reconcile-the-tool-lists-with-agys-real-toolset)
+  — five names are for tools agy lacks; seven of its tools are unclassified.
+- [SonarCloud analyses nothing today](#sonarcloud-analyses-nothing-today-and-only-ci-based-analysis-can-change-that)
+  — decide it with the quality gates above; the two overlap and running both gives
+  two sources of truth for the same findings.
 - [Rename the binary and crate](#rename-the-binary-and-crate) — cheaper now than
   after anyone else installs it.
 - [Configure the protected e2e environment](#configure-the-protected-e2e-environment)
@@ -249,6 +258,16 @@ process, so every session is serialized and state operations queue behind a
 long-running prompt. Decide whether this is intentional; if not, split short
 state mutations from per-session runtime state without weakening permission
 routing.
+
+Anything done here has to account for the permission bridge, which now depends on
+this serialization rather than merely tolerating it. `set_active_session` drains
+*every* session's pending requests at turn start, and that is only safe because
+one turn runs at a time adapter-wide. `refused_during_prompt` is likewise one flag
+for the adapter, not one per session. Allowing turns to run concurrently means
+making both per-session first, and the session-scoped drain that follows reopens
+a hole of its own — a request stranded by one session times out into whichever
+turn is running nine minutes later. `permission.rs` says this at the line that
+depends on it; it is repeated here because this is the entry that would break it.
 
 #### Unbounded input/output work
 
