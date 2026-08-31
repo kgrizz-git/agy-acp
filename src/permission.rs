@@ -465,6 +465,7 @@ impl PermissionBridge {
         }
 
         let scope = sticky_scope(&tool_name, &args);
+        let always_scope = AlwaysScope::of(scope.as_ref(), &args);
         let always_key = (session_id.clone(), tool_name.clone(), scope.clone());
         // Copied out before the branch: the body awaits the same mutex, and an
         // `if let` scrutinee guard would still be held inside it.
@@ -525,7 +526,7 @@ impl PermissionBridge {
                     "kind": tool_kind(&tool_name),
                     "rawInput": args,
                 },
-                "options": permission_options(&tool_name, scope.is_some()),
+                "options": permission_options(&tool_name, always_scope),
             },
         });
 
@@ -558,7 +559,8 @@ impl PermissionBridge {
             }
         };
 
-        self.apply_outcome(&outcome, always_key, &tool_name, turn).await
+        self.apply_outcome(&outcome, always_key, &tool_name, always_scope, turn)
+            .await
     }
 
     /// True when `args` leaves the workspace or names something sensitive — the
@@ -605,6 +607,7 @@ impl PermissionBridge {
         outcome: &Value,
         always_key: AlwaysKey,
         tool_name: &str,
+        scope: AlwaysScope,
         turn: u64,
     ) -> (Decision, String) {
         let outcome = outcome.get("outcome").unwrap_or(outcome);
@@ -624,30 +627,39 @@ impl PermissionBridge {
             .get("optionId")
             .and_then(|v| v.as_str())
             .unwrap_or(OPTION_REJECT_ONCE);
-        // The key already carries the scope, so the wording follows from it
-        // rather than from a parameter that could disagree with it.
-        let per_command = always_key.2.is_some();
+        // The scope is the same value the label was worded from, so the reason
+        // agy sees cannot describe a breadth the user was not offered. Assert the
+        // key agrees, since these are the two things that must never diverge.
+        debug_assert_eq!(
+            always_key.2.is_some(),
+            scope != AlwaysScope::Tool,
+            "the label's scope and the key's scope disagree"
+        );
 
         let (decision, sticky, reason) = match option_id {
             OPTION_ALLOW_ONCE => (Decision::Allow, false, "Approved by user.".to_string()),
             OPTION_ALLOW_ALWAYS => (
                 Decision::Allow,
                 true,
-                if per_command {
-                    "Approved by user; always allowing this exact command in this session."
-                        .to_string()
-                } else {
-                    format!("Approved by user; always allowing `{tool_name}` in this session.")
+                match scope.noun() {
+                    Some(noun) => {
+                        format!("Approved by user; always allowing {noun} in this session.")
+                    }
+                    None => {
+                        format!("Approved by user; always allowing `{tool_name}` in this session.")
+                    }
                 },
             ),
             OPTION_REJECT_ALWAYS => (
                 Decision::Deny,
                 true,
-                if per_command {
-                    "Declined by user; always rejecting this exact command in this session."
-                        .to_string()
-                } else {
-                    format!("Declined by user; always rejecting `{tool_name}` in this session.")
+                match scope.noun() {
+                    Some(noun) => {
+                        format!("Declined by user; always rejecting {noun} in this session.")
+                    }
+                    None => {
+                        format!("Declined by user; always rejecting `{tool_name}` in this session.")
+                    }
                 },
             ),
             _ => (Decision::Deny, false, "Declined by user.".to_string()),
@@ -687,27 +699,72 @@ const OPTION_ALLOW_ALWAYS: &str = "allow_always";
 const OPTION_REJECT_ONCE: &str = "reject_once";
 const OPTION_REJECT_ALWAYS: &str = "reject_always";
 
+/// What the two "always" labels claim the answer covers.
+///
+/// Derived once, in `decide`, from the same `sticky_scope` result that builds the
+/// key, and then handed to both the prompt and [`PermissionBridge::apply_outcome`]
+/// -- so the button, the stored key and the reason string cannot disagree about
+/// scope. They are computed in three places and nothing else ties them together.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum AlwaysScope {
+    /// Every later call to this tool, for this session. What the answer covers
+    /// when `sticky_scope` returns `None`.
+    Tool,
+    /// This exact command line and no other. The prompt's title is already
+    /// ``Run `{command}` `` (see [`tool_title`]), so "this exact command" refers
+    /// to something shown directly above the buttons.
+    Command,
+    /// This exact call -- same tool, same arguments. The answer is keyed by the
+    /// arguments, but the arguments are not a command, so calling it one would be
+    /// a lie: `read_url_content` and `search_web` land here, as does every tool
+    /// this fork does not know. Nothing above the buttons reads as a command, and
+    /// a label must describe what is actually being consented to.
+    Call,
+}
+
+impl AlwaysScope {
+    /// `scope` is the `sticky_scope` result the key is built from; `args` decides
+    /// only the wording, never the breadth.
+    fn of(scope: Option<&String>, args: &Value) -> Self {
+        match scope {
+            None => AlwaysScope::Tool,
+            Some(_) if has_command_line(args) => AlwaysScope::Command,
+            Some(_) => AlwaysScope::Call,
+        }
+    }
+
+    /// The noun the labels and reasons agree on. `None` for [`AlwaysScope::Tool`],
+    /// which names the tool instead.
+    fn noun(self) -> Option<&'static str> {
+        match self {
+            AlwaysScope::Tool => None,
+            AlwaysScope::Command => Some("this exact command"),
+            AlwaysScope::Call => Some("this exact call"),
+        }
+    }
+}
+
 /// The four answers offered with every prompt.
 ///
 /// `kind` is the ACP enum the host styles on; `name` is free display text and is
-/// ours to word. The "always" labels name the tool and say "this session"
-/// because that is what the answer covers -- every later call to that tool, for
-/// this session only -- and the prompt is where someone decides, not the README.
-/// `per_command` narrows the two "always" labels to the call in front of the
-/// user. A bool, not the command text: nothing in the label needs the string, and
-/// passing it would invite someone to interpolate it. The prompt's title is
-/// already ``Run `{command}` `` (see [`tool_title`]), so "this exact command"
-/// refers to something shown directly above the buttons.
-fn permission_options(tool_name: &str, per_command: bool) -> Value {
-    let allow_always = if per_command {
-        "Always allow this exact command this session".to_string()
-    } else {
-        format!("Always allow {tool_name} this session")
-    };
-    let reject_always = if per_command {
-        "Always reject this exact command this session".to_string()
-    } else {
-        format!("Always reject {tool_name} this session")
+/// ours to word. The "always" labels say "this session" because that is the outer
+/// bound on every remembered answer, and name the scope inside it -- the tool, or
+/// the one command or call in front of the user. The prompt is where someone
+/// decides, not the README.
+///
+/// The scope arrives as an [`AlwaysScope`], not as the command text: nothing in
+/// the label needs the string, and passing it would invite someone to interpolate
+/// it.
+fn permission_options(tool_name: &str, scope: AlwaysScope) -> Value {
+    let (allow_always, reject_always) = match scope.noun() {
+        Some(noun) => (
+            format!("Always allow {noun} this session"),
+            format!("Always reject {noun} this session"),
+        ),
+        None => (
+            format!("Always allow {tool_name} this session"),
+            format!("Always reject {tool_name} this session"),
+        ),
     };
     json!([
         { "optionId": OPTION_ALLOW_ONCE, "name": "Allow once", "kind": "allow_once" },
@@ -1122,6 +1179,20 @@ const KEYED_BY_TOOL_KINDS: &[&str] = &["read", "edit", "search"];
 /// takes a URL under some other field name is still caught. That last test also
 /// fires on a search query that happens to contain `://`, which costs a reprompt
 /// and is the direction to be wrong in.
+/// Whether a `CommandLine` field appears anywhere in the arguments.
+///
+/// Wording only: this decides whether the prompt says "command" or "call", never
+/// how broad the remembered answer is. [`has_unconstrained_reach`] decides that.
+fn has_command_line(args: &Value) -> bool {
+    match args {
+        Value::Array(items) => items.iter().any(has_command_line),
+        Value::Object(map) => map
+            .iter()
+            .any(|(key, value)| key == "CommandLine" || has_command_line(value)),
+        _ => false,
+    }
+}
+
 fn has_unconstrained_reach(args: &Value) -> bool {
     match args {
         Value::String(s) => s.contains("://"),
@@ -2337,6 +2408,7 @@ mod tests {
                 &json!({ "outcome": { "outcome": "selected", "optionId": "reject_once" } }),
                 key.clone(),
                 "run_command",
+                AlwaysScope::Command,
                 asking_turn,
             )
             .await;
@@ -2354,6 +2426,7 @@ mod tests {
                 &json!({ "outcome": { "outcome": "selected", "optionId": "reject_once" } }),
                 key,
                 "run_command",
+                AlwaysScope::Command,
                 current_turn,
             )
             .await;
@@ -2545,6 +2618,7 @@ mod tests {
                 &json!({ "outcome": { "outcome": "selected", "optionId": "allow_always" } }),
                 key.clone(),
                 "run_command",
+                AlwaysScope::Command,
                 asking_turn,
             )
             .await;
@@ -2559,6 +2633,7 @@ mod tests {
                 &json!({ "outcome": { "outcome": "selected", "optionId": "reject_once" } }),
                 key,
                 "run_command",
+                AlwaysScope::Command,
                 asking_turn,
             )
             .await;
@@ -2590,6 +2665,7 @@ mod tests {
                 &json!({ "outcome": { "outcome": "selected", "optionId": "allow_always" } }),
                 key.clone(),
                 "run_command",
+                AlwaysScope::Command,
                 asking_turn,
             )
             .await;
@@ -2744,6 +2820,89 @@ mod tests {
             )
             .await;
         assert_eq!(asking.await.unwrap().0, Decision::Deny);
+    }
+
+    /// A narrow key is not the same claim as "this is a command". `read_url_content`
+    /// is keyed by its arguments -- a `Url` is not a path, so containment cannot
+    /// constrain it -- but nothing above the buttons is a command, and the title
+    /// says so. A label that called it one would be asking the user to consent to
+    /// a description of the call that is simply false.
+    #[tokio::test]
+    async fn the_always_options_do_not_call_a_url_fetch_a_command() {
+        let workspace = std::env::temp_dir().join("agy-acp-option-label-url-test");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let (bridge, mut rx) = test_bridge(&workspace.display().to_string(), &[]).await;
+
+        let asking = {
+            let bridge = bridge.clone();
+            tokio::spawn(async move {
+                bridge
+                    .decide(&json!({
+                        "conversationId": "conv-1",
+                        "toolCall": {
+                            "name": "read_url_content",
+                            "args": { "Url": "https://example.com/readme" },
+                        },
+                    }))
+                    .await
+            })
+        };
+        let request = expect_permission_request(&mut rx).await;
+        let options = request["params"]["options"].as_array().unwrap().clone();
+        let named = |kind: &str| -> String {
+            options.iter().find(|o| o["kind"] == kind).unwrap()["name"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+
+        assert_eq!(
+            named("allow_always"),
+            "Always allow this exact call this session"
+        );
+        assert_eq!(
+            named("reject_always"),
+            "Always reject this exact call this session"
+        );
+        // Not the tool-level wording either: the answer really is narrow, and a
+        // label promising less than the key stores would be the safe lie rather
+        // than the dangerous one, but it would still be a lie.
+        for kind in ["allow_always", "reject_always"] {
+            assert!(
+                !named(kind).contains("read_url_content"),
+                "{kind} must not claim tool-level scope: {}",
+                named(kind)
+            );
+        }
+
+        bridge
+            .resolve_response(
+                &request["id"],
+                Some(json!({ "outcome": { "outcome": "selected", "optionId": "reject_once" } })),
+            )
+            .await;
+        assert_eq!(asking.await.unwrap().0, Decision::Deny);
+    }
+
+    /// The wording is chosen by [`AlwaysScope`], and the enum is what keeps the
+    /// button, the key and the reason string from drifting apart. Pin the mapping
+    /// directly so a fourth case cannot be added without deciding what it says.
+    #[test]
+    fn the_always_scope_decides_the_wording() {
+        assert_eq!(AlwaysScope::of(None, &json!({})), AlwaysScope::Tool);
+        assert_eq!(
+            AlwaysScope::of(Some(&"{}".to_string()), &json!({ "CommandLine": "ls" })),
+            AlwaysScope::Command
+        );
+        assert_eq!(
+            AlwaysScope::of(Some(&"{}".to_string()), &json!({ "Url": "https://x.test" })),
+            AlwaysScope::Call
+        );
+        // Only `Tool` names the tool; the other two must supply a noun.
+        assert_eq!(AlwaysScope::Tool.noun(), None);
+        assert!(AlwaysScope::Command.noun().is_some());
+        assert!(AlwaysScope::Call.noun().is_some());
+        assert_ne!(AlwaysScope::Command.noun(), AlwaysScope::Call.noun());
     }
 
     /// Path tools keep the tool-level wording, because they keep the tool-level

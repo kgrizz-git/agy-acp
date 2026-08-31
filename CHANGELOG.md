@@ -37,8 +37,14 @@ below.
   `toolSummary`, `WaitMsBeforeAsync`) are excluded, since they do not change what
   runs. Remembered **rejects** narrow identically, so rejecting one command
   forever rejects that command rather than the tool. The prompt labels say which
-  is which: **Always allow this exact command this session** for command tools,
-  **Always allow \<tool\> this session** otherwise.
+  is which, and say it in the right vocabulary: **Always allow this exact command
+  this session** where the call carries a command line, **Always allow this exact
+  call this session** where it is keyed by its arguments but is not a command
+  (`read_url_content`, `search_web`, anything unrecognised), and **Always allow
+  \<tool\> this session** where the answer really does cover the tool. The label,
+  the stored key and the reason string are all derived from one `AlwaysScope`
+  computed in `decide`, because they were previously computed in three places
+  with nothing tying them together.
 
 - A session's remembered answers are now forgotten when the session is evicted.
   `BridgeState.always` and `BridgeState.conversations` accumulated for the life of
