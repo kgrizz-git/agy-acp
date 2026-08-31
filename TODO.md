@@ -105,8 +105,9 @@ the adapter's in-memory map. There is no way for the user to take it back, see
 what has been remembered, or expire it at the end of the turn that granted it.
 
 Two things bound it today, both indirect. The answer is keyed by
-`(session, tool, Option<command fingerprint>)`, so a command approval covers only
-that exact command rather than the tool. And eviction forgets: `evict_if_needed`
+`(session, tool, Option<argument fingerprint>)`, so wherever the fingerprint is
+present -- a command, a URL, or any tool this fork does not recognise -- the
+answer covers that exact call rather than the tool. And eviction forgets: `evict_if_needed`
 tells the bridge to drop the victim's answers, so nothing outlives the 64-session
 map, and a session restored from `sessions.json` afterwards prompts again.
 

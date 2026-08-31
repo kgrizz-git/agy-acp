@@ -52,8 +52,11 @@ below.
   eviction inherited answers it was never given. `evict_if_needed` is synchronous
   and cannot await the bridge's lock, so it queues the victim id and the
   dispatcher drains the queue between requests; re-admitting the same id before
-  the drain cancels the pending forget. Forgetting can only ever remove an
-  answer, so the worst case is an extra prompt. This also bounds the bridge by the
+  the drain cancels the pending forget. It drops both maps: the remembered
+  answers, and the agy-conversation-to-session binding, so a hook still arriving
+  for a forgotten conversation is resolved by the running session instead. Every
+  path this opens still ends at a prompt or a denial -- forgetting can only
+  remove an answer, never add one -- so the worst case is being asked again. This also bounds the bridge by the
   same 64 sessions as the map, and gives "this session" a defensible meaning: the
   answer lasts as long as the session is live in memory.
 

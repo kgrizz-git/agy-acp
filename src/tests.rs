@@ -2373,7 +2373,7 @@ fn evicting_a_session_queues_its_answers_for_forgetting() {
 fn readmitting_an_evicted_session_cancels_its_queued_forget() {
     use crate::types::Session;
 
-    let dir = std::env::temp_dir().join("agy-acp-readmit-test");
+    let dir = std::env::temp_dir().join(format!("agy-acp-readmit-{}", Uuid::new_v4()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
 

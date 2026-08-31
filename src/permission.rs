@@ -1172,15 +1172,6 @@ fn sticky_scope(tool_name: &str, args: &Value) -> Option<String> {
 /// know, and an unknown tool must get the stronger key, not the weaker one.
 const KEYED_BY_TOOL_KINDS: &[&str] = &["read", "edit", "search"];
 
-/// Whether the arguments reach somewhere the path checks cannot follow.
-///
-/// Two shapes, both of which make `escapes_containment` and the sensitive-path
-/// list inert: a `CommandLine`, which is one opaque string the shell will
-/// reinterpret, and a `Url`, which names a resource that is not on the filesystem
-/// at all. A bare `://` anywhere in a string value counts too, so a tool that
-/// takes a URL under some other field name is still caught. That last test also
-/// fires on a search query that happens to contain `://`, which costs a reprompt
-/// and is the direction to be wrong in.
 /// Whether a `CommandLine` field appears anywhere in the arguments.
 ///
 /// Wording only: this decides whether the prompt says "command" or "call", never
@@ -1195,6 +1186,15 @@ fn has_command_line(args: &Value) -> bool {
     }
 }
 
+/// Whether the arguments reach somewhere the path checks cannot follow.
+///
+/// Two shapes, both of which make `escapes_containment` and the sensitive-path
+/// list inert: a `CommandLine`, which is one opaque string the shell will
+/// reinterpret, and a `Url`, which names a resource that is not on the filesystem
+/// at all. A bare `://` anywhere in a string value counts too, so a tool that
+/// takes a URL under some other field name is still caught. That last test also
+/// fires on a search query that happens to contain `://`, which costs a reprompt
+/// and is the direction to be wrong in.
 fn has_unconstrained_reach(args: &Value) -> bool {
     match args {
         Value::String(s) => s.contains("://"),
@@ -2997,10 +2997,6 @@ mod tests {
         assert_eq!(asking.await.unwrap().0, Decision::Deny);
     }
 
-    /// Pins a known gap, tracked in TODO.md: sticky answers are keyed by tool
-    /// name, so approving one command approves every later command. This test
-    /// asserts today's behaviour deliberately -- when the gap is closed it will
-    /// fail, which is the point: the fix must come with a doc change.
     /// The security property of the fingerprint, stated directly: two argument
     /// sets that would run different things must never share a key. Key order is
     /// not a difference (serde_json sorts, with no `preserve_order` feature), but
