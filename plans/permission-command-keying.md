@@ -214,6 +214,25 @@ test so a future ergonomic tweak has to argue with a red assertion.
 
 ### D3. Which tools are command tools
 
+> **Superseded during implementation (2026-08-31).** The union-of-detectors rule
+> below defaults an *unknown* tool to tool-level keying, which is the weaker key,
+> and that contradicts this plan's own rule that under-normalizing costs a prompt
+> while over-normalizing is a hole. A review found the consequence: a command tool
+> whose name this fork does not know and whose command field is not called
+> `CommandLine` — `ShellCommand`, `Script` — silently keeps the original bug.
+>
+> Implemented inverted instead. Tool-level keying has to be *earned*: it applies
+> only to `tool_kind` values whose arguments the containment and sensitive-path
+> checks can actually read (`read`, `edit`, `search`). Everything else, including
+> every unknown tool (`tool_kind` returns `other`), is keyed per arguments. The
+> `CommandLine` walk survives as a second line for a path-kind tool that carries a
+> command anyway. Pinned by `tool_level_keying_has_to_be_earned`.
+>
+> The original reasoning is kept below because the two detectors are still the
+> right *second* line, and because the D1/D2 argument it rests on is unchanged.
+
+
+
 Detect with the union of two cheap tests, and take per-command keying if
 **either** fires:
 
