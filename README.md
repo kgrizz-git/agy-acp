@@ -119,7 +119,7 @@ Set the `AGY_EXTRA_ARGS` environment variable to pass additional arguments to ev
 }
 ```
 
-Tool calls then arrive as ACP `session/request_permission` requests, with **Allow once** / **Always allow \<tool\> this session** / **Reject** / **Always reject \<tool\> this session** options. The "always" labels name the tool deliberately: the answer covers every later call to it, not the file or command you were shown. See [What "Always" remembers](#what-always-remembers).
+Tool calls then arrive as ACP `session/request_permission` requests, with **Allow once** / **Always allow \<tool\> this session** / **Reject** / **Always reject \<tool\> this session** options. For a tool that runs a command the two "always" labels instead read **Always allow this exact command this session** and **Always reject this exact command this session**, because that is what they cover. Each label says what the answer is remembered by. See [What "Always" remembers](#what-always-remembers).
 
 This works by installing a `PreToolUse` hook for `agy` in a private directory of the adapter's own — nothing is written to your workspace or to your global `agy` config, so plain `agy` use in a terminal is unaffected.
 
@@ -144,25 +144,53 @@ Whatever is enabled, three limits still apply:
 
 ### What "Always" remembers
 
-An "Always allow" or "Always reject" is remembered for **the rest of the session**, keyed by the *tool* — not by the file, the command, or the arguments you were shown when you answered.
+An "Always allow" or "Always reject" is remembered for **the rest of the
+session**. What it is keyed by depends on the tool, and the button you press says
+which:
 
-It is a preference held in memory, not a stored grant: answers are scoped to one session id, are never written to disk, and are forgotten when the adapter process exits. Restart or reconnect your host — even reopening the same thread — and you will be asked again.
+- **Always allow \<tool\> this session** — keyed by the *tool*. Every later call
+  to it is covered, whatever file it names.
+- **Always allow this exact command this session** — keyed by the tool *and the
+  arguments you were shown*. A later call with any different argument asks again.
 
-That distinction matters most for `run_command`. Approving `run_command` once with **Always allow** approves *every* later command in that session — `rm -rf build` included — without asking again. The prompt shows you one command; the answer covers the tool.
+The narrow, per-command key is the default, and a tool has to *earn* the broader
+one. It earns it only by being a plain read, edit or search tool whose arguments
+name nothing but paths — because those are exactly the calls the two checks below
+still constrain. An argument that carries a command line or a URL reaches
+somewhere those checks cannot follow, so the answer is pinned to the exact
+arguments instead. That is why **Always allow** on `read_url_content` covers the
+one URL you approved and not the next one.
+
+"Exact" means exact: the arguments are compared as-is, with no tokenizing and no
+shell semantics. `ls -l` and `ls  -l` are different commands and each is asked
+separately. Only presentational fields agy attaches to the call — its own summary
+of the action and an async wait hint — are ignored, since they do not change what
+runs. Under-matching costs you a prompt; over-matching would be a hole, so the
+comparison errs toward asking.
+
+This is a preference held in memory, not a stored grant: answers are scoped to
+one session id, are never written to disk, and are forgotten when the adapter
+process exits or when the session is evicted from the adapter's in-memory map.
+Restart or reconnect your host — even reopening the same thread — and you will be
+asked again.
 
 Two checks still apply to a remembered **allow**, and will bring the prompt back:
 
 - the path is outside the workspace, or
 - the path looks credential-bearing (the list above).
 
-But those checks read the tool's arguments as *paths*, and a shell command is a single opaque string. `cat /etc/shadow` is not recognised as naming `/etc/shadow`, so under a remembered allow it runs unprompted. The neighbouring `cat /etc/passwd` *is* caught — but only because `passwd` happens to be a sensitive substring, which is luck, not containment. The adapter does not parse commands.
+Those checks read the tool's arguments as *paths*. A shell command is a single
+opaque string — `cat /etc/shadow` is not recognised as naming `/etc/shadow` — and
+a URL is not on the filesystem at all. That is exactly why those answers are
+keyed by their arguments: the checks cannot constrain them, so the key has to. A
+remembered allow for `cat README.md` grants `cat README.md` and nothing else.
 
-> [!WARNING]
-> Prefer **Allow** over **Always allow** for `run_command`. Reserve "Always" for narrow read tools where the two checks above are meaningful. This is a known limitation, not a design goal — see `TODO.md`.
+A remembered **reject** narrows the same way, and applies immediately. Rejecting
+one command forever rejects that command, not every command; rejecting a read
+tool with **Always reject \<tool\>** rejects the tool.
 
-A remembered **reject** always applies immediately, with no such escape.
-
-There is no way to revoke an "Always" answer within a session; starting a new one, or restarting the host, clears it.
+There is no way to revoke an "Always" answer within a session; starting a new
+one, or restarting the host, clears it.
 
 ## Configuration & Environment
 

@@ -10,14 +10,10 @@ carries no work items.
 
 The few things worth picking up next. Each is a pointer; the detail lives below.
 
-In rough order. The first three are sequenced deliberately: the security hole
-outranks readability, and the gates come before the refactor so the refactor has
-a net under it — the same code that keeps producing turn-lifecycle bugs is the
-code whose coverage nobody measures.
+In rough order. The gates come before the refactor so the refactor has a net
+under it — the same code that keeps producing turn-lifecycle bugs is the code
+whose coverage nobody measures.
 
-- [Permission decisions ignore what a command actually does](#permission-decisions-ignore-what-a-command-actually-does)
-  — one "Always allow" on `run_command` covers every later command. Verified live:
-  approving `echo` auto-approved a later `rm -f`, and the file was deleted.
 - [Automated quality gates: coverage, lint, complexity, size](#automated-quality-gates-coverage-lint-complexity-size)
   — nothing enforces tests, lint or size today; review habit is the only gate.
 - [Split the two files and the one function that have outgrown reading](#split-the-two-files-and-the-one-function-that-have-outgrown-reading)
@@ -102,81 +98,46 @@ When it becomes useful to run paid e2e on pull requests:
 
 ### Security and permission boundaries
 
-#### Permission decisions ignore what a command actually does
+#### An "Always" answer cannot be revoked within a session
 
-Plan: plans/permission-command-keying.md
+Once given, an "Always allow" or "Always reject" holds until the session leaves
+the adapter's in-memory map. There is no way for the user to take it back, see
+what has been remembered, or expire it at the end of the turn that granted it.
 
-Remembered answers are keyed by `(session, tool name)`, so one "Always allow" on
-`run_command` approves every later command in that session. The containment and
-sensitive-path checks do still run on a remembered allow, but they read arguments
-as paths and a command line is a single opaque string: `cat /etc/shadow` is not
-recognised as naming `/etc/shadow` at all. `cat /etc/passwd` is caught only
-because `passwd` is a sensitive substring — luck, not containment. Both halves are
-pinned by tests that assert today's behaviour deliberately
-(`always_allow_is_remembered_per_tool_not_per_command` and
-`a_path_inside_a_command_string_is_invisible_to_the_containment_check`), so
-closing the gap turns them red and forces the README to be updated with it.
+Two things bound it today, both indirect. The answer is keyed by
+`(session, tool, Option<argument fingerprint>)`, so wherever the fingerprint is
+present -- a command, a URL, or any tool this fork does not recognise -- the
+answer covers that exact call rather than the tool. And eviction forgets: `evict_if_needed`
+tells the bridge to drop the victim's answers, so nothing outlives the 64-session
+map, and a session restored from `sessions.json` afterwards prompts again.
 
-Reproduced live under Paseo on 2026-08-30, which is worth more than the test that
-asserts it: **Always allow** was given to `echo verification-one`, and a later
-`rm -f other.txt` then ran with no prompt at all and deleted the file. Nothing
-adversarial was involved — it was an ordinary follow-up request in the same
-session, which is the point.
+Neither is revocation. Worth considering: expose the remembered set over ACP, or
+expire answers with the turn that granted them.
 
-Documented in the README under "What 'Always' remembers", with a warning to
-prefer **Allow** over **Always allow** for `run_command`. Three ways out, roughly
-in order of value:
+Note the consequence that remains: a session reloaded in the same process, while
+still resident in the map, inherits the "Always" answers it was given earlier.
+That is within what the README promises, but it is worth deciding rather than
+inheriting.
 
-1. Make the key as specific as the prompt. Either do not offer "Always allow"
-   for command-executing tools at all, or key the sticky answer by
-   `(session, tool, command string)` so approving `cat README.md` does not
-   approve `cat` on anything else. Note this is *not* the parsing problem in (2):
-   it needs only an equivalence test, and the minimum version is exact string
-   equality — no tokenization, no shell semantics. Normalization beyond
-   whitespace is an optional ergonomic layer and each step of it merges commands
-   that are not identical, which is how the current bug arose (keying on the tool
-   name is the degenerate case of normalizing everything away). Under-normalizing
-   costs a prompt; over-normalizing is a hole. The general rule: the sticky key
-   should be as specific as the checks that still apply to a remembered allow.
-   Tool-level keying is defensible for path-argument tools like `view_file`,
-   where containment and the sensitive-path list do constrain it; for command
-   tools those checks are inert, so the key must carry the command.
-2. Extract paths from a command line so containment applies to `run_command` at
-   all — tokenize the string and treat `/`-, `~`- and `../`-bearing tokens as
-   paths. This one really is parsing, and a harder job than (1): it has to find
-   every path the command touches, through pipes, `$VAR`, `$(...)`, subcommands
-   and attached flag values, and a path it fails to extract is a path that gets
-   allowed. It can never be complete, because the shell re-interprets the string
-   afterwards. Best-effort only, and it must fail toward prompting.
-3. Refuse destructive commands outright (`rm -rf`, `dd`, `mkfs`, `curl | sh`) and
-   widen the sensitive-path list. Cheapest, and the weakest: a denylist over a
-   string the shell will re-interpret is evaded by `cat .en"v"` or
-   `cat $HOME/.env`. Worth doing as depth, never as the boundary.
+#### Deliberately not taken: parsing what a command does
 
-Two smaller things about the same map, worth fixing alongside whichever option
-is taken.
+Recorded so they are not re-proposed as fixes for a gap that is closed. Keying a
+remembered answer by the exact command settled the granularity problem; neither
+of these was needed for it, and both remain available as *depth* if the threat
+model ever changes.
 
-An "Always" answer cannot be revoked within a session — consider exposing the
-remembered set, or expiring answers with the turn.
+**Extract paths from a command line** so containment applies to command tools at
+all — tokenize the string and treat `/`-, `~`- and `../`-bearing tokens as paths.
+Real parsing, and a harder job than keying: it has to find every path the command
+touches, through pipes, `$VAR`, `$(...)`, subcommands and attached flag values,
+and a path it fails to extract is a path that gets allowed. It can never be
+complete, because the shell re-interprets the string afterwards. Best-effort
+only, and it would have to fail toward prompting.
 
-And nothing ever removes an entry: `BridgeState.always` and
-`BridgeState.conversations` both accumulate for the life of the process, and only
-`pending` is ever cleaned up. There is no session-end hook to hang a cleanup on —
-ACP sends no close, and this adapter handles no session-end method, so a session
-simply stops being used and "its last turn" is not knowable. Each entry is two
-short strings, and the count is bounded by the sessions one adapter process
-serves, so this is untidiness rather than a leak that will bite.
-
-The cheap fix, if it is worth doing at all, is to hang it off the in-memory
-session map instead: `evict_if_needed` already drops the least recently used
-`Session`, so have it tell the bridge to forget that session's answers too. That
-bounds the bridge by the same 64 and gives "this session" a defensible meaning —
-answers last as long as the session is live in memory. A session restored from
-`sessions.json` afterwards would prompt again, which is the safe direction.
-
-Note the same absence has a visible consequence today: a session reloaded in the
-same process inherits the "Always" answers it was given earlier. That is within
-what the README promises, but it is worth deciding rather than inheriting.
+**Refuse destructive commands outright** (`rm -rf`, `dd`, `mkfs`, `curl | sh`).
+Cheapest and weakest: a denylist over a string the shell will re-interpret is
+evaded by `cat .en"v"` or `cat $HOME/.env`. Worth doing as depth, never as the
+boundary.
 
 #### Reconcile the tool lists with agy's real toolset
 
@@ -296,7 +257,11 @@ turn of the same session.
 #### Unbounded input/output work
 
 stdin JSON-RPC lines, hook payloads, pending permission requests, and stream-
-json lines are not size- or count-bounded. Establish host limits and add
+json lines are not size- or count-bounded. Remembered permission answers now
+retain a copy of each approved argument object as its key fingerprint
+(`args_fingerprint`), so an unbounded hook payload becomes an unbounded map key —
+the same exposure, widened. The bound belongs on the payload, and fixing it there
+fixes both; do not bound the key separately. Establish host limits and add
 practical frame and queue safeguards to prevent a malformed client or provider
 data from exhausting memory.
 
