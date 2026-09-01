@@ -301,6 +301,8 @@ acp/`, so decide whether to migrate it or leave it in place.
 
 #### Automated quality gates: coverage, lint, complexity, size
 
+Plan: plans/quality-gates.md
+
 Nothing enforces any of this today. `ci.yml` runs `cargo build`, `cargo test` and
 the ignored I/O tier; the only git hook is `pre-push`, a fork guard; there are no
 Claude Code hooks. Every quality property this fork cares about is currently held
