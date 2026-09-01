@@ -82,8 +82,9 @@ corrected in the same PR that does the work:
    signature at `src/tests.rs:105` which `grep -c` counts but is not a
    literal. The 15 was from an earlier tree. Mentioned in the plan because
    any new `Adapter` field from the refactor entry will have to update all
-   18 sites; getting the count right in the docstring on `Adapter`
-   (`src/adapter.rs:58`) is a useful drive-by.
+    18 sites; adding a docstring on `Adapter` (`src/adapter.rs:58`, which is
+    currently bare) noting the count and referencing this plan is a useful
+    drive-by.
 
 `handle_session_prompt` is 319 lines, not 322. The 322 was correct at the
 time the TODO entry was written and the plan keeps the same shape of
@@ -99,12 +100,11 @@ The plan *records* the corrections here so the landing change has them.
 | File | Change |
 |---|---|
 | `src/protobuf.rs` | Add a type alias (or struct) for the 4-tuple of optionals the protobuf walker returns at `src/protobuf.rs:435`. Single source of the warning. |
-| `.github/workflows/ci.yml` | Add a `clippy` job (depends on `test` and `msrv`), add a `coverage` job that runs `cargo llvm-cov --workspace --lcov --output-path lcov.info` and posts the LCOV report to the job summary. Both gated the same way as `ci.yml`'s existing jobs (push, PR, manual dispatch). |
-| `Cargo.toml` | Add `cargo-llvm-cov` as a `dev-dependency` (the tool runs from CI; its presence in `dev-dependencies` makes `cargo llvm-cov` work locally too). |
-| `src/lib.rs` | Add `#![warn(clippy::cognitive_complexity, clippy::too_many_lines)]` at the crate root and `#![allow(...)]` on every other function. **Warn, not deny** — the refactor entry is the one that promotes it. If a crate-wide allow turns out messy, fall back to `#[warn(...)]` on `handle_session_prompt` directly. |
-| `.githooks/pre-push` (new) | The local gate. Runs `cargo clippy --all-targets -- -D warnings` and `cargo test` (unit tier). Skips on `SKIP_LOCAL_GATES=1`. Folded-in: the existing fork-guard URL check, which today lives only at `.git/hooks/pre-push` and is not in the repo. |
-| `AGENTS.md` "Local gotchas" | One paragraph: "Run `git config core.hooksPath .githooks` after cloning. The hook runs clippy and the unit tier; set `SKIP_LOCAL_GATES=1` to bypass for a single push." |
-| `TODO.md` | **Landing change, not this PR.** Delete the "Automated quality gates" entry and its "Next Up" pointer. Keep the **SonarCloud** entry — the decision that goes with these gates is its own PR. The **Formatting** paragraph (no rustfmt gate today) is also a separate decision and stays. |
+| `.github/workflows/ci.yml` | Add a `clippy` job (no `needs:`; clippy compiles its own artefacts), add a `coverage` job that depends on `test` and runs `cargo llvm-cov --workspace --lcov --output-path lcov.info` and posts the LCOV report to the job summary. Both gated the same way as `ci.yml`'s existing jobs (push, PR, manual dispatch). |
+| `src/adapter.rs` | Add `#[warn(clippy::cognitive_complexity, clippy::too_many_lines)]` on `handle_session_prompt` only. **Warn, not deny** — the refactor entry promotes to deny. Crate-wide `#![warn]` in `main.rs` plus per-function `#![allow]` across the tree is the wrong default here: hundreds of functions would need an allow, and the lint only needs to fire on the one function the TODO names. |
+| `.githooks/pre-push` (update / expand) | The local gate. Adds `cargo clippy --all-targets -- -D warnings` and `cargo test` (unit tier) around the existing fork-guard URL check. `SKIP_LOCAL_GATES=1` skips clippy and tests only; the fork guard always runs. Rewrite the header comments — they still say the canonical copy lives in `.git/hooks/pre-push`, which this change supersedes. |
+| `AGENTS.md` | **Commands:** add `cargo clippy --all-targets -- -D warnings`. **Test tiers / CI:** note the new `clippy` and `coverage` jobs. **Local gotchas:** replace the `cp .githooks/pre-push .git/hooks/...` paragraph with `git config core.hooksPath .githooks`; document `SKIP_LOCAL_GATES=1`; document `cargo install cargo-llvm-cov --locked` for local coverage (not a dev-dependency). **Relationship to upstream:** update the pre-push bullet to match the `core.hooksPath` install. |
+| `TODO.md` | **Landing change, not this PR.** Delete the "Automated quality gates" entry and its "Next Up" pointer. Keep the **SonarCloud** entry — the decision that goes with these gates is its own PR. The **Formatting** paragraph (no rustfmt gate today) is also a separate decision and stays. Move `plans/quality-gates.md` to `plans/completed/quality-gates.md` in the same landing commit, per the convention the harness plan establishes. |
 | `CHANGELOG.md` | **Landing change, not this PR.** Under `## Unreleased` → **Maintenance**: the four gates, the local-hook installation step, and the `WalkedToolFields` rename as a small drive-by. |
 | `pr_compliance_checklist.yaml` | **Landing change, not this PR.** No rule changes today; the new gates are the enforcement of rules that already exist. Add a one-line note that clippy and the coverage report are now part of the standard PR review checklist. |
 
@@ -134,22 +134,19 @@ function signature at `src/protobuf.rs:435` reads with a named type, the
 z, w))` or `Some(WalkedToolFields { … })`, and the destructuring consumers
 either destructure by position or by field name.
 
-Pin a `cargo-llvm-cov` install action. The repo's existing workflows use
-`taiki-e/install-action@v2` for `cargo-binstall` and a SHA-pinned
-`dtolnay/rust-toolchain`. Add `taiki-e/install-action@cargo-llvm-cov` (or
-`cargo install cargo-llvm-cov --locked --version <x.y.z>`) with a SHA pin
-recorded in the workflow's `with:` comment. The version goes in
-`Cargo.toml`'s `[dev-dependencies]` as a `version = "x.y.z"` line on a
-synthetic crate; if `cargo-llvm-cov` is not published as a crates.io
-crate, use a `path` dependency against a checked-in `tools/cargo-llvm-cov`
-shim or an `[patch]` entry — confirm during implementation, not by
-guessing here.
+Pin a `cargo-llvm-cov` install step. No workflow uses `taiki-e/install-action`
+today; follow the same SHA-pinning discipline as `actions/checkout` and
+`dtolnay/rust-toolchain` already in `ci.yml`. Options, in preference order:
+`taiki-e/install-action@<sha> # cargo-llvm-cov`, or
+`cargo install cargo-llvm-cov --locked --version <x.y.z>` with `<x.y.z>`
+resolved at implementation time. `cargo-llvm-cov` is a binary, not a library —
+it does not belong in `Cargo.toml` dev-dependencies.
 
-Wire the clippy job into `ci.yml` as a separate job that depends on the
-build matrix and runs `cargo clippy --all-targets -- -D warnings`. SHA-pinned
-action, same runner image as `test` and `msrv`. The `msrv` job already
-tests 1.70; the clippy job runs on stable to match the existing toolchain
-choice, and the `-D warnings` bar applies to the same code stable compiles.
+Wire the clippy job into `ci.yml` as a separate job with **no `needs:`**.
+`cargo clippy --all-targets` compiles its own artefacts; waiting on `test`
+or `msrv` only adds latency. Same runner image and SHA-pinned toolchain as
+`test`. The `msrv` job already tests 1.70; clippy runs on stable, and the
+`-D warnings` bar applies to the same code stable compiles.
 
 ### 2. Wire `cargo llvm-cov` as a report, not a gate
 
@@ -172,35 +169,41 @@ so a follow-up author can find it.
 
 The coverage job uses the same `actions/checkout` SHA pin and the same
 toolchain as the existing jobs. Outputs `lcov.info` as a workflow
-artifact (named with the run id) and posts a one-line summary that names
-the headline number plus a pointer at the artifact, so a reviewer can
-download the LCOV and look at it locally.
+artifact (named with the run id). **Do not paste raw LCOV into
+`$GITHUB_STEP_SUMMARY`** — it is unreadable there. Post a one-line
+summary built from `cargo llvm-cov --workspace --summary-only` (or
+`llvm-cov report` on the generated file) naming the headline line/region
+percentages plus a pointer at the artifact, so a reviewer can download
+the LCOV and open it in an editor or IDE plugin.
 
 ### 3. Pin the cognitive-complexity lint on `handle_session_prompt`
 
-Apply `#![warn(clippy::cognitive_complexity, clippy::too_many_lines)]` at
-the crate root in `src/lib.rs`, then
-`#![allow(clippy::cognitive_complexity, clippy::too_many_lines)]` on
-every other function in the tree. **This is a `#![warn]`, not `#![deny]`**
-— it surfaces the problem without making the build fail, and lets the
-refactor (TODO #2) be the PR that promotes it to deny.
+Apply `#[warn(clippy::cognitive_complexity, clippy::too_many_lines)]`
+directly on `handle_session_prompt` in `src/adapter.rs`. **Warn, not
+deny** — surfaces the problem without failing CI, and the refactor entry
+(TODO #2) is the PR that promotes to deny.
 
-If applying crate-wide turns out messier than the function-level allow
-(this is implementation-time work; the plan names the fallback), apply
-`#[warn(...)]` on `handle_session_prompt` directly. The TODO's whole point
-is that *this* function has grown past reading — the lint only needs to
-fire there.
+`too_many_lines` defaults to 100; the function is ~318 lines today, so
+both lints will fire immediately. That is intentional: the baseline is the
+score *before* the refactor, not a clean tree.
 
-The same PR records the cognitive-complexity score of `handle_session_prompt`
-as the baseline for the refactor entry:
+Record the cognitive-complexity score as the baseline for the refactor
+entry:
 
 ```bash
-cargo clippy --all-targets -- -W clippy::cognitive_complexity -- \
-  --message-format=json | jq 'select(.reason=="compiler-message") | .message'
+cargo clippy --all-targets -- \
+  -W clippy::cognitive_complexity -A clippy::type_complexity -- \
+  --message-format=json \
+  | jq 'select(.reason=="compiler-message") | .message'
 ```
 
-The number goes in the landing change's CHANGELOG entry, so the refactor
-entry has a measurement to beat.
+(`-A clippy::type_complexity` keeps the output focused until the
+`WalkedToolFields` fix from step 1 lands.) The number goes in the landing
+commit's CHANGELOG entry so the refactor has a measurement to beat.
+
+**No new unit tests for the lint wiring.** The gate is configuration;
+proving it works is the verification bullets below. Optional: `shellcheck
+.githooks/pre-push` in verification if `shellcheck` is available locally.
 
 ### 4. Add the local gate
 
@@ -209,15 +212,15 @@ Two pieces.
 First, a `.githooks/pre-push` that runs:
 
 1. The existing fork-guard URL check (refuses any push whose URL is not
-   `kgrizz-git/agy-acp`). Move the rule from `.git/hooks/pre-push` (which is
-   local-only and not in the repo) into the new file.
+   `kgrizz-git/agy-acp`). Already lives in the file; the expansion adds
+   the clippy and test calls around it.
 2. `cargo clippy --all-targets -- -D warnings`. Times out at 5 minutes;
    gate exists to fail fast, not to wait for a slow check.
 3. `cargo test` — unit tier only. The ignored and e2e tiers need a network
    or `agy`, which the TODO's hook guidance explicitly excludes.
 
-Honor `SKIP_LOCAL_GATES=1` for one-off bypasses. Exit non-zero on any
-failure.
+Honor `SKIP_LOCAL_GATES=1` for one-off bypasses of clippy and tests only;
+the fork-guard URL check always runs. Exit non-zero on any failure.
 
 Second, a `core.hooksPath` instruction in `AGENTS.md` "Local gotchas":
 
@@ -227,19 +230,21 @@ pre-push hook runs cargo clippy and the unit-tier tests; set
 `SKIP_LOCAL_GATES=1` to bypass for a single push.
 ```
 
-The pre-push that lives at `.git/hooks/pre-push` today is not committed.
-Putting it in `.githooks/pre-push` is the right home, and `core.hooksPath`
-makes the install a one-line step. The repo's existing pre-push was
-documented in the original hard-fork `AGENTS.md` ("hard fork as of August
-2026"); it is not a separate maintenance item to track.
+The pre-push already lives at `.githooks/pre-push` (committed) and runs
+the fork-guard; the expansion folds the clippy and unit-test calls into
+the same hook. `core.hooksPath` makes the install a one-line step. The
+older `AGENTS.md` paragraph about a hook at `.git/hooks/pre-push` was
+written before the file moved into the repo; once this lands, the local
+gotcha is `git config core.hooksPath .githooks` and nothing else.
 
 ## Verification
 
 - `cargo clippy --all-targets -- -D warnings` exits 0 from a clean tree.
 - `cargo test` exits 0 (already does — 150 passed, 12 ignored, as of
   `f60efc9`).
-- `cargo test -- --include-ignored` (the I/O tier) exits 0 on the local
-  macOS runner to confirm the dev-dependency add did not break anything.
+- `cargo test -- --include-ignored` (the I/O tier) exits 0 on a local
+  macOS runner — sanity check that the gate work did not disturb the
+  ignored tier.
 - The CI workflow, run via `act` if available locally or pushed to a draft
   branch, shows the four jobs green: `test`, `msrv`, `clippy`, `coverage`.
 - `cargo llvm-cov` produces a `lcov.info` and the workflow posts the
@@ -254,6 +259,13 @@ documented in the original hard-fork `AGENTS.md` ("hard fork as of August
   in the JSON output. The default threshold is 25; record the actual score
   in the landing commit so the refactor entry has a number to beat.
 
+## Coordination with harness
+
+Both plans land in the **same PR**. The harness plan must create
+`plans/completed/` before this plan's landing step moves
+`plans/quality-gates.md` there. See `plans/harness.md` → "Coordination
+with quality-gates" for the full commit order.
+
 ## Out of scope, deliberately
 
 - **The `handle_session_prompt` refactor** — TODO #2. This plan only adds
@@ -264,10 +276,11 @@ documented in the original hard-fork `AGENTS.md` ("hard fork as of August
 - **File-size cap** — TODO says the cap is only worth setting once the
   *shape the code should end up in* is decided. The refactor decides the
   shape.
-- **Formatting gate** — the tree is not rustfmt-clean on `main`, and the
-  TODO has a paragraph on it that is a separate decision (adopt in one
-  sweep, or keep the exemption; the bad option is leaving it undecided).
-  Not part of the gates PR.
+- **New Rust unit tests** — the gates are CI/hook configuration. Proving
+  they work is the verification section (clippy clean, workflow green,
+  hook blocks a bad push). No `#[test]` for "clippy passes."
+- **rustfmt gate** — separate TODO decision; pre-push is clippy + unit
+  tier only.
 - **SonarCloud** — the TODO entry on it is the deliberate *not-taken*
   decision that goes with these gates. Resolve as a follow-up: either turn
   it on and own two sources of truth for Clippy findings, or leave it off
@@ -298,9 +311,8 @@ inherit.
 
 The two new jobs:
 
-- `clippy`: depends on `test` and `msrv` (clippy needs the build matrix
-  passing first, because the lint runs over the same compiled artefacts).
-  Runs `cargo clippy --all-targets -- -D warnings`. Uses stable.
+- `clippy`: no `needs:`. `cargo clippy --all-targets` compiles its own
+  artefacts. Uses stable. Runs `cargo clippy --all-targets -- -D warnings`.
 - `coverage`: depends on `test`. Runs `cargo llvm-cov --workspace --lcov
   --output-path lcov.info` and `actions/upload-artifact` with the LCOV
   file. Posts a one-line summary via `$GITHUB_STEP_SUMMARY`.

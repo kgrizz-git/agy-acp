@@ -10,14 +10,6 @@ of its own yet, so everything below is unreleased.
 
 ## Unreleased
 
-The stream-json port merged as `bf6e81b` (PR #1) and was first installed and
-exercised under Paseo on 2026-08-30. The permission bridge and the read, write and
-edit tools all work, and a conversation continues correctly across turns within a
-session. The reopened-thread path (`session/load` or `session/resume` — which
-Paseo sends is not yet established) is still untested; it is in
-[TODO.md](TODO.md). The cancellation defect the verification turned up is fixed
-below.
-
 ### Fixed
 
 - One "Always allow" on a command tool no longer approves every later command.
@@ -272,33 +264,29 @@ below.
   fork, which has had the bridge all along. The bypass is still documented, as an
   opt-in with a warning.
 
-### Known issues
-
-- An "Always allow" answer is keyed by tool name, not by arguments, so approving
-  `run_command` once approves every later command in that session -- `rm -rf` and
-  all. The containment and sensitive-path checks still run on a remembered allow,
-  but they read arguments as paths and a command line is one opaque string, so
-  `cat /etc/shadow` is not recognised as naming a path at all. Documented in the
-  README under "What 'Always' remembers", pinned by two tests that assert the
-  current behaviour on purpose, and tracked in TODO.md.
-- The output channel is unbounded. Every notification now goes through one
-  `mpsc` to the single stdout writer, so a host that reads its end of the pipe
-  more slowly than agy produces events makes that queue grow without a ceiling.
-  Bounding it would push the backpressure onto agy, which is the right shape but
-  couples a stalled host to agy's progress, so it is measured and decided rather
-  than swapped in. Tracked in TODO.md.
 ### Maintenance
 
-- CI: `ci.yml` runs `cargo build`, unit tests, and the ignored I/O tier with
-  `--ignored --skip e2e` to exclude the four e2e tests; Rust 1.70 runs on Linux
-  and Windows. All Actions are SHA-pinned, checkout credentials are not
-  persisted, and e2e is protected by the approval-gated `e2e` environment with
-  its own `E2E_GEMINI_API_KEY`. No formatting gate — the tree is not
-  rustfmt-clean.
+- CI: `cargo clippy --all-targets -- -D warnings` and a `cargo llvm-cov` coverage
+  report (artifact + job summary; no threshold).
+- Pre-push hook runs clippy and the unit tier after the fork-guard URL check;
+  install with `git config core.hooksPath .githooks`. Set `SKIP_LOCAL_GATES=1`
+  to skip clippy/tests for one push.
+- `handle_session_prompt` cognitive-complexity baseline recorded as 39/25 for the
+  refactor entry; `WalkedToolFields` type alias fixes `clippy::type_complexity`
+  in `protobuf.rs`.
+- Plans live in `plans/`, `plans/completed/`, and `plans/deferred/`; CHANGELOG
+  style and semver deferral documented in `AGENTS.md`.
+- CI: `ci.yml` runs `cargo build`, unit tests, the ignored I/O tier with
+  `--ignored --skip e2e`, `cargo clippy --all-targets -- -D warnings`, and a
+  `cargo llvm-cov` coverage report; Rust 1.70 runs on Linux and Windows. All
+  Actions are SHA-pinned, checkout credentials are not persisted, and e2e is
+  protected by the approval-gated `e2e` environment with its own
+  `E2E_GEMINI_API_KEY`. No formatting gate — the tree is not rustfmt-clean.
 - Hard fork: the `upstream` remote is removed, `gh repo set-default` points at
-  this fork, and `pre-push` refuses any target but `kgrizz-git/agy-acp`. Note
-  that `gh pr create` in a fork defaults its base to the parent repo regardless
-  of git remotes, which is what that second guard is for.
+  this fork, and `.githooks/pre-push` refuses any target but `kgrizz-git/agy-acp`
+  after `git config core.hooksPath .githooks`. Note that `gh pr create` in a fork
+  defaults its base to the parent repo regardless of git remotes, which is what
+  that second guard is for.
 - `scripts/check-upstream.sh` and a weekly workflow report commits on
   `hicder/agy-acp` that this fork has not taken, comparing against
   `.upstream-watermark`. The watermark moves only in a commit a human made.

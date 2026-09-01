@@ -7,12 +7,14 @@ Single Rust crate. ACP (Agent Client Protocol) stdio adapter for Google Antigrav
 ```bash
 cargo build                    # debug build
 cargo build --release          # release build (required for e2e tests)
+cargo clippy --all-targets -- -D warnings  # lint (same bar as CI)
 cargo test                     # unit tests (fast; some use a scratch dir in $TMPDIR)
 cargo test -- --include-ignored  # adds session persist/restore and DB tests
 cargo test e2e -- --ignored --nocapture  # e2e only (needs agy binary + auth)
 ```
 
-No separate lint/typecheck/format commands — just `cargo build` and `cargo test`.
+No separate typecheck/format commands — `cargo build` and `cargo clippy` cover
+those. The tree is not rustfmt-clean; do not run bare `cargo fmt`.
 
 Work items live in [TODO.md](TODO.md), not here — this file describes how the
 code works today. Completed work is recorded in [CHANGELOG.md](CHANGELOG.md).
@@ -30,6 +32,37 @@ completion. When a piece of work gets a plan (kept under `plans/`):
   planning. Per TODO.md's own rule, entries are deleted on landing, not ticked.
 - This applies symmetrically: if an entry is removed before its work ships, the
   work becomes untracked. Premature deletion is the bug to avoid.
+
+### Plans and CHANGELOG discipline
+
+Plans live in three buckets:
+
+- `plans/` — in-flight work being planned or implemented. The matching `TODO.md`
+  entry still exists.
+- `plans/completed/` — work that landed on `main`. Historical record; edit only
+  for typo fixes that change no meaning. If a completed plan turns out wrong,
+  write a new plan instead of rewriting the old one.
+- `plans/deferred/` — work explicitly parked. Each file carries a one-line
+  "Why deferred" section.
+
+Filenames keep their topic (`permission-command-keying.md`), not a status
+prefix; the directory carries the status. In-flight plans are linked from
+`TODO.md` as `Plan: plans/<name>.md`. On landing, move the plan to
+`plans/completed/<name>.md` and delete the TODO entry.
+
+**CHANGELOG** entries are bullets only — one short clause per observable change.
+Categories under each version, in order: **Added**, **Changed**, **Fixed**,
+**Removed**, **Maintenance**. Omit empty categories. Citations go at the end of
+the bullet in parentheses (`(PR #9)`). No "Known issues" section — open problems
+belong in `TODO.md`. An `## Unreleased` section exists only while a release is
+being cut.
+
+**Semver is deferred.** `Cargo.toml` stays at `0.1.0` with no tags and no
+release workflow until there is an external reason to cut a release (public
+announcement, `cargo install` use case, downstream version requirement). Three
+options when that happens: stay on `## Unreleased`, adopt date-stamped headings,
+or adopt semver with tags and a release workflow. The first release under semver
+would be `0.2.0`.
 
 > This is a **hard fork** of `hicder/agy-acp`: no upstream remote, no pull requests
 > filed there. Fork-specific context and workflow are in the second half of this
@@ -68,9 +101,10 @@ completion. When a piece of work gets a plan (kept under `plans/`):
    - Auth via `GEMINI_API_KEY` env var or macOS Keychain (`~/.gemini/antigravity-cli/settings.json`)
    - `cargo build --release` must have been run first
 
-CI (`ci.yml`) enforces `cargo build`, unit tests, and the ignored I/O tier
-(`cargo test -- --ignored --skip e2e`); Rust 1.70 is the tested MSRV on Linux
-and Windows. The Unix-socket `--permission-prompts` bridge is intentionally
+CI (`ci.yml`) enforces `cargo build`, unit tests, the ignored I/O tier
+(`cargo test -- --ignored --skip e2e`), `cargo clippy --all-targets -- -D warnings`,
+and a `cargo llvm-cov` coverage report (artifact + job summary; no threshold).
+Rust 1.70 is the tested MSRV on Linux and Windows. The Unix-socket `--permission-prompts` bridge is intentionally
 unavailable on Windows and fails closed there. E2e (`e2e.yml`) runs only after
 approval of the protected `e2e` GitHub environment for same-repository PRs;
 fork PRs skip before requesting approval. The environment holds
@@ -151,9 +185,10 @@ Hard fork as of August 2026. Concretely:
 - `gh repo set-default kgrizz-git/agy-acp`, so `gh pr create` targets this repo
   rather than the parent — being a GitHub fork, it would otherwise default the PR
   base to `hicder/agy-acp` no matter what the git remotes say.
-- `.git/hooks/pre-push` denies by default: any push whose URL is not
-  `kgrizz-git/agy-acp` is refused. Reinstall it with
-  `cp .githooks/pre-push .git/hooks/pre-push && chmod +x .git/hooks/pre-push`.
+- `.githooks/pre-push` denies by default: any push whose URL is not
+  `kgrizz-git/agy-acp` is refused. After cloning, run
+  `git config core.hooksPath .githooks` once. Set `SKIP_LOCAL_GATES=1` to skip
+  the clippy and unit-test checks for a single push; the fork guard always runs.
 
 GitHub still records this repo as a fork; leaving the fork network is not
 self-serve. The guards above are what actually prevent a stray pull request.
@@ -207,6 +242,12 @@ in the repository settings.
 - **Do not run bare `cargo fmt`.** The repo is not kept rustfmt-clean and has no
   format command, so it reflows files a change does not touch. Format specific
   files, or restore the rest afterwards with `git checkout HEAD -- <path>`.
+- **Pre-push hook.** After cloning, run `git config core.hooksPath .githooks`
+  once. The hook runs `cargo clippy --all-targets -- -D warnings` and the unit
+  tier (`cargo test`). Set `SKIP_LOCAL_GATES=1` to bypass those for one push;
+  the fork-guard URL check always runs.
+- **Local coverage.** `cargo-llvm-cov` is not a dev-dependency. Install with
+  `cargo install cargo-llvm-cov --locked` to reproduce the CI coverage report.
 - Paseo runs the adapter as `["agy-acp", "--permission-prompts"]` in
   `~/.paseo/config.json`. Provider command changes need a daemon restart.
 - The permission flag is off by default. Without it the adapter behaves as the

@@ -53,11 +53,13 @@ documentation-and-workflow changes that the user owns the review of.
 | `plans/ci-workflow.md` | Move to `plans/completed/ci-workflow.md`. Landed PR #4 (commit `959a666`). |
 | `plans/fix-test-read-response-from-db.md` | Move to `plans/completed/fix-test-read-response-from-db.md`. Landed commit `661d391`. |
 | `plans/permission-command-keying.md` | Move to `plans/completed/permission-command-keying.md`. Landed PR #9 (commit `f60efc9`). |
-| `plans/deferred/` | New directory. Empty in this PR. The first entry lands with whichever work explicitly defers something (e.g., the harness plan's own "Open questions" below, if the user takes that route). |
+| `plans/deferred/` | New directory with a `.gitkeep` (git does not track empty dirs). Empty in this PR. |
 | `plans/completed/` | New directory. Holds the three moved plans, plus the completed quality-gates and harness plans once their work ships. |
-| `AGENTS.md` | New section: **Plans and CHANGELOG discipline** (extends the existing **Plans and TODO discipline** subsection at `AGENTS.md:20-32`). Documents the three-bucket plan layout, the CHANGELOG style, and the semver-deferred decision. |
-| `CHANGELOG.md` | Two landing-time edits: collapse the duplicate headings under `## Unreleased`, delete the stale "Known issues" section (the two items it lists are both already fixed or moved into `## Unreleased` → `### Fixed`). **In this PR** the harness plan records the convention; the actual reformat happens at the next landing commit that touches CHANGELOG, since the discipline says "no doc edits without the work they describe". |
+| `AGENTS.md` | New subsection: **Plans and CHANGELOG discipline** (after the existing **Plans and TODO discipline** at `AGENTS.md:20-32`). Documents the three-bucket plan layout, the CHANGELOG style, semver deferral, and updates the plan-path rule: in-flight plans live at `plans/<name>.md`; completed plans at `plans/completed/<name>.md`. |
+| `CHANGELOG.md` | **Not edited in this PR.** The harness plan *records* the convention; the first sweep (collapse duplicate headings, delete stale "Known issues", rewrite bullets) lands with the quality-gates landing commit or a deliberate follow-on sweep commit. |
 | `Cargo.toml` | No change. `version = "0.1.0"` stays. |
+
+Note: SHAs cited for moved plans (`959a666`, `661d391`, `f60efc9`) are their PR merge commits — the convention used throughout the repo. The individual file-introducing commits differ (e.g., `f60efc9` merges `permission-command-keying`; the file was first added on `d2aa887`), but the merge commit is the public, reviewable record.
 
 The discipline rule, restated: a convention's *first* example in the
 CHANGELOG is the next landing commit, not this one. This PR lays the
@@ -80,7 +82,10 @@ plans/deferred/          # work explicitly parked, with the reason in the plan
 - **Completed** plans are historical record. They describe a decision that
   already shipped, kept so the next reader can find the reasoning without
   re-deriving it. They are not modified after landing except for typo fixes
-  that change no meaning.
+  that change no meaning. If a completed plan turns out to be wrong, it is
+  not edited; a new plan is written (either reviving the work from deferred
+  or creating a new in-flight plan), and the completed file is left as
+  historical record.
 - **Deferred** plans are explicitly parked. Each carries a one-line "Why
   deferred" section so the next reader can decide whether the reason still
   applies. They are *not* deleted; a future PR may revive them.
@@ -97,9 +102,12 @@ Plan filenames keep their current names inside `plans/completed/`. The
 `plans/completed/permission-command-keying.md`, not
 `plans/completed/permission-command-keying-done.md`. Reasons:
 
-- File names are referenced from `TODO.md` as `Plan: plans/<name>.md`.
-  Moving the file preserves the cross-link; renaming it would break the
-  link in every TODO entry that points at a completed plan.
+- File names are referenced from `TODO.md` as `Plan: plans/<name>.md`
+  while the work is in flight. On landing, the plan moves to
+  `plans/completed/<name>.md` and the TODO entry is deleted — so active
+  cross-links never point at `completed/`. Historical references in
+  `dev-docs/`, workflow comments, and completed plans themselves must be
+  updated when a plan moves; the harness step below lists the known ones.
 - The completed/deferred distinction is *first-class*; it does not need
   a redundant suffix in the filename. Three plans in `plans/completed/`
   and zero in `plans/deferred/` is a real, readable signal.
@@ -139,9 +147,11 @@ The plan explicitly does not adopt semver and explicitly does not adopt
 date-stamping either. It records the three options and the trigger that
 would force a choice:
 
-1. **Stay on 0.1.0, no tags.** Continue accumulating work in
-   `## Unreleased`; cut a release when there is a reason (a public
-   announcement, a `cargo install` use case, an external consumer).
+1. **Status quo: stay on 0.1.0, no tags.** (This is what the repo
+   does today — the `## Unreleased` section already exists with no
+   release workflow.) Continue accumulating work there; cut a release
+   when there is a reason (a public announcement, a `cargo install`
+   use case, an external consumer).
 2. **Adopt date-stamping.** `## Unreleased` becomes `## 2026-08-31` on
    each landing commit. No semver, no tags, no release workflow. The
    CHANGELOG is the source of truth.
@@ -174,10 +184,26 @@ TODO entry that does not exist and conclude the plan is missing one.
 
 ```bash
 mkdir -p plans/completed plans/deferred
+touch plans/deferred/.gitkeep
 git mv plans/ci-workflow.md                     plans/completed/ci-workflow.md
 git mv plans/fix-test-read-response-from-db.md  plans/completed/fix-test-read-response-from-db.md
 git mv plans/permission-command-keying.md       plans/completed/permission-command-keying.md
 ```
+
+### 1b. Update cross-references to moved plans
+
+After the `git mv` calls, fix every reference that still points at the
+old in-flight path:
+
+| File | Update |
+|---|---|
+| `.github/workflows/e2e.yml` | Comment at line 58: `plans/ci-workflow.md` → `plans/completed/ci-workflow.md` |
+| `dev-docs/investigations/kilo-longcat-brief.md` | `plans/permission-command-keying.md` → `plans/completed/permission-command-keying.md` |
+| `dev-docs/investigations/kilo-hy3-brief.md` | Same |
+
+Run `grep -r "plans/ci-workflow\|plans/permission-command-keying\|plans/fix-test-read-response" .`
+and confirm only `plans/completed/` paths remain (plus any in-flight
+plans still under `plans/`).
 
 `plans/deferred/` is empty in this PR; the directory is created so the
 convention is enforced by the directory's presence, not by an
@@ -186,9 +212,9 @@ convention is enforced by the directory's presence, not by an
 ### 2. Update `AGENTS.md`
 
 Extend `### Plans and TODO discipline` (currently lines 20–32) with a
-follow-on subsection `### Plans and CHANGELOG discipline` (or a
-sibling top-level section; pick during implementation, the location
-matters less than the content).
+follow-on subsection `### Plans and CHANGELOG discipline`. The location
+is fixed — it follows the existing discipline subsection — so the
+`grep` for "discipline" finds both.
 
 Content to add:
 
@@ -226,30 +252,47 @@ forgotten.
 `Cargo.toml` keeps `version = "0.1.0"`. No tag, no release workflow.
 The D4 decision is *defer*.
 
+## Coordination with quality-gates
+
+Both plans land in the **same PR**. Land order within the PR:
+
+1. **Harness first** — create `plans/completed/` and `plans/deferred/`,
+   move the three landed plans, update cross-references, add AGENTS.md
+   discipline subsection.
+2. **Quality gates second** — wire CI, fix clippy, expand pre-push,
+   update AGENTS.md commands/CI/local-gotchas.
+3. **Landing cleanup last** (same commit or final commit in the PR) —
+   delete the quality-gates TODO entry, CHANGELOG Maintenance bullets,
+   move `plans/quality-gates.md` and `plans/harness.md` to
+   `plans/completed/`, update `pr_compliance_checklist.yaml`.
+
+The harness directories must exist before the quality-gates landing step
+moves its plan into `completed/`.
+
 ## Verification
 
 - `git status` after the moves: `plans/completed/` contains the three
   moved files; `plans/` contains only `quality-gates.md` and
-  `harness.md` (the two plans currently in flight on the branch); an
-  empty `plans/deferred/` exists.
-- `grep -r "plans/ci-workflow" .` returns no hits — the file moved.
-- `grep -r "plans/permission-command-keying" .` returns only
-  self-references inside the plan itself.
+  `harness.md` (the two plans currently in flight on the branch);
+  `plans/deferred/.gitkeep` exists.
+- `grep -r "plans/ci-workflow\|plans/permission-command-keying\|plans/fix-test-read-response" .`
+  returns only `plans/completed/` paths (plus in-flight plans under
+  `plans/`). No stale `plans/ci-workflow.md` references.
 - `grep -E "^## Unreleased$|^### Fixed$|^### Maintenance$" CHANGELOG.md`
   shows the duplicated-heading bug is still present — this PR does not
-  fix it, and the verification *confirms* the bug is preserved for the
-  next landing commit to fix. (The absence of a fix here is the
-  discipline working.)
+  fix it. This hit is *expected* (see step 3); the verification confirms
+  the bug is preserved for the next landing commit to fix, not hidden by
+  a premature edit. (The absence of a fix here is the discipline working.)
 - `cargo build` exits 0. The plan changes are doc and file moves only;
   no code is touched.
 - `cargo test` exits 0. Same reason.
 
 ## Out of scope, deliberately
 
-- **The CHANGELOG sweep** — the duplicated headings, the stale "Known
-  issues" entry. Mentioned in step 3 as a follow-up; not in this plan's
-  diff because the discipline says it lands with its work, not
-  alongside a workflow change.
+- **The CHANGELOG sweep** — duplicated headings (`### Fixed` appears twice
+  under `## Unreleased`), stale "Known issues" (both items are fixed or
+  tracked in TODO.md). Recorded as a follow-up for the quality-gates
+  landing commit; not in the harness diff itself.
 - **A release workflow, tags, or `cargo release` config.** These are the
   artefacts of an *adopted* versioning model. The plan defers the
   decision, so it cannot adopt the artefacts.
@@ -283,13 +326,14 @@ to be made to land the workflow change:
   want the narrative framing for the post-streaming era; that is a
   call worth making deliberately.
 - **Whether the "Maintenance" heading survives in the new convention.**
-  The current convention is "Added / Changed / Fixed / Maintenance";
-  the proposed new convention is "Added / Changed / Fixed / Removed /
-  Maintenance" in that order. The order is a small thing but it is
-  the kind of thing that should be a conscious choice, not a
-  copy-paste.
+  The current `CHANGELOG.md` has no consistent category order under
+  `## Unreleased` (Fixed, Maintenance, Added, Changed, Fixed — a
+  structural mess rather than a convention); the proposed new
+  convention is "Added / Changed / Fixed / Removed / Maintenance" in
+  that order. The order is a small thing but it is the kind of thing
+  that should be a conscious choice, not a copy-paste.
 
-## Plan:host constraints the implementation has to respect
+## Host constraints the implementation has to respect
 
 Carried over from the quality-gates plan on the same branch, because
 the same repo has the same harness:
@@ -297,12 +341,8 @@ the same repo has the same harness:
 - **The TODO/CHANGELOG discipline is a hard rule.** No TODO deletions
   in this PR, no CHANGELOG edits in this PR. The plan describes both;
   the next landing commit does them.
-- **No bare `cargo fmt`.** `AGENTS.md` says the repo is not
-  rustfmt-clean. The AGENTS.md prose edits may produce one or two
-  lines that exceed the formatter's idea of width; `rustfmt --check`
-  against the touched file only, hand-fix any drift.
-- **One writer to stdout.** Not relevant to this plan; recorded so
-  the next reviewer does not suggest consolidating plan-writing
-  paths.
-- **No new `TODO.md` entries.** This is a workflow change, not
-  behaviour. The D5 decision is *no entry*.
+- **No bare `cargo fmt`.** `AGENTS.md` says the repo is not rustfmt-clean.
+  The AGENTS.md prose edits may produce lines that exceed the formatter's
+  width; format only the touched file and confirm it is otherwise unchanged.
+- **No new `TODO.md` entries.** This is a workflow change, not behaviour.
+  The D5 decision is *no entry*.

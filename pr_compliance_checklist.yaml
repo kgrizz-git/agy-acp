@@ -125,6 +125,18 @@ pr_compliances:
       straight to usize. A length of u64::MAX wraps and turns a bounds check into a
       pass.
 
+  - title: "CI enforces clippy and publishes coverage"
+    compliance_label: false
+    objective: >
+      Quality gates from plans/completed/quality-gates.md: clippy at -D warnings
+      and an llvm-cov report in CI; pre-push runs clippy and unit tests locally.
+    success_criteria: >
+      ci.yml has clippy and coverage jobs; reviewers check the coverage artifact
+      on PRs that add or change production code.
+    failure_criteria: >
+      Merging Rust changes without a green clippy job or without reading the
+      coverage report when the diff touches untested paths.
+
   - title: "This is a hard fork of hicder/agy-acp"
     compliance_label: false
     objective: >

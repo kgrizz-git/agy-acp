@@ -10,7 +10,7 @@ section *What "Always" remembers*.
 
 > **Superseded on one point.** This brief is kept as the investigation record, not
 > as the specification. Its R1 keys the sticky answer by the `CommandLine` string
-> alone; [plans/permission-command-keying.md](../../plans/permission-command-keying.md)
+> alone; [plans/completed/permission-command-keying.md](../../plans/completed/permission-command-keying.md)
 > supersedes that with a fingerprint of the *whole* argument object, because
 > keying on `CommandLine` alone drops security-relevant siblings such as `Cwd`
 > from the scope of what the user approved. Implement the plan, not this. The
