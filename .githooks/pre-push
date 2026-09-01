@@ -19,19 +19,7 @@ set -e
 run_timeout() {
 	secs=$1
 	shift
-	perl -e '
-		my $secs = shift @ARGV;
-		my $pid = fork();
-		die "fork: $!\n" unless defined $pid;
-		if ($pid == 0) { exec @ARGV or die "exec: $!\n" }
-		$SIG{ALRM} = sub { kill 15, $pid };
-		alarm $secs;
-		waitpid $pid, 0;
-		alarm 0;
-		if ($? == 0) { exit 0 }
-		if ($? & 127) { exit 124 }
-		exit($? >> 8);
-	' "$secs" "$@"
+	perl "$(dirname "$0")/../scripts/run-timeout.pl" "$secs" "$@"
 }
 
 remote_name="$1"
