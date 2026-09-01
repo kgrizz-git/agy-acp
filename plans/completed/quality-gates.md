@@ -263,7 +263,7 @@ gotcha is `git config core.hooksPath .githooks` and nothing else.
 
 Both plans land in the **same PR**. The harness plan must create
 `plans/completed/` before this plan's landing step moves
-`plans/quality-gates.md` there. See `plans/harness.md` → "Coordination
+`plans/quality-gates.md` there. See `plans/completed/harness.md` → "Coordination
 with quality-gates" for the full commit order.
 
 ## Out of scope, deliberately

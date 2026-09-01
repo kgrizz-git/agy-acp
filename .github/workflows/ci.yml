@@ -78,7 +78,7 @@ jobs:
       - name: Coverage report
         run: |
           cargo llvm-cov --workspace --lcov --output-path lcov.info
-          cargo llvm-cov --workspace --summary-only | tee coverage-summary.txt
+          cargo llvm-cov report --summary-only | tee coverage-summary.txt
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: lcov-${{ github.run_id }}
