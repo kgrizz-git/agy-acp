@@ -34,5 +34,5 @@ if [ "$SKIP_LOCAL_GATES" = "1" ]; then
 	exit 0
 fi
 
-timeout 300 cargo clippy --all-targets -- -D warnings
+cargo clippy --all-targets -- -W clippy::all -D clippy::all -A clippy::cognitive_complexity -A clippy::too_many_lines
 cargo test

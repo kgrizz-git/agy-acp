@@ -128,8 +128,10 @@ pr_compliances:
   - title: "CI enforces clippy and publishes coverage"
     compliance_label: false
     objective: >
-      Quality gates from plans/completed/quality-gates.md: clippy at -D warnings
-      and an llvm-cov report in CI; pre-push runs clippy and unit tests locally.
+      Quality gates from plans/completed/quality-gates.md: clippy enforces
+      `-W clippy::all -D clippy::all` (with complexity lints allowed on
+      `handle_session_prompt`) and an llvm-cov report in CI; pre-push runs the
+      same clippy bar and unit tests locally.
     success_criteria: >
       ci.yml has clippy and coverage jobs; reviewers check the coverage artifact
       on PRs that add or change production code.

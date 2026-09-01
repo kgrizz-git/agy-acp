@@ -266,7 +266,8 @@ of its own yet, so everything below is unreleased.
 
 ### Maintenance
 
-- CI: `cargo clippy --all-targets -- -D warnings` and a `cargo llvm-cov` coverage
+- CI: clippy enforces `-W clippy::all -D clippy::all` (complexity lints allowed on
+  `handle_session_prompt` at `#[warn]` until refactor) and a `cargo llvm-cov`
   report (artifact + job summary; no threshold).
 - Pre-push hook runs clippy and the unit tier after the fork-guard URL check;
   install with `git config core.hooksPath .githooks`. Set `SKIP_LOCAL_GATES=1`
@@ -277,8 +278,8 @@ of its own yet, so everything below is unreleased.
 - Plans live in `plans/`, `plans/completed/`, and `plans/deferred/`; CHANGELOG
   style and semver deferral documented in `AGENTS.md`.
 - CI: `ci.yml` runs `cargo build`, unit tests, the ignored I/O tier with
-  `--ignored --skip e2e`, `cargo clippy --all-targets -- -D warnings`, and a
-  `cargo llvm-cov` coverage report; Rust 1.70 runs on Linux and Windows. All
+  `--ignored --skip e2e`, clippy (`-W clippy::all -D clippy::all` with complexity
+  lints allowed on `handle_session_prompt`), and a `cargo llvm-cov` coverage report; Rust 1.70 runs on Linux and Windows. All
   Actions are SHA-pinned, checkout credentials are not persisted, and e2e is
   protected by the approval-gated `e2e` environment with its own
   `E2E_GEMINI_API_KEY`. No formatting gate — the tree is not rustfmt-clean.

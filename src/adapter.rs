@@ -817,8 +817,7 @@ impl Adapter {
     /// is the only writer of stdout. A second writer would interleave mid-line and
     /// corrupt the JSON-RPC stream, so the stream reader never touches the fd.
     // Complexity baseline for the refactor entry (TODO.md): 39/25 as of this branch.
-    // Re-measure with: cargo clippy --all-targets -- -W clippy::cognitive_complexity
-    #[allow(clippy::cognitive_complexity, clippy::too_many_lines)]
+    #[warn(clippy::cognitive_complexity, clippy::too_many_lines)]
     pub async fn handle_session_prompt(
         &mut self,
         id: Value,

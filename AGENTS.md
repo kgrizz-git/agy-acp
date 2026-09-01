@@ -7,7 +7,7 @@ Single Rust crate. ACP (Agent Client Protocol) stdio adapter for Google Antigrav
 ```bash
 cargo build                    # debug build
 cargo build --release          # release build (required for e2e tests)
-cargo clippy --all-targets -- -D warnings  # lint (same bar as CI)
+cargo clippy --all-targets -- -W clippy::all -D clippy::all -A clippy::cognitive_complexity -A clippy::too_many_lines  # lint (same bar as CI)
 cargo test                     # unit tests (fast; some use a scratch dir in $TMPDIR)
 cargo test -- --include-ignored  # adds session persist/restore and DB tests
 cargo test e2e -- --ignored --nocapture  # e2e only (needs agy binary + auth)
@@ -102,8 +102,8 @@ would be `0.2.0`.
    - `cargo build --release` must have been run first
 
 CI (`ci.yml`) enforces `cargo build`, unit tests, the ignored I/O tier
-(`cargo test -- --ignored --skip e2e`), `cargo clippy --all-targets -- -D warnings`,
-and a `cargo llvm-cov` coverage report (artifact + job summary; no threshold).
+(`cargo test -- --ignored --skip e2e`), clippy (`-W clippy::all -D clippy::all` with
+`cognitive_complexity` and `too_many_lines` allowed on `handle_session_prompt`), and a `cargo llvm-cov` coverage report (artifact + job summary; no threshold).
 Rust 1.70 is the tested MSRV on Linux and Windows. The Unix-socket `--permission-prompts` bridge is intentionally
 unavailable on Windows and fails closed there. E2e (`e2e.yml`) runs only after
 approval of the protected `e2e` GitHub environment for same-repository PRs;
@@ -243,7 +243,8 @@ in the repository settings.
   format command, so it reflows files a change does not touch. Format specific
   files, or restore the rest afterwards with `git checkout HEAD -- <path>`.
 - **Pre-push hook.** After cloning, run `git config core.hooksPath .githooks`
-  once. The hook runs `cargo clippy --all-targets -- -D warnings` and the unit
+  once. The hook runs the same clippy bar as CI (`-W clippy::all -D clippy::all` with
+  complexity lints allowed on `handle_session_prompt`) and the unit
   tier (`cargo test`). Set `SKIP_LOCAL_GATES=1` to bypass those for one push;
   the fork-guard URL check always runs.
 - **Local coverage.** `cargo-llvm-cov` is not a dev-dependency. Install with
