@@ -46,7 +46,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
           toolchain: stable
-          profile: minimal
+          components: clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       # -W/-D clippy::all (not -D warnings): handle_session_prompt uses
       # #[warn(clippy::cognitive_complexity, clippy::too_many_lines)] until refactor.
@@ -56,7 +56,7 @@ jobs:
         run: |
           cargo clippy --all-targets -- -W clippy::cognitive_complexity -A clippy::type_complexity 2>&1 \
             | tee complexity-baseline.txt
-          rg "cognitive_complexity|too_many_lines" complexity-baseline.txt \
+          grep -E 'cognitive_complexity|too_many_lines' complexity-baseline.txt \
             | head -5 >> "$GITHUB_STEP_SUMMARY" || true
 
   coverage:
