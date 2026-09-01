@@ -48,10 +48,10 @@ jobs:
           toolchain: stable
           profile: minimal
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-      # Deny all clippy lints except cognitive_complexity/too_many_lines on
-      # handle_session_prompt, which stay #[warn] until the refactor entry lands.
+      # -W/-D clippy::all (not -D warnings): handle_session_prompt uses
+      # #[warn(clippy::cognitive_complexity, clippy::too_many_lines)] until refactor.
       - name: Clippy
-        run: cargo clippy --all-targets -- -W clippy::all -D clippy::all -A clippy::cognitive_complexity -A clippy::too_many_lines
+        run: cargo clippy --all-targets -- -W clippy::all -D clippy::all
       - name: Complexity baseline (informational)
         run: |
           cargo clippy --all-targets -- -W clippy::cognitive_complexity -A clippy::type_complexity 2>&1 \

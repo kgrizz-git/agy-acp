@@ -70,7 +70,7 @@ is the next PR that lands a behavioural change.
 
 ### D1. Three-bucket plan layout
 
-```
+```text
 plans/                   # in-flight: work currently being planned or implemented
 plans/completed/         # work that has landed on main via a merged PR
 plans/deferred/          # work explicitly parked, with the reason in the plan
@@ -318,7 +318,7 @@ to be made to land the workflow change:
 - **What to call the `## Unreleased` section in the date-stamped
   future.** If the user picks date-stamping (option 2 in D4) the
   sections become `## YYYY-MM-DD`; the first one is the date of the
-  first landing commit after this PR. Today's date is 2026-08-31.
+  first landing commit after this PR (2026-08-31 when the plan was written).
 - **Whether the `## Unreleased` section's existing prose — the
   one-paragraph summary at lines 12–18 of `CHANGELOG.md` — survives
   the bullet rewrite.** My recommendation: drop it. The bullets are

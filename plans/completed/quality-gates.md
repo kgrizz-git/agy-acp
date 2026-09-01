@@ -15,7 +15,10 @@ way to PR #7, and the only thing that caught the gap was the rule that
 This plan wires four gates in `ci.yml` plus a local pre-push, in the order
 they reinforce each other:
 
-1. **`cargo clippy --all-targets -- -D warnings`** as a CI job.
+1. **`cargo clippy --all-targets -- -D warnings`** as a CI job. **As landed
+   (PR #10):** `-W clippy::all -D clippy::all` instead — `handle_session_prompt`
+   uses `#[warn(clippy::cognitive_complexity, clippy::too_many_lines)]`, and
+   `-D warnings` would deny those function-level warnings.
 2. **`cargo llvm-cov` coverage report** as a CI job, posted to the job summary.
 3. **Clippy nursery lints** for `cognitive_complexity` and `too_many_lines`,
    pinned against `handle_session_prompt` as `#![warn]` only — `#![deny]` is
@@ -191,9 +194,8 @@ Record the cognitive-complexity score as the baseline for the refactor
 entry:
 
 ```bash
-cargo clippy --all-targets -- \
-  -W clippy::cognitive_complexity -A clippy::type_complexity -- \
-  --message-format=json \
+cargo clippy --all-targets --message-format=json -- \
+  -W clippy::cognitive_complexity -A clippy::type_complexity \
   | jq 'select(.reason=="compiler-message") | .message'
 ```
 

@@ -15,11 +15,31 @@
 
 set -e
 
+# Portable timeout (GNU timeout is not on macOS).
+run_timeout() {
+	secs=$1
+	shift
+	"$@" &
+	pid=$!
+	(
+		sleep "$secs"
+		kill "$pid" 2>/dev/null
+	) &
+	killer=$!
+	wait "$pid" 2>/dev/null
+	status=$?
+	kill "$killer" 2>/dev/null
+	wait "$killer" 2>/dev/null
+	return $status
+}
+
 remote_name="$1"
 remote_url="$2"
 
 case "$remote_url" in
-*kgrizz-git/agy-acp*) ;;
+git@github.com:kgrizz-git/agy-acp | git@github.com:kgrizz-git/agy-acp.git) ;;
+https://github.com/kgrizz-git/agy-acp | https://github.com/kgrizz-git/agy-acp.git) ;;
+ssh://git@github.com/kgrizz-git/agy-acp | ssh://git@github.com/kgrizz-git/agy-acp.git) ;;
 *)
 	echo >&2
 	echo "pre-push: refusing to push to '$remote_name' ($remote_url)." >&2
@@ -34,5 +54,5 @@ if [ "$SKIP_LOCAL_GATES" = "1" ]; then
 	exit 0
 fi
 
-cargo clippy --all-targets -- -W clippy::all -D clippy::all -A clippy::cognitive_complexity -A clippy::too_many_lines
-cargo test
+run_timeout 300 cargo clippy --all-targets -- -W clippy::all -D clippy::all
+run_timeout 300 cargo test
