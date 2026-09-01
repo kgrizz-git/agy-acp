@@ -26,8 +26,10 @@ run_timeout() {
 		kill "$pid" 2>/dev/null
 	) &
 	killer=$!
+	set +e
 	wait "$pid" 2>/dev/null
 	status=$?
+	set -e
 	kill "$killer" 2>/dev/null
 	wait "$killer" 2>/dev/null
 	return $status

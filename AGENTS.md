@@ -187,8 +187,9 @@ Hard fork as of August 2026. Concretely:
   rather than the parent — being a GitHub fork, it would otherwise default the PR
   base to `hicder/agy-acp` no matter what the git remotes say.
 - `.githooks/pre-push` denies by default: only the canonical
-  `git@github.com:kgrizz-git/agy-acp` and `https://github.com/kgrizz-git/agy-acp`
-  remote forms (with or without `.git`) are allowed. After cloning, run
+  `git@github.com:kgrizz-git/agy-acp`, `https://github.com/kgrizz-git/agy-acp`, and
+  `ssh://git@github.com/kgrizz-git/agy-acp` remote forms (with or without `.git`)
+  are allowed. After cloning, run
   `git config core.hooksPath .githooks` once. Set `SKIP_LOCAL_GATES=1` to skip
   the clippy and unit-test checks for a single push; the fork guard always runs.
 
