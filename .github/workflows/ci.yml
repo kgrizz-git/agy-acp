@@ -36,6 +36,62 @@ jobs:
       - name: Test (ignored I/O, excluding e2e)
         run: cargo test --verbose -- --ignored --skip e2e
 
+  clippy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+        with:
+          toolchain: stable
+          components: clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      # -W/-D clippy::all (not -D warnings): handle_session_prompt uses
+      # #[warn(clippy::cognitive_complexity, clippy::too_many_lines)] until refactor.
+      - name: Clippy
+        run: cargo clippy --all-targets -- -W clippy::all -D clippy::all
+      - name: Complexity baseline (informational)
+        run: |
+          cargo clippy --all-targets -- -W clippy::cognitive_complexity -A clippy::type_complexity 2>&1 \
+            | tee complexity-baseline.txt
+          grep -E 'cognitive_complexity|too_many_lines' complexity-baseline.txt \
+            | head -5 >> "$GITHUB_STEP_SUMMARY" || true
+
+  coverage:
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+        with:
+          toolchain: stable
+          profile: minimal
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: taiki-e/install-action@065d6a08a14e61e89fb0a4c10eecdbdef39c7d8e # v2.85.4
+        with:
+          tool: cargo-llvm-cov
+      - name: Coverage report
+        run: |
+          cargo llvm-cov --workspace --lcov --output-path lcov.info
+          cargo llvm-cov report --summary-only | tee coverage-summary.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: lcov-${{ github.run_id }}
+          path: lcov.info
+      - name: Post coverage summary
+        run: |
+          {
+            echo "### Coverage"
+            head -20 coverage-summary.txt
+            echo
+            echo "Download \`lcov-${{ github.run_id }}\` for the full LCOV report."
+          } >> "$GITHUB_STEP_SUMMARY"
+
   msrv:
     strategy:
       matrix:

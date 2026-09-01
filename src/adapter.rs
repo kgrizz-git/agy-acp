@@ -816,6 +816,8 @@ impl Adapter {
     /// `notify_tx` carries `session/update` notifications to the main loop, which
     /// is the only writer of stdout. A second writer would interleave mid-line and
     /// corrupt the JSON-RPC stream, so the stream reader never touches the fd.
+    // Complexity baseline for the refactor entry (TODO.md): 39/25 as of this branch.
+    #[warn(clippy::cognitive_complexity, clippy::too_many_lines)]
     pub async fn handle_session_prompt(
         &mut self,
         id: Value,

@@ -430,14 +430,15 @@ pub fn message_chunk_update(session_update: &str, text: String) -> Value {
     })
 }
 
-fn parse_tool_run(
-    blob: &[u8],
-) -> Option<(
+/// Fields extracted from a tool-run protobuf blob during conversation replay.
+struct WalkedToolFields(
     Option<String>,
     Option<String>,
     Option<Value>,
     Option<String>,
-)> {
+);
+
+fn parse_tool_run(blob: &[u8]) -> Option<WalkedToolFields> {
     get_varint_field(blob, 1)?;
     let tool = get_proto_field(blob, 5)?;
     let call = get_proto_field(&tool, 4);
@@ -465,7 +466,7 @@ fn parse_tool_run(
     if name.is_none() && raw_input.is_none() {
         return None;
     }
-    Some((call_id, name, raw_input, title))
+    Some(WalkedToolFields(call_id, name, raw_input, title))
 }
 
 fn parse_search_hits(grep: &[u8]) -> Vec<Value> {
@@ -590,8 +591,8 @@ pub fn extract_tool_update_from_step_payload(
             looks_like_tool_name(trimmed).then(|| trimmed.to_string())
         })
         .or_else(|| strings.iter().find_map(|s| extract_tool_name(s)));
-    let (parsed_call_id, parsed_name, parsed_input, parsed_title) =
-        parsed_tool.unwrap_or((None, None, None, None));
+    let WalkedToolFields(parsed_call_id, parsed_name, parsed_input, parsed_title) =
+        parsed_tool.unwrap_or(WalkedToolFields(None, None, None, None));
     let name = parsed_name.or(scraped_name);
     let raw_input = parsed_input.or(scraped_input);
     let raw_output = parsed_result;

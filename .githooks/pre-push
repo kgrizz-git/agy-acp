@@ -3,29 +3,45 @@
 #
 # Deny-by-default. The only push target is kgrizz-git/agy-acp; anything else --
 # a re-added upstream remote, a fork-network sibling, a mistyped URL -- is
-# refused before it leaves the machine. The older version of this hook named
-# hicder/agy-acp specifically, which only helps for the mistake you thought of.
+# refused before it leaves the machine.
 #
-# Canonical copy lives in .git/hooks/pre-push, NOT here. .git/hooks is outside
-# the working tree, so it keeps working on every branch. This copy is for
-# reference and reinstallation:
+# After cloning, run once:
+#     git config core.hooksPath .githooks
 #
-#     cp .githooks/pre-push .git/hooks/pre-push && chmod +x .git/hooks/pre-push
+# Local quality gates (clippy + unit tests) run on every push unless
+# SKIP_LOCAL_GATES=1 is set. The fork guard always runs.
 #
-# Bypass with `git push --no-verify` when you mean it.
+# Bypass everything with `git push --no-verify` when you mean it.
 
 set -e
+
+# Portable timeout (GNU timeout is not on macOS; perl is).
+run_timeout() {
+	secs=$1
+	shift
+	perl "$(dirname "$0")/../scripts/run-timeout.pl" "$secs" "$@"
+}
 
 remote_name="$1"
 remote_url="$2"
 
 case "$remote_url" in
-*kgrizz-git/agy-acp*) exit 0 ;;
+git@github.com:kgrizz-git/agy-acp | git@github.com:kgrizz-git/agy-acp.git) ;;
+https://github.com/kgrizz-git/agy-acp | https://github.com/kgrizz-git/agy-acp.git) ;;
+ssh://git@github.com/kgrizz-git/agy-acp | ssh://git@github.com/kgrizz-git/agy-acp.git) ;;
+*)
+	echo >&2
+	echo "pre-push: refusing to push to '$remote_name' ($remote_url)." >&2
+	echo "  This is a hard fork; the only allowed push target is kgrizz-git/agy-acp." >&2
+	echo "  If you really mean it: git push --no-verify" >&2
+	echo >&2
+	exit 1
+	;;
 esac
 
-echo >&2
-echo "pre-push: refusing to push to '$remote_name' ($remote_url)." >&2
-echo "  This is a hard fork; the only allowed push target is kgrizz-git/agy-acp." >&2
-echo "  If you really mean it: git push --no-verify" >&2
-echo >&2
-exit 1
+if [ "$SKIP_LOCAL_GATES" = "1" ]; then
+	exit 0
+fi
+
+run_timeout 300 cargo clippy --all-targets -- -W clippy::all -D clippy::all
+run_timeout 300 cargo test

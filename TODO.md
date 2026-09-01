@@ -10,12 +10,6 @@ carries no work items.
 
 The few things worth picking up next. Each is a pointer; the detail lives below.
 
-In rough order. The gates come before the refactor so the refactor has a net
-under it — the same code that keeps producing turn-lifecycle bugs is the code
-whose coverage nobody measures.
-
-- [Automated quality gates: coverage, lint, complexity, size](#automated-quality-gates-coverage-lint-complexity-size)
-  — nothing enforces tests, lint or size today; review habit is the only gate.
 - [Split the two files and the one function that have outgrown reading](#split-the-two-files-and-the-one-function-that-have-outgrown-reading)
   — `handle_session_prompt` is 322 lines and is where every turn-lifecycle bug has been.
 - [Verify the port under Paseo](#verify-the-port-under-paseo) — done except the
@@ -23,7 +17,7 @@ whose coverage nobody measures.
 - [Reconcile the tool lists with agy's real toolset](#reconcile-the-tool-lists-with-agys-real-toolset)
   — five names are for tools agy lacks; seven of its tools are unclassified.
 - [SonarCloud analyses nothing today](#sonarcloud-analyses-nothing-today-and-only-ci-based-analysis-can-change-that)
-  — decide it with the quality gates above; the two overlap and running both gives
+  — overlaps with the cargo clippy/llvm-cov gates now in CI; running both gives
   two sources of truth for the same findings.
 - [Rename the binary and crate](#rename-the-binary-and-crate) — cheaper now than
   after anyone else installs it.
@@ -298,44 +292,6 @@ installs ambiguous. Renaming touches `Cargo.toml`, the `agy-acp permission-hook`
 subcommand the hook shells out to, the Paseo provider command in
 `~/.paseo/config.json`, and the README. Existing state lives in `~/.openab/agy-
 acp/`, so decide whether to migrate it or leave it in place.
-
-#### Automated quality gates: coverage, lint, complexity, size
-
-Nothing enforces any of this today. `ci.yml` runs `cargo build`, `cargo test` and
-the ignored I/O tier; the only git hook is `pre-push`, a fork guard; there are no
-Claude Code hooks. Every quality property this fork cares about is currently held
-up by review habit alone, which is why a test that passed while proving nothing
-had to be caught by hand.
-
-Wanted, roughly in order of value:
-
-- **Coverage.** `cargo llvm-cov` in CI. Report the number before gating on it: a
-  threshold set today would mostly measure the non-Unix fallbacks that cannot run
-  on the Linux runner and the e2e tier CI skips, and would push toward tests
-  written to move a percentage. What is actually wanted is a check that new code
-  arrives with tests, which a raw number only approximates.
-- **Lint.** `cargo clippy` is not run anywhere. It currently reports one warning
-  (`very complex type`, from the `(u32, u32)` process-table pair), so the gate can
-  go in at `-D warnings` after that one is addressed.
-- **Type checks.** Nothing to add: `cargo build` on stable and 1.70, on Linux and
-  Windows, already type-checks every `cfg` combination this fork ships. Recorded
-  here so the question is not asked again.
-- **Formatting.** Deliberately absent — CI says so, and the tree is not
-  rustfmt-clean (`cargo fmt --check` reports drift in two files). Either adopt it
-  in one sweep or keep the exemption; leaving it undecided is the bad option.
-- **Complexity.** Clippy's `cognitive_complexity` and `too_many_lines` are nursery
-  lints and would need `#![warn(...)]` opt-in. Worth trying against
-  `handle_session_prompt`, which is the one function that has grown past easy
-  reading.
-- **File size.** See the refactoring entry below; a cap is only worth setting once
-  the shape the code should end up in is decided.
-- **SonarCloud.** Has never analyzed this repo and cannot as configured. Its own
-  entry below.
-
-Hooks and CI serve different ends here and both are wanted: a local hook gives
-the fast signal while writing (fmt, clippy, the unit tier), CI is what actually
-blocks a merge. A hook that duplicates CI slowly is worse than no hook, so scope
-the local one to what is quick.
 
 #### SonarCloud analyses nothing today, and only CI-based analysis can change that
 

@@ -55,7 +55,7 @@ jobs:
       - name: Install agy
         # Pinned agy release and SHA-256 are deliberate compatibility inputs, as is
         # the modelProvider: gemini config below. Run the local 1.1.16 preflight
-        # from plans/ci-workflow.md before merging this workflow.
+        # from plans/completed/ci-workflow.md before merging this workflow.
         run: |
           AGY_VERSION=1.1.16
           AGY_ARCHIVE="$RUNNER_TEMP/agy_cli_linux_x64.tar.gz"
