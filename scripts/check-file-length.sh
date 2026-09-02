@@ -15,7 +15,7 @@ CAP=1200
 
 # path<TAB>ceiling
 EXEMPT=$(cat <<'ENTRIES'
-src/adapter.rs	1264
+src/adapter.rs	1262
 ENTRIES
 )
 

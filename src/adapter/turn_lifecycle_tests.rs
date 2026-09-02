@@ -45,14 +45,32 @@ fn stub_agy(body: &str) -> StubAgy {
     StubAgy { dir, bin }
 }
 
+/// `PermissionBridge::start` binds one socket per *process*, and it unlinks the
+/// path before binding. Two bridge tests in this binary therefore race: the
+/// loser's bind lands after the winner's unlink and fails with EEXIST. Held for
+/// the whole test rather than just the `start` call, because the bridge owns
+/// that path until it drops -- and a `tokio` mutex rather than a `std` one,
+/// since it is held across the `await` on the turn.
+static BRIDGE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// Runs one turn against `stub`, returning the response lines and the
 /// adapter, so a test can assert on live children after the turn.
 async fn run_turn(adapter: &mut Adapter, cancelled: Arc<AtomicBool>) -> Vec<String> {
+    run_turn_for(adapter, "sess-1", cancelled).await
+}
+
+/// For the tests that need a session the adapter actually knows about, rather
+/// than the bare id most of these turns get away with.
+async fn run_turn_for(
+    adapter: &mut Adapter,
+    session_id: &str,
+    cancelled: Arc<AtomicBool>,
+) -> Vec<String> {
     let (notify_tx, _notify_rx) = tokio::sync::mpsc::unbounded_channel();
     adapter
         .handle_session_prompt(
             json!(1),
-            &json!({ "sessionId": "sess-1", "prompt": [{ "text": "hello" }] }),
+            &json!({ "sessionId": session_id, "prompt": [{ "text": "hello" }] }),
             cancelled,
             notify_tx,
         )
@@ -268,6 +286,67 @@ async fn a_result_event_error_outranks_the_other_failure_messages() {
     );
 }
 
+/// The success path's teardown, which nothing pinned before: every bug this
+/// function has produced has been a teardown bug, and the spawn-failure one was
+/// found and fixed while splitting it. This covers the other side -- what a turn
+/// that actually ran leaves behind.
+///
+/// Four things at once, deliberately: they are one teardown, and a regression
+/// that drops any of them individually is the failure mode worth catching.
+#[tokio::test]
+async fn a_successful_turn_binds_persists_and_releases_the_bridge() {
+    let _bridge_guard = BRIDGE_LOCK.lock().await;
+    let bridge = {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        crate::permission::PermissionBridge::start(tx).expect("start bridge")
+    };
+
+    let mut adapter = Adapter::new_for_test();
+    let frame = r#"{"event":"result","result":{"conversation_id":"conv-xyz","status":"SUCCESS","response":"done"}}"#;
+    let stub = stub_agy(&format!("printf '%s\\n' '{frame}'"));
+    adapter.agy_bin = stub.bin();
+    let hook_root = std::env::temp_dir().join(format!("agy-acp-hook-{}", Uuid::new_v4()));
+    fs::create_dir_all(&hook_root).unwrap();
+    adapter.enable_permission_bridge(&bridge, &hook_root);
+    // A real session with no conversation yet -- the state a first turn starts
+    // from. A bare session id would skip the in-memory half of the teardown,
+    // since there would be no session to bind to.
+    let session_id = adapter.handle_session_new(json!(1)).result.unwrap()["sessionId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let lines = run_turn_for(&mut adapter, &session_id, Arc::new(AtomicBool::new(false))).await;
+
+    let response = sole_response(&lines);
+    assert_eq!(response["result"]["stopReason"], "end_turn", "got {response}");
+
+    // Bound in memory, so the next turn can pass --conversation.
+    assert_eq!(
+        adapter
+            .sessions
+            .get(&session_id)
+            .and_then(|s| s.conversation_id.as_deref()),
+        Some("conv-xyz")
+    );
+    // ...and on disk, so it survives a restart.
+    assert_eq!(
+        adapter
+            .load_store()
+            .sessions
+            .get(&session_id)
+            .and_then(|s| s.conversation_id.as_deref()),
+        Some("conv-xyz"),
+        "a bound conversation must be persisted, or resume silently starts a new one"
+    );
+    // The turn is over: the bridge must not still be pointing at it, or a
+    // decision landing before the next turn matches a finished generation.
+    assert_eq!(bridge.active_session().await, None);
+    assert_eq!(bridge.abandon_pending(&session_id).await, 0);
+
+    let _ = fs::remove_dir_all(&hook_root);
+}
+
 /// The spawn-failure arm returns after
 /// `bridge.set_active_session(Some(..))` on the way in and, before the fix
 /// that came with this test, returned above the teardown that clears it --
@@ -279,15 +358,8 @@ async fn a_result_event_error_outranks_the_other_failure_messages() {
 /// of zero would pin nothing.
 #[tokio::test]
 async fn bridge_binding_is_cleared_after_spawn_failure() {
-    // `PermissionBridge::start` binds a Unix socket at a per-pid path, so
-    // two tests in the same process would race for it. The lock is only
-    // needed around `start`; the bridge handle is independent once bound,
-    // so the guard is scoped to the setup and dropped before the `await`
-    // on the turn -- holding a `std::sync::MutexGuard` across an `await`
-    // in a multi-threaded runtime is a footgun.
-    static BRIDGE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _bridge_guard = BRIDGE_LOCK.lock().await;
     let bridge = {
-        let _guard = BRIDGE_LOCK.lock().unwrap();
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         crate::permission::PermissionBridge::start(tx).expect("start bridge")
     };
