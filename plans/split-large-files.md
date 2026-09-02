@@ -86,9 +86,11 @@ None of the drain/cancel tests are writable today. `handle_session_prompt` hardc
 binary (`crate::proc::command_in_own_group("agy")`, `adapter.rs:899`), `tokio::process::Child`
 cannot be mocked, and the existing I/O tests simply print `SKIP: agy not found in PATH`
 (`tests.rs:1202`, `:1303`) when it is absent. So Phase 1's first task is an injection seam:
-resolve the program from an env var (`AGY_BIN`, defaulting to `"agy"` — `AGY_EXTRA_ARGS` at
-`adapter.rs:868` is the precedent) and drive the tests with small shell-script stubs that
-emit canned stream-json, exit non-zero, hang, or close stdout early. Without that, every
+an `agy_bin` field on `Adapter`, always `"agy"` in production and pointed at a stub by the
+tests, driving small shell-script stubs that emit canned stream-json, exit non-zero, hang,
+or close stdout early. Not an env override: it would have to cover `fetch_available_models`
+(`adapter.rs:165`, which spawns `agy` separately) or model discovery would read a different
+binary than the turn runs, and that is production surface bought for a test's benefit. Without that, every
 test below degrades to "skipped on CI", which is worse than not claiming coverage.
 
 Decide the seam before writing tests; it is a (small) production change and belongs in its
@@ -137,8 +139,9 @@ in the dispatcher loop (`main.rs:173-243`) with no test surface.
 - `path_field_args` (`permission.rs:1068`) reads `PATH_FIELDS` but is argument-shaped, not
   containment-shaped. Decide deliberately: either move it too, or re-export `PATH_FIELDS`
   as `pub(super)`. Do not leave it importing through a chain of re-exports.
-- Maintain the cross-reference between `PATH_FIELDS` and `dev-docs/agy-tool-surface.md`
-  — grep for the doc path and update whatever points at the old line/file.
+- Maintain the cross-reference between `PATH_FIELDS` and `dev-docs/agy-tool-surface.md`.
+  The pointer lives in the doc, not in the source: `agy-tool-surface.md:5-6` names
+  `src/permission.rs` as the home of `PATH_FIELDS` and goes stale on this move.
 - Move the corresponding tests (`permission.rs:1891-2015` and the workspace assertion at
   `:3604`) into a `#[cfg(test)] mod tests` in `path_rules.rs`. Check `:3604`'s surrounding
   test first — if it is a policy test that happens to call `outside_workspace`, leave it

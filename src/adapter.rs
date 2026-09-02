@@ -76,12 +76,16 @@ pub struct Adapter {
     /// The agy children running right now, so that shutdown can kill the same
     /// trees a cancel would.
     pub live_children: LiveChildren,
-    /// Program spawned for a turn. `AGY_BIN` overrides it, which is how the
-    /// turn-lifecycle tests drive spawn failure, a hung child and an unreadable
-    /// stdout without a real agy on PATH. A field rather than a read at the spawn
-    /// site on purpose: tests run in one process, and `set_var` racing across
-    /// threads would make them flaky.
-    pub agy_bin: String,
+    /// Program spawned for a turn. Always `agy` in production; the
+    /// turn-lifecycle tests point it at a stub to drive spawn failure, a hung
+    /// child and an unreadable stdout without a real agy on PATH.
+    ///
+    /// Deliberately not settable from the environment. An override would have to
+    /// cover `fetch_available_models` too or model discovery would silently read
+    /// a different binary than the turn runs, and that is production surface
+    /// bought for a test's benefit. A field rather than a parameter because tests
+    /// share one process, where `set_var` across threads would make them flaky.
+    pub(crate) agy_bin: String,
     /// Sessions dropped by [`Adapter::evict_if_needed`], waiting for their
     /// remembered permission answers to be forgotten.
     ///
@@ -155,7 +159,7 @@ impl Adapter {
             hook_root_dir: None,
             session_tick: 0,
             live_children: LiveChildren::default(),
-            agy_bin: std::env::var("AGY_BIN").unwrap_or_else(|_| "agy".to_string()),
+            agy_bin: "agy".to_string(),
             pending_forget: Arc::new(std::sync::Mutex::new(Vec::new())),
         }
     }
@@ -918,6 +922,15 @@ impl Adapter {
         let mut child = match spawn_result {
             Ok(child) => child,
             Err(e) => {
+                // The binding was set on the way in and the teardown that clears
+                // it is far below this return. Leaving it set would skip the
+                // generation bump `set_active_session` does on the way out, and
+                // a decision landing in the gap before the next turn would still
+                // match the finished turn's generation -- long enough to leave a
+                // sticky "always" behind that nothing later clears.
+                if let Some(bridge) = self.permission_bridge.clone() {
+                    bridge.set_active_session(None).await;
+                }
                 return vec![serde_json::to_string(&JsonRpcResponse {
                     jsonrpc: "2.0",
                     id,
