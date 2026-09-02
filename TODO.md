@@ -11,7 +11,7 @@ carries no work items.
 The few things worth picking up next. Each is a pointer; the detail lives below.
 
 - [Split the two files and the one function that have outgrown reading](#split-the-two-files-and-the-one-function-that-have-outgrown-reading)
-  — `handle_session_prompt` is 322 lines and is where every turn-lifecycle bug has been.
+  — path containment and the turn phases are split out; `tests.rs` is the remainder.
 - [Verify the port under Paseo](#verify-the-port-under-paseo) — done except the
   reopened-thread path.
 - [Reconcile the tool lists with agy's real toolset](#reconcile-the-tool-lists-with-agys-real-toolset)
@@ -335,7 +335,11 @@ rather than adding Sonar because the account is already there.
 
 #### Split the two files and the one function that have outgrown reading
 
-Plan: plans/split-large-files.md
+Plan: plans/split-large-files.md. Phases 1-3 have landed: the turn lifecycle has
+tests, `permission.rs` gave up its path containment to `permission/path_rules.rs`,
+and `handle_session_prompt` is now spawn/drain/teardown phases with the complexity
+lints denied module-wide. `tests.rs` is what is left.
+
 Sizes as of this entry, from `wc -l` and a scan of function lengths:
 
 | Unit | Lines |

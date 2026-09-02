@@ -2801,6 +2801,33 @@ mod turn_lifecycle {
         assert_eq!(adapter.live_children().len(), 0);
     }
 
+    /// A `result` event carrying an error wins over every other message the
+    /// failure cascade can produce -- it is the only one agy actually explains
+    /// itself in. Nothing else pins the head of that cascade: a reorder letting
+    /// the "stream ended without a result event" arm shadow a present
+    /// `result_error` would otherwise pass every test here, and the client would
+    /// be told the stream was truncated when agy had said why it failed.
+    #[tokio::test]
+    async fn a_result_event_error_outranks_the_other_failure_messages() {
+        let mut adapter = Adapter::new_for_test();
+        let frame = r#"{"event":"result","result":{"conversation_id":"conv-abc","status":"ERROR","error":"quota exhausted"}}"#;
+        // Exits 0 with stderr noise: without the result event this would be the
+        // "stream ended without a result event" case, and the stderr fallback is
+        // one arm further down again.
+        let stub = stub_agy(&format!(
+            "printf '%s\\n' '{frame}'; echo 'noise on stderr' >&2; exit 0"
+        ));
+        adapter.agy_bin = stub.bin();
+
+        let lines = run_turn(&mut adapter, Arc::new(AtomicBool::new(false))).await;
+
+        let response = sole_response(&lines);
+        assert_eq!(
+            response["error"]["message"], "agy failed: quota exhausted",
+            "the result event's own error must win the cascade, got {response}"
+        );
+    }
+
     /// The spawn-failure arm returns after
     /// `bridge.set_active_session(Some(..))` on the way in and, before the fix
     /// that came with this test, returned above the teardown that clears it --

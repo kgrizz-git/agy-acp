@@ -1,3 +1,10 @@
+//! Session lifecycle and the turn loop.
+//!
+//! The complexity lints are denied for the whole module, not warned on one
+//! function: splitting `handle_session_prompt` into phases only helps if a
+//! phase cannot quietly grow back into what it was extracted from.
+#![deny(clippy::cognitive_complexity, clippy::too_many_lines)]
+
 use fs2::FileExt;
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -824,11 +831,13 @@ impl Adapter {
         }
     }
 
-    /// `notify_tx` carries `session/update` notifications to the main loop, which
-    /// is the only writer of stdout. A second writer would interleave mid-line and
-    /// corrupt the JSON-RPC stream, so the stream reader never touches the fd.
-    // Complexity baseline for the refactor entry (TODO.md): 39/25 as of this branch.
-    #[warn(clippy::cognitive_complexity, clippy::too_many_lines)]
+    /// Runs one turn: spawn agy, drain its output while racing the cancel flag,
+    /// tear the turn's state down, and answer the request.
+    ///
+    /// The phases are split out so each can be tested against a stub binary
+    /// rather than a real agy. What holds them together is that every exit runs
+    /// the same teardown -- a failure here is not a returned error but a turn
+    /// that left the bridge bound to a session whose turn is over.
     pub async fn handle_session_prompt(
         &mut self,
         id: Value,
@@ -856,13 +865,43 @@ impl Adapter {
                     .join("\n")
             })
             .unwrap_or_default();
-        let clean_prompt = prompt_text.trim();
 
         if let Some(bridge) = self.permission_bridge.clone() {
             bridge.set_workspace_root(&self.working_dir).await;
             bridge.set_active_session(Some(session_id)).await;
         }
 
+        let args = self.agy_args(session_id, prompt_text.trim());
+        let turn = match self.spawn_agy_process(&args) {
+            Ok(turn) => turn,
+            Err(e) => {
+                // The binding was set on the way in and the teardown that clears
+                // it is past the drain. Leaving it set would skip the generation
+                // bump `set_active_session` does on the way out, and a decision
+                // landing in the gap before the next turn would still match the
+                // finished turn's generation -- long enough to leave a sticky
+                // "always" behind that nothing later clears.
+                if let Some(bridge) = self.permission_bridge.clone() {
+                    bridge.set_active_session(None).await;
+                }
+                return error_response(id, format!("failed to run agy: {e}"));
+            }
+        };
+
+        let drained = drain_agy_io(
+            turn,
+            cancelled,
+            notify_tx,
+            session_id.to_string(),
+            self.skip_naration,
+        )
+        .await;
+        let denied_by_user = self.teardown_turn(session_id, &drained).await;
+        turn_response(id, &drained, denied_by_user)
+    }
+
+    /// The agy command line for one turn.
+    fn agy_args(&self, session_id: &str, clean_prompt: &str) -> Vec<String> {
         let mut args: Vec<String> = Vec::new();
         args.push("--add-dir".to_string());
         args.push(self.working_dir.clone());
@@ -904,12 +943,17 @@ impl Adapter {
         }
         args.push("-p".to_string());
         args.push(clean_prompt.to_string());
+        args
+    }
 
+    /// Starts agy and registers it, so that a turn ending any way at all still
+    /// knows which child to kill.
+    fn spawn_agy_process(&self, args: &[String]) -> std::io::Result<RunningTurn> {
         // In its own process group, so that a signal aimed at the adapter's group
         // cannot kill agy before the tree under it can be walked.
         let mut command = crate::proc::command_in_own_group(&self.agy_bin);
         command
-            .args(&args)
+            .args(args)
             .current_dir(&self.working_dir)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
@@ -917,137 +961,21 @@ impl Adapter {
         if let Some(bridge) = &self.permission_bridge {
             command.env(SOCKET_ENV, bridge.socket_path());
         }
-        let spawn_result = command.spawn();
+        let child = command.spawn()?;
+        // Registered before anything else can fail, so no path can leave a child
+        // nobody knows about. The guard is dropped as soon as the child is
+        // reaped, which is why it belongs to the drain and not to teardown.
+        let guard = self.live_children.register(child.id());
+        Ok(RunningTurn { child, guard })
+    }
 
-        let mut child = match spawn_result {
-            Ok(child) => child,
-            Err(e) => {
-                // The binding was set on the way in and the teardown that clears
-                // it is far below this return. Leaving it set would skip the
-                // generation bump `set_active_session` does on the way out, and
-                // a decision landing in the gap before the next turn would still
-                // match the finished turn's generation -- long enough to leave a
-                // sticky "always" behind that nothing later clears.
-                if let Some(bridge) = self.permission_bridge.clone() {
-                    bridge.set_active_session(None).await;
-                }
-                return vec![serde_json::to_string(&JsonRpcResponse {
-                    jsonrpc: "2.0",
-                    id,
-                    result: None,
-                    error: Some(json!({"code":-32000,"message":format!("failed to run agy: {e}")})),
-                })
-                .unwrap()];
-            }
-        };
-
-        // Registered before anything can fail: an early return from here on must
-        // not leave a child nobody knows about. Unregistered below, as soon as
-        // the child is reaped.
-        let child_guard = self.live_children.register(child.id());
-
-        let stdout = child.stdout.take();
-        let skip_naration = self.skip_naration;
-        let poll_session_id = session_id.to_string();
-        // Set when nothing can read agy's stdout any more. The child would then
-        // block on a full pipe and `child.wait()` would never return, so this
-        // ends the turn the same way a cancel does -- by killing agy and
-        // everything it started.
-        let undrainable = Arc::new(AtomicBool::new(false));
-        let drain_failed = Arc::clone(&undrainable);
-        let stdout_reader = tokio::spawn(async move {
-            let mut processor = StreamProcessor::new(skip_naration);
-            if let Some(stdout) = stdout {
-                let mut reader = BufReader::new(stdout);
-                let mut read_error: Option<String> = None;
-                let mut buf = Vec::new();
-                loop {
-                    match read_until_newline(&mut reader, &mut buf).await {
-                        Ok(true) => {
-                            // from_utf8_lossy, not from_utf8: a malformed byte must
-                            // not be able to end this drain, or the pipe stops being
-                            // read, fills, and wedges child.wait() forever. At worst
-                            // one event fails to parse and is skipped below.
-                            let line = String::from_utf8_lossy(&buf)
-                                .trim_end_matches(['\n', '\r'])
-                                .to_string();
-                            publish_stream_notifications(
-                                &mut processor,
-                                &notify_tx,
-                                &line,
-                                &poll_session_id,
-                            );
-                        }
-                        Ok(false) => break, // EOF
-                        Err(e) => {
-                            read_error = Some(e.to_string());
-                            // The child may still have bytes queued; drain them so its
-                            // stdout pipe never blocks and child.wait() can return.
-                            // If even that fails the pipe is unreadable, and waiting
-                            // on a child that cannot write is the hang this whole
-                            // loop exists to avoid.
-                            if tokio::io::copy(&mut reader, &mut tokio::io::sink())
-                                .await
-                                .is_err()
-                            {
-                                drain_failed.store(true, Ordering::SeqCst);
-                            }
-                            break;
-                        }
-                    }
-                }
-                if let Some(e) = read_error {
-                    eprintln!("agy-acp: error reading agy stdout: {e}");
-                }
-            }
-            processor
-        });
-
-        let mut stderr = child.stderr.take();
-        let stderr_reader = tokio::spawn(async move {
-            let mut buf = Vec::new();
-            if let Some(mut stderr) = stderr.take() {
-                let _ = stderr.read_to_end(&mut buf).await;
-            }
-            buf
-        });
-
-        let mut was_cancelled = false;
-        let result = tokio::select! {
-            result = child.wait() => result,
-            _ = async {
-                while !cancelled.load(Ordering::SeqCst) && !undrainable.load(Ordering::SeqCst) {
-                    tokio::time::sleep(Duration::from_millis(50)).await;
-                }
-            } => {
-                // An undrainable pipe kills the child too, but it is not a cancel:
-                // the turn failed, and reporting it as cancelled would hide that.
-                was_cancelled = cancelled.load(Ordering::SeqCst);
-                // Before the wait below: the walk this does needs agy alive to
-                // find the shell it started, and needs its pid unreaped to name
-                // it at all.
-                crate::proc::kill_tree(&mut child).await;
-                child.wait().await
-            }
-        };
-        // The pid is reaped now, so it may be reused; stop naming it.
-        drop(child_guard);
-        let processor = stdout_reader
-            .await
-            .unwrap_or_else(|_| StreamProcessor::new(skip_naration));
-        let stderr_bytes = stderr_reader.await.unwrap_or_default();
-
-        let bound_conv_id = processor.conversation_id.clone();
-        let new_step_idx = processor.last_step_idx;
-        let result_failed = processor
-            .result_status
-            .as_deref()
-            .is_some_and(|status| status == "ERROR");
-        // Each turn ends with exactly one `result` event. Reaching EOF without it
-        // means the stream was truncated -- agy died, stdout closed early -- and
-        // the exit status alone does not say so.
-        let result_missing = !processor.saw_result;
-        let result_error = processor.result_error.clone();
+    /// Ends the turn's hold on the bridge and persists what the stream bound.
+    ///
+    /// Returns whether the user refused a tool call, which is read here because
+    /// it has to happen before the active session is cleared.
+    async fn teardown_turn(&mut self, session_id: &str, drained: &DrainOutcome) -> bool {
+        let bound_conv_id = drained.processor.conversation_id.clone();
+        let new_step_idx = drained.processor.last_step_idx;
 
         if let Some(session) = self.sessions.get_mut(session_id) {
             if session.conversation_id.is_none() {
@@ -1088,74 +1016,218 @@ impl Adapter {
                 model_id.as_deref(),
             );
         }
+        denied_by_user
+    }
+}
 
-        let stop_reason = if was_cancelled {
-            "cancelled"
-        } else if denied_by_user {
-            "refusal"
-        } else {
-            "end_turn"
-        };
-        let output_lines = vec![serde_json::to_string(&JsonRpcResponse {
-            jsonrpc: "2.0",
-            id: id.clone(),
-            result: Some(json!({ "stopReason": stop_reason })),
-            error: None,
-        })
-        .unwrap()];
+/// A spawned agy and its `live_children` registration, kept together: the guard
+/// must not outlive the reap, because the pid can be reused the moment it does.
+struct RunningTurn {
+    child: tokio::process::Child,
+    guard: crate::proc::ChildGuard,
+}
 
-        match result {
-            Ok(status) => {
-                let stderr_text = String::from_utf8_lossy(&stderr_bytes);
-                if !stderr_text.is_empty() {
-                    eprintln!("[agy-acp] agy stderr: {}", stderr_text.trim_end());
-                }
+/// What the drain phase saw.
+///
+/// `was_cancelled` travels with the outcome rather than being re-derived by the
+/// caller. Leaving the poll loop is not the same as having been cancelled -- an
+/// undrainable pipe leaves through the same branch, and reporting that as a
+/// cancel would hide a failed turn.
+struct DrainOutcome {
+    result: std::io::Result<std::process::ExitStatus>,
+    processor: StreamProcessor,
+    stderr_bytes: Vec<u8>,
+    was_cancelled: bool,
+}
 
-                // A turn the user refused is an outcome, not a provider failure;
-                // the bridge exists to make that a clean stop the client can show.
-                if !was_cancelled
-                    && !denied_by_user
-                    && (!status.success() || result_failed || result_missing)
-                {
-                    eprintln!("[agy-acp] WARN: agy exited with status: {}", status);
-                    // Updates already streamed to the client stay where they are;
-                    // what must not happen is a failed turn ending in a success
-                    // response, which is indistinguishable from a good one. This
-                    // used to be gated on `had_updates`, so any turn that produced
-                    // a single chunk before failing reported end_turn.
-                    let msg = if let Some(error) = result_error.filter(|s| !s.is_empty()) {
-                        format!("agy failed: {}", error.trim_end())
-                    } else if result_missing && status.success() {
-                        "agy stream ended without a result event".to_string()
-                    } else if stderr_text.is_empty() {
-                        format!("agy exited with status: {}", status)
-                    } else {
-                        format!("agy failed: {}", stderr_text.trim_end())
-                    };
-                    return vec![serde_json::to_string(&JsonRpcResponse {
-                        jsonrpc: "2.0",
-                        id,
-                        result: None,
-                        error: Some(json!({"code":-32000,"message":msg})),
-                    })
-                    .unwrap()];
+/// Reads agy's stdout and stderr to exhaustion while racing the child against
+/// the cancel flag, and reaps it.
+///
+/// `notify_tx` carries `session/update` notifications to the main loop, which is
+/// the only writer of stdout. A second writer would interleave mid-line and
+/// corrupt the JSON-RPC stream, so the stream reader never touches the fd.
+async fn drain_agy_io(
+    turn: RunningTurn,
+    cancelled: Arc<AtomicBool>,
+    notify_tx: tokio::sync::mpsc::UnboundedSender<Option<String>>,
+    session_id: String,
+    skip_naration: bool,
+) -> DrainOutcome {
+    let RunningTurn {
+        mut child,
+        guard: child_guard,
+    } = turn;
+    let stdout = child.stdout.take();
+    // Set when nothing can read agy's stdout any more. The child would then
+    // block on a full pipe and `child.wait()` would never return, so this
+    // ends the turn the same way a cancel does -- by killing agy and
+    // everything it started.
+    let undrainable = Arc::new(AtomicBool::new(false));
+    let drain_failed = Arc::clone(&undrainable);
+    let stdout_reader = tokio::spawn(async move {
+        let mut processor = StreamProcessor::new(skip_naration);
+        if let Some(stdout) = stdout {
+            let mut reader = BufReader::new(stdout);
+            let mut read_error: Option<String> = None;
+            let mut buf = Vec::new();
+            loop {
+                match read_until_newline(&mut reader, &mut buf).await {
+                    Ok(true) => {
+                        // from_utf8_lossy, not from_utf8: a malformed byte must
+                        // not be able to end this drain, or the pipe stops being
+                        // read, fills, and wedges child.wait() forever. At worst
+                        // one event fails to parse and is skipped below.
+                        let line = String::from_utf8_lossy(&buf)
+                            .trim_end_matches(['\n', '\r'])
+                            .to_string();
+                        publish_stream_notifications(
+                            &mut processor,
+                            &notify_tx,
+                            &line,
+                            &session_id,
+                        );
+                    }
+                    Ok(false) => break, // EOF
+                    Err(e) => {
+                        read_error = Some(e.to_string());
+                        // The child may still have bytes queued; drain them so its
+                        // stdout pipe never blocks and child.wait() can return.
+                        // If even that fails the pipe is unreadable, and waiting
+                        // on a child that cannot write is the hang this whole
+                        // loop exists to avoid.
+                        if tokio::io::copy(&mut reader, &mut tokio::io::sink())
+                            .await
+                            .is_err()
+                        {
+                            drain_failed.store(true, Ordering::SeqCst);
+                        }
+                        break;
+                    }
                 }
             }
-            Err(e) => {
-                return vec![serde_json::to_string(&JsonRpcResponse {
-                    jsonrpc: "2.0",
-                    id,
-                    result: None,
-                    error: Some(
-                        json!({"code":-32000,"message":format!("failed to wait for agy: {e}")}),
-                    ),
-                })
-                .unwrap()];
+            if let Some(e) = read_error {
+                eprintln!("agy-acp: error reading agy stdout: {e}");
             }
         }
+        processor
+    });
 
-        output_lines
+    let mut stderr = child.stderr.take();
+    let stderr_reader = tokio::spawn(async move {
+        let mut buf = Vec::new();
+        if let Some(mut stderr) = stderr.take() {
+            let _ = stderr.read_to_end(&mut buf).await;
+        }
+        buf
+    });
+
+    let mut was_cancelled = false;
+    let result = tokio::select! {
+        result = child.wait() => result,
+        _ = async {
+            while !cancelled.load(Ordering::SeqCst) && !undrainable.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        } => {
+            // An undrainable pipe kills the child too, but it is not a cancel:
+            // the turn failed, and reporting it as cancelled would hide that.
+            was_cancelled = cancelled.load(Ordering::SeqCst);
+            // Before the wait below: the walk this does needs agy alive to
+            // find the shell it started, and needs its pid unreaped to name
+            // it at all.
+            crate::proc::kill_tree(&mut child).await;
+            child.wait().await
+        }
+    };
+    // The pid is reaped now, so it may be reused; stop naming it.
+    drop(child_guard);
+
+    DrainOutcome {
+        result,
+        processor: stdout_reader
+            .await
+            .unwrap_or_else(|_| StreamProcessor::new(skip_naration)),
+        stderr_bytes: stderr_reader.await.unwrap_or_default(),
+        was_cancelled,
     }
+}
+
+/// The single JSON-RPC error response shape every failing turn answers with.
+fn error_response(id: Value, message: String) -> Vec<String> {
+    vec![serde_json::to_string(&JsonRpcResponse {
+        jsonrpc: "2.0",
+        id,
+        result: None,
+        error: Some(json!({ "code": -32000, "message": message })),
+    })
+    .unwrap()]
+}
+
+/// Turns what the drain saw into the turn's answer.
+fn turn_response(id: Value, drained: &DrainOutcome, denied_by_user: bool) -> Vec<String> {
+    let result_failed = drained
+        .processor
+        .result_status
+        .as_deref()
+        .is_some_and(|status| status == "ERROR");
+    // Each turn ends with exactly one `result` event. Reaching EOF without it
+    // means the stream was truncated -- agy died, stdout closed early -- and
+    // the exit status alone does not say so.
+    let result_missing = !drained.processor.saw_result;
+
+    let status = match &drained.result {
+        Ok(status) => status,
+        Err(e) => return error_response(id, format!("failed to wait for agy: {e}")),
+    };
+
+    let stderr_text = String::from_utf8_lossy(&drained.stderr_bytes);
+    if !stderr_text.is_empty() {
+        eprintln!("[agy-acp] agy stderr: {}", stderr_text.trim_end());
+    }
+
+    // A turn the user refused is an outcome, not a provider failure; the bridge
+    // exists to make that a clean stop the client can show.
+    if !drained.was_cancelled
+        && !denied_by_user
+        && (!status.success() || result_failed || result_missing)
+    {
+        eprintln!("[agy-acp] WARN: agy exited with status: {}", status);
+        // Updates already streamed to the client stay where they are; what must
+        // not happen is a failed turn ending in a success response, which is
+        // indistinguishable from a good one. This used to be gated on
+        // `had_updates`, so any turn that produced a single chunk before failing
+        // reported end_turn.
+        let msg = if let Some(error) = drained
+            .processor
+            .result_error
+            .clone()
+            .filter(|s| !s.is_empty())
+        {
+            format!("agy failed: {}", error.trim_end())
+        } else if result_missing && status.success() {
+            "agy stream ended without a result event".to_string()
+        } else if stderr_text.is_empty() {
+            format!("agy exited with status: {}", status)
+        } else {
+            format!("agy failed: {}", stderr_text.trim_end())
+        };
+        return error_response(id, msg);
+    }
+
+    let stop_reason = if drained.was_cancelled {
+        "cancelled"
+    } else if denied_by_user {
+        "refusal"
+    } else {
+        "end_turn"
+    };
+    vec![serde_json::to_string(&JsonRpcResponse {
+        jsonrpc: "2.0",
+        id,
+        result: Some(json!({ "stopReason": stop_reason })),
+        error: None,
+    })
+    .unwrap()]
 }
 
 /// Filter out leading narration ("I will ...", "I'll ...") from response parts.
