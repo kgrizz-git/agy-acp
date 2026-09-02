@@ -340,14 +340,16 @@ tests, `permission.rs` gave up its path containment to `permission/path_rules.rs
 and `handle_session_prompt` is now spawn/drain/teardown phases with the complexity
 lints denied module-wide. `tests.rs` is what is left.
 
-Sizes as of this entry, from `wc -l` and a scan of function lengths:
+Sizes as of Phase 3 landing, from `wc -l` and a scan of function lengths. The
+first two numbers in the original entry were taken before the inline test modules
+existed and undercounted by ~1500 lines:
 
-| Unit | Lines |
-|---|---|
-| `src/tests.rs` | 2419 |
-| `src/permission.rs` | 2207 |
-| `adapter.rs::handle_session_prompt` | 322 |
-| `permission.rs::decide` | 141 |
+| Unit | Lines | |
+|---|---|---|
+| `src/tests.rs` | 2879 | the remaining work |
+| `src/permission.rs` | 3395 | 2231 of them its own inline test module |
+| `adapter.rs::handle_session_prompt` | 61 | was 317; now four phases |
+| `permission.rs::decide` | 141 | unchanged, and deliberately so |
 
 `handle_session_prompt` is the one that actually hurts. It spawns agy, wires two
 reader tasks, runs the `select!` that races the child against cancellation, kills

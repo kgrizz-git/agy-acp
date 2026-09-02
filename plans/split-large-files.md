@@ -239,8 +239,8 @@ extracted `drain_agy_io` must keep `notify_tx` as its only output channel.
   alone. What the CI route costs, if the local one is unavailable:
   `e2e.yml` gates on the protected `e2e` environment and needs a maintainer to approve the
   run (`e2e.yml:1-4, 16-24`), and it skips entirely for fork PRs, which cannot receive the
-  secret. So for this phase, plan on the local run with a real key as the primary path and
-  treat the workflow as confirmation.
+  secret. So for this phase, plan on the local run as the primary path -- it needs only
+  `agy` and an existing keyring login -- and treat the workflow as confirmation.
 - **Abort trigger**: if `TurnFailure` threading turns into more code than it removes, keep
   the function whole and settle for extracting only `drain_agy_io`.
 
