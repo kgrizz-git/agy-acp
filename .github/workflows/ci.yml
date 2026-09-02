@@ -48,17 +48,14 @@ jobs:
           toolchain: stable
           components: clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-      # -W/-D clippy::all (not -D warnings). adapter.rs denies
-      # cognitive_complexity and too_many_lines module-wide, so a turn phase
-      # growing back into what it was split from fails this job.
+      # -W/-D clippy::all (not -D warnings). cognitive_complexity and
+      # too_many_lines are nursery/pedantic, so -D clippy::all does not reach
+      # them; main.rs denies both crate-wide instead, and this job is where that
+      # deny bites.
       - name: Clippy
         run: cargo clippy --all-targets -- -W clippy::all -D clippy::all
-      - name: Complexity baseline (informational)
-        run: |
-          cargo clippy --all-targets -- -W clippy::cognitive_complexity -A clippy::type_complexity 2>&1 \
-            | tee complexity-baseline.txt
-          grep -E 'cognitive_complexity|too_many_lines' complexity-baseline.txt \
-            | head -5 >> "$GITHUB_STEP_SUMMARY" || true
+      - name: File length
+        run: ./scripts/check-file-length.sh
 
   coverage:
     needs: test

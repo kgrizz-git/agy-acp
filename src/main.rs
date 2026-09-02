@@ -1,3 +1,11 @@
+//! ACP stdio adapter for the Antigravity CLI.
+//!
+//! These two are denied crate-wide rather than per-module. Neither is in
+//! `clippy::all`, so CI's `-D clippy::all` does not reach them: without this
+//! they are observed by the informational complexity step and enforced nowhere.
+//! Two functions predate the rule and carry a local allow with a reason.
+#![deny(clippy::cognitive_complexity, clippy::too_many_lines)]
+
 mod adapter;
 mod cancel;
 mod db;
@@ -115,6 +123,10 @@ fn install_shutdown_killer(live_children: proc::LiveChildren) {
 #[cfg(not(unix))]
 fn install_shutdown_killer(_live_children: proc::LiveChildren) {}
 
+// A long, flat dispatch: one arm per JSON-RPC method, read top to bottom. The
+// lint is measuring length it cannot distinguish from depth, and splitting the
+// arms into helpers would scatter the loop's one job across the file.
+#[allow(clippy::too_many_lines)]
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();

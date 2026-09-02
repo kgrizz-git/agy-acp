@@ -1,10 +1,4 @@
 //! Tests for session lifecycle, persistence and eviction.
-//! The module-wide `too_many_lines` deny in adapter.rs propagates here. It
-//! exists to stop a turn phase growing back into what it was split from; a
-//! fixture-heavy test is not that, and splitting one to satisfy it would only
-//! scatter the setup a reader needs in one place.
-#![allow(clippy::too_many_lines)]
-
 use crate::test_support::*;
 use rusqlite::Connection;
 use serde_json::{json, Value};
@@ -130,6 +124,10 @@ fn test_session_load_rejects_unknown_session() {
 
 #[test]
 #[ignore]
+// Almost all of it is one SQLite fixture, and the setup belongs where the
+// assertions can be read against it. Allowed here rather than for the file, so
+// the next long test in this module still has to justify itself.
+#[allow(clippy::too_many_lines)]
 fn test_session_load_replays_conversation_history() {
     let root = std::env::temp_dir().join(format!("agy-acp-load-replay-{}", Uuid::new_v4()));
     let conv_dir = root.join("conversations");

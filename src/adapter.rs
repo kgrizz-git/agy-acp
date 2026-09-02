@@ -1,9 +1,7 @@
 //! Session lifecycle and the turn loop.
 //!
-//! The complexity lints are denied for the whole module, not warned on one
-//! function: splitting `handle_session_prompt` into phases only helps if a
-//! phase cannot quietly grow back into what it was extracted from.
-#![deny(clippy::cognitive_complexity, clippy::too_many_lines)]
+//! The complexity lints that keep the turn phases from growing back into what
+//! they were split from are denied crate-wide, in main.rs.
 
 use fs2::FileExt;
 use serde_json::{json, Value};

@@ -409,6 +409,11 @@ impl PermissionBridge {
         let _ = write_half.flush().await;
     }
 
+    // A policy cascade, read top to bottom: each arm is one reason to allow or
+    // ask, and the order between them *is* the policy. Extracting arms would
+    // hide that order behind call sites, which is the opposite of what this
+    // function needs to be reviewable.
+    #[allow(clippy::too_many_lines)]
     async fn decide(&self, payload: &Value) -> (Decision, String) {
         let tool_call = payload
             .get("toolCall")
