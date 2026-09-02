@@ -2,8 +2,8 @@
 
 What `agy` actually sends the permission bridge. The bridge's containment checks
 depend on knowing which arguments are paths, so this is reference material for
-`PATH_FIELDS`, `READ_TOOLS`, `SEARCH_TOOLS` and `tool_kind` in
-`src/permission.rs`.
+`PATH_FIELDS` in `src/permission/path_rules.rs`, and for `READ_TOOLS`,
+`SEARCH_TOOLS` and `tool_kind` in `src/permission.rs`.
 
 **Provenance.** agy 1.1.22, captured 2026-08-30, two ways:
 
