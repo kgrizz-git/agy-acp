@@ -22,7 +22,9 @@ The few things worth picking up next. Each is a pointer; the detail lives below.
 - [Rename the binary and crate](#rename-the-binary-and-crate) — cheaper now than
   after anyone else installs it.
 - [Configure the protected e2e environment](#configure-the-protected-e2e-environment)
-  — key-backed PR e2e is intentionally deferred; deterministic CI already runs.
+  — **add `E2E_GEMINI_API_KEY` to a protected `e2e` environment.** Until then the
+  e2e job skips on every PR, and the only e2e evidence is whatever a maintainer
+  runs locally.
 
 ## Active
 
@@ -77,6 +79,14 @@ job currently skips after its secret gate. Fork pull requests skip before
 requesting environment approval because they cannot receive Actions secrets.
 This does not weaken the deterministic CI jobs or expose a repository secret to
 pull-request code.
+
+What it costs, concretely: the turn-lifecycle refactor (#13) and the test split
+(#14) both landed with `e2e` reported as *skipping*, and the only e2e evidence
+was a local run. That works because `prepare_auth` accepts an existing
+`~/.gemini/antigravity-cli/settings.json` keyring login, so a developer machine
+with `agy` needs no key at all -- but a GitHub runner has no keyring, which is
+the whole reason CI needs the secret. Anyone reviewing a PR that touches the turn
+loop is currently taking the author's word for the e2e result.
 
 When it becomes useful to run paid e2e on pull requests:
 
