@@ -177,6 +177,7 @@ pub(super) fn path_field_args(args: &Value) -> Vec<String> {
     found
 }
 
+/// Collects every absolute-looking path appearing in the tool arguments.
 fn absolute_paths(args: &Value) -> Vec<String> {
     string_args(args)
         .into_iter()

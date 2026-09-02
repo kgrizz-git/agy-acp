@@ -97,11 +97,16 @@ Decide the seam before writing tests; it is a (small) production change and belo
 own commit ahead of the rest of Phase 1.
 
 ### The specific tests, and what each pins
-- `cancel_during_undrainable_reports_cancelled` — stub closes stdout then hangs; set
-  `cancelled` concurrently. Asserts `stopReason: "cancelled"`, not an error response.
-  Pins `adapter.rs:1004` + the `!was_cancelled` gate at `:1096`.
-- `undrainable_without_cancel_reports_failure` — the other half; without it the first test
-  is satisfiable by always reporting "cancelled".
+- `cancel_ends_the_turn_as_cancelled` — a hanging stub with the flag flipped *mid-turn*,
+  so the poll loop has to see the false -> true transition. Asserts `stopReason:
+  "cancelled"`. Pins the `was_cancelled` re-read and the `!was_cancelled` failure gate.
+- `a_child_that_closes_stdout_is_waited_for_not_killed` — the counterweight, and a
+  correction to this plan's original premise. **A stub cannot produce the `undrainable`
+  case.** Closing stdout yields EOF, which the drain loop treats as a child that has
+  stopped talking (`Ok(false) => break`); the flag needs the read itself to error *and*
+  the follow-up drain to a sink to fail as well. That path stays uncovered rather than
+  faked, and this test pins the distinction the flag depends on: EOF is waited out, not
+  killed.
 - `spawn_failure_leaves_no_live_child_and_no_active_session` — `AGY_BIN` pointing at a
   path that does not exist. `LiveChildren::len` already exists (`proc.rs:264`) but is
   private to `proc`; widen to `pub(crate)` to assert on it.

@@ -2685,17 +2685,17 @@ mod turn_lifecycle {
 
     /// Closing stdout does not make a child undrainable. The drain loop reads EOF
     /// and stops
-    /// (`Ok(false) => break`, adapter.rs:963), which is a child that has stopped
+    /// (the `Ok(false) => break` arm of the drain loop), which is a child that has stopped
     /// talking rather than a pipe nobody can read, so the turn waits for it and
     /// ends on the child's own terms. It still answers with an error here, but
     /// the *missing result event* one -- a verdict only reachable after a real
     /// wait. Pinned because the obvious "unreadable stdout" stub is this one, and
     /// treating it as undrainable would kill turns that are still working.
     ///
-    /// The `undrainable` flag (adapter.rs:934) covers a different case: the read
+    /// The `undrainable` flag covers a different case: the read
     /// itself erroring *and* the follow-up drain to a sink also failing. No shell
-    /// stub can produce that, so it stays uncovered -- see the coverage note in
-    /// plans/split-large-files.md rather than faking it here.
+    /// stub can produce that, so it stays uncovered rather than faked; the Phase 1
+    /// section of plans/split-large-files.md records why.
     #[tokio::test]
     async fn a_child_that_closes_stdout_is_waited_for_not_killed() {
         let mut adapter = Adapter::new_for_test();
@@ -2711,7 +2711,7 @@ mod turn_lifecycle {
 
         // Reached the child's own exit rather than a kill: a killed stub could
         // not have produced the "no result event" verdict, which is only
-        // reachable after a successful wait (adapter.rs:1107).
+        // reachable after a successful `child.wait()`.
         let response = sole_response(&lines);
         assert_eq!(
             response["error"]["message"], "agy stream ended without a result event",
@@ -2722,7 +2722,7 @@ mod turn_lifecycle {
 
     /// A cancel still wins over a child that has closed stdout and is hanging:
     /// the poll loop leaves through the kill branch and `was_cancelled` is
-    /// re-read from the cancel flag (adapter.rs:1004), so this is a cancel and
+    /// re-read from the cancel flag after the poll loop, so this is a cancel and
     /// not the failure the previous test pins.
     #[tokio::test]
     async fn cancel_wins_over_a_child_hanging_with_stdout_closed() {
@@ -2778,7 +2778,7 @@ mod turn_lifecycle {
     /// still answer with an error, not a successful end_turn. The old gate
     /// was `had_updates`, so any turn that produced a single chunk before
     /// failing reported end_turn -- and the client could not tell the bad
-    /// turn from a good one. Pins adapter.rs:1103-1106, which replaced that
+    /// turn from a good one. Pins the `!was_cancelled && !denied_by_user` gate that replaced that
     /// gate.
     #[tokio::test]
     async fn a_turn_that_streams_then_fails_still_reports_an_error() {
@@ -2801,7 +2801,7 @@ mod turn_lifecycle {
         assert_eq!(adapter.live_children().len(), 0);
     }
 
-    /// The spawn-failure path at adapter.rs:914 returns after
+    /// The spawn-failure arm returns after
     /// `bridge.set_active_session(Some(..))` on the way in and, before the fix
     /// that came with this test, returned above the teardown that clears it --
     /// so the binding outlived the turn and the generation bump on the way out
@@ -2836,7 +2836,7 @@ mod turn_lifecycle {
         let response = sole_response(&lines);
         assert_eq!(response["error"]["code"], -32000);
 
-        // The turn set the binding on the way in (adapter.rs:859) and returned
+        // The turn set the binding on the way in and returned
         // before the teardown that clears it, so the bridge is still pointing at
         // a session whose turn is over. Asserting on `abandon_pending` instead
         // would prove nothing: no tool call ever happened, so the pending map is

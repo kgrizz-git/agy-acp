@@ -220,8 +220,6 @@ impl PermissionBridge {
         }
     }
 
-    /// Marks the session whose prompt is running, for the duration of that prompt.
-    /// Starting a prompt also clears the denial flag from the previous one.
     /// Test-only view of the turn binding. Pinning that a turn's teardown ran
     /// needs to see the binding cleared, not just that no request is pending:
     /// a turn that ends before any tool call still has to bump the generation
@@ -231,6 +229,8 @@ impl PermissionBridge {
         self.state.lock().await.active_session.clone()
     }
 
+    /// Marks the session whose prompt is running, for the duration of that prompt.
+    /// Starting a prompt also clears the denial flag from the previous one.
     pub async fn set_active_session(&self, session_id: Option<&str>) {
         let mut state = self.state.lock().await;
         state.active_session = session_id.map(str::to_string);
@@ -948,7 +948,7 @@ const UNKEYED_FIELDS: &[&str] = &["toolAction", "toolSummary", "WaitMsBeforeAsyn
 /// over-normalization — it would remove a nested `toolSummary` living inside some
 /// future structured argument where the value does matter, merging two argument
 /// sets that are not the same into one key. Leaving a nested volatile field in
-/// costs a reprompt instead. Note the contrast with [`path_field_args`], which
+/// costs a reprompt instead. Note the contrast with [`path_rules::path_field_args`], which
 /// does recurse: that one is looking for a reason to *ask*, so a deeper search is
 /// the conservative direction there and the opposite direction here.
 ///
