@@ -1253,3 +1253,12 @@ pub fn is_narration(text: &str) -> bool {
         line.starts_with("I will") || line.starts_with("I'll") || line.starts_with("I’ll")
     })
 }
+
+#[cfg(test)]
+mod tests;
+#[cfg(test)]
+mod model_tests;
+// Unix-only: the stubs are /bin/sh scripts and the Windows MSRV job runs the
+// same `cargo test`.
+#[cfg(all(test, unix))]
+mod turn_lifecycle_tests;

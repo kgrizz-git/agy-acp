@@ -648,3 +648,6 @@ pub fn extract_tool_update_from_step_payload(
     }
     Some(update)
 }
+
+#[cfg(test)]
+mod tests;

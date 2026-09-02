@@ -427,3 +427,6 @@ fn notification(session_id: &str, update: Value) -> String {
     })
     .unwrap()
 }
+
+#[cfg(test)]
+mod tests;

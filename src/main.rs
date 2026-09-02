@@ -18,7 +18,11 @@ mod tools;
 mod types;
 
 #[cfg(test)]
-mod tests;
+mod cli_tests;
+#[cfg(test)]
+mod test_support;
+#[cfg(test)]
+mod e2e_tests;
 
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};

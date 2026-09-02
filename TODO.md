@@ -335,21 +335,22 @@ rather than adding Sonar because the account is already there.
 
 #### Split the two files and the one function that have outgrown reading
 
-Plan: plans/split-large-files.md. Phases 1-3 have landed: the turn lifecycle has
-tests, `permission.rs` gave up its path containment to `permission/path_rules.rs`,
-and `handle_session_prompt` is now spawn/drain/teardown phases with the complexity
-lints denied module-wide. `tests.rs` is what is left.
+Plan: plans/split-large-files.md. Done. The turn lifecycle has tests driven by
+stub binaries, `permission.rs` gave up its path containment to
+`permission/path_rules.rs`, `handle_session_prompt` is spawn/drain/teardown phases
+with the complexity lints denied module-wide, and the flat `tests.rs` is gone --
+tests now sit in their own files beside the module they exercise.
 
-Sizes as of Phase 3 landing, from `wc -l` and a scan of function lengths. The
-first two numbers in the original entry were taken before the inline test modules
-existed and undercounted by ~1500 lines:
+Sizes after the split, from `wc -l` and a scan of function lengths. The first two
+numbers in the original entry were taken before the inline test modules existed
+and undercounted by ~1500 lines:
 
-| Unit | Lines | |
+| Unit | Before | After |
 |---|---|---|
-| `src/tests.rs` | 2879 | the remaining work |
-| `src/permission.rs` | 3395 | 2231 of them its own inline test module |
-| `adapter.rs::handle_session_prompt` | 61 | was 317; now four phases |
-| `permission.rs::decide` | 141 | unchanged, and deliberately so |
+| `src/tests.rs` | 2879 | gone -- split by subject |
+| `src/permission.rs` | 3724 | 1175 plus five test files |
+| `adapter.rs::handle_session_prompt` | 317 | 61, over four phases |
+| `permission.rs::decide` | 141 | 141, unchanged and deliberately so |
 
 `handle_session_prompt` is the one that actually hurts. It spawns agy, wires two
 reader tasks, runs the `select!` that races the child against cancellation, kills
