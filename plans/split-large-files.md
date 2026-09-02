@@ -240,6 +240,25 @@ extracted `drain_agy_io` must keep `notify_tx` as its only output channel.
 - **Abort trigger**: if `TurnFailure` threading turns into more code than it removes, keep
   the function whole and settle for extracting only `drain_agy_io`.
 
+## Known coverage gaps after Phase 3
+Named here rather than papered over, because the next person to touch the turn
+loop needs to know which invariants the tests do not hold:
+
+- **The refusal path.** `teardown_turn` reads `refused_during_prompt` before
+  clearing the binding, and the window between the clear (which bumps the
+  generation) and the read is where a genuine refusal could be lost. Pinning it
+  needs `mark_user_refusal`, which is private and generation-gated; exposing it
+  for a test would widen a security API for a test's benefit, which is the trade
+  the `agy_bin` seam already refused. The ordering is carried by its comment.
+- **`register_conversation` / `abandon_pending` on teardown** are unasserted. A
+  regression skipping them leaves stale pending requests to land in the *next*
+  turn as phantom refusals.
+- **The wait-error arm** (`failed to wait for agy`) is unreachable from a stub:
+  nothing a shell script does makes `child.wait()` fail.
+- **`undrainable`** — see Phase 1. Testable only on its cancel half.
+- **Persist-on-success**: no turn-lifecycle test asserts `conversation_id`,
+  `last_step_idx` or the `persist_session` call.
+
 ## Phase 4: Splitting `tests.rs`
 Note the tension the earlier draft missed: `permission.rs` is already the largest file in
 the tree *because* 2372 of its lines are tests. Migrating more tests into it makes the
