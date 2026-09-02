@@ -261,7 +261,7 @@ impl LiveChildren {
     }
 
     #[cfg(test)]
-    fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.inner.lock().unwrap().len()
     }
 }

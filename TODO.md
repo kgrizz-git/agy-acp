@@ -335,6 +335,7 @@ rather than adding Sonar because the account is already there.
 
 #### Split the two files and the one function that have outgrown reading
 
+Plan: plans/split-large-files.md
 Sizes as of this entry, from `wc -l` and a scan of function lengths:
 
 | Unit | Lines |
