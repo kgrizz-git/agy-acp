@@ -651,6 +651,7 @@ fn test_session_load_restores_persisted_session() {
         hook_root_dir: None,
         session_tick: 0,
         live_children: Default::default(),
+        agy_bin: "agy".to_string(),
         pending_forget: Default::default(),
     };
     adapter.persist_session("sess-1", Some("conv-abc"), 5, None);
@@ -690,6 +691,7 @@ fn test_session_load_rejects_unknown_session() {
         hook_root_dir: None,
         session_tick: 0,
         live_children: Default::default(),
+        agy_bin: "agy".to_string(),
         pending_forget: Default::default(),
     };
 
@@ -807,6 +809,7 @@ fn test_session_load_replays_conversation_history() {
         hook_root_dir: None,
         session_tick: 0,
         live_children: Default::default(),
+        agy_bin: "agy".to_string(),
         pending_forget: Default::default(),
     };
     adapter.persist_session("sess-replay", Some("conv-replay"), 8, None);
@@ -954,6 +957,7 @@ fn test_session_resume_restores_persisted_session() {
         hook_root_dir: None,
         session_tick: 0,
         live_children: Default::default(),
+        agy_bin: "agy".to_string(),
         pending_forget: Default::default(),
     };
     adapter.persist_session("sess-r1", Some("conv-xyz"), 3, None);
@@ -1000,6 +1004,7 @@ fn test_session_resume_rejects_unknown_session() {
         hook_root_dir: None,
         session_tick: 0,
         live_children: Default::default(),
+        agy_bin: "agy".to_string(),
         pending_forget: Default::default(),
     };
 
@@ -1045,6 +1050,7 @@ fn test_session_resume_accepts_in_memory_session() {
         hook_root_dir: None,
         session_tick: 0,
         live_children: Default::default(),
+        agy_bin: "agy".to_string(),
         pending_forget: Default::default(),
     };
     adapter.sessions.insert(
@@ -1083,6 +1089,7 @@ fn test_session_load_accepts_in_memory_session_without_replay() {
         hook_root_dir: None,
         session_tick: 0,
         live_children: Default::default(),
+        agy_bin: "agy".to_string(),
         pending_forget: Default::default(),
     };
     adapter.sessions.insert(
@@ -1120,6 +1127,7 @@ fn test_session_resume_does_not_replay_history() {
         hook_root_dir: None,
         session_tick: 0,
         live_children: Default::default(),
+        agy_bin: "agy".to_string(),
         pending_forget: Default::default(),
     };
     adapter.persist_session("sess-nr", Some("conv-nr"), 10, None);
@@ -1155,6 +1163,7 @@ fn test_persist_and_restore_session() {
         hook_root_dir: None,
         session_tick: 0,
         live_children: Default::default(),
+        agy_bin: "agy".to_string(),
         pending_forget: Default::default(),
     };
 
@@ -1707,6 +1716,7 @@ fn test_session_set_model_persists() {
         hook_root_dir: None,
         session_tick: 0,
         live_children: Default::default(),
+        agy_bin: "agy".to_string(),
         pending_forget: Default::default(),
     };
 
@@ -1729,6 +1739,7 @@ fn test_session_set_model_persists() {
         hook_root_dir: None,
         session_tick: 0,
         live_children: Default::default(),
+        agy_bin: "agy".to_string(),
         pending_forget: Default::default(),
     };
     let restored = adapter2.restore_session("sess-m1");
@@ -2138,6 +2149,7 @@ fn persist_session_prunes_unbindable_entries_first() {
         hook_root_dir: None,
         session_tick: 0,
         live_children: Default::default(),
+        agy_bin: "agy".to_string(),
         pending_forget: Default::default(),
     };
     for i in 0..300 {
@@ -2195,6 +2207,7 @@ fn persist_session_keeps_the_entry_it_just_wrote() {
         hook_root_dir: None,
         session_tick: 0,
         live_children: Default::default(),
+        agy_bin: "agy".to_string(),
         pending_forget: Default::default(),
     };
     for i in 0..400 {
@@ -2247,6 +2260,7 @@ fn stored_sessions_without_updated_at_load_as_oldest() {
         hook_root_dir: None,
         session_tick: 0,
         live_children: Default::default(),
+        agy_bin: "agy".to_string(),
         pending_forget: Default::default(),
     };
     let store = adapter.load_store();
@@ -2276,6 +2290,7 @@ fn evict_if_needed_drops_the_least_recently_used_session() {
         hook_root_dir: None,
         session_tick: 0,
         live_children: Default::default(),
+        agy_bin: "agy".to_string(),
         pending_forget: Default::default(),
     };
     for i in 0..64 {
@@ -2333,6 +2348,7 @@ fn evicting_a_session_queues_its_answers_for_forgetting() {
         hook_root_dir: None,
         session_tick: 0,
         live_children: Default::default(),
+        agy_bin: "agy".to_string(),
         pending_forget: Default::default(),
     };
     for i in 0..64 {
@@ -2388,6 +2404,7 @@ fn readmitting_an_evicted_session_cancels_its_queued_forget() {
         hook_root_dir: None,
         session_tick: 0,
         live_children: Default::default(),
+        agy_bin: "agy".to_string(),
         pending_forget: Default::default(),
     };
     // Persisted, so it can be restored after eviction.
@@ -2540,4 +2557,91 @@ async fn stream_notifications_go_through_the_output_channel() {
         count += 1;
     }
     assert!(count >= 1, "at least one notification was emitted");
+}
+
+/// Turn-lifecycle tests: spawn, drain, cancel and teardown, driven by stub
+/// binaries through `Adapter::agy_bin` rather than a real agy.
+///
+/// Unix-only. The stubs are `/bin/sh` scripts, and the Windows MSRV job runs the
+/// same `cargo test`, where they would fail for a reason that has nothing to do
+/// with the code under test.
+#[cfg(unix)]
+mod turn_lifecycle {
+    use super::*;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::Arc;
+
+    /// Writes an executable `/bin/sh` stub and returns its path. The scratch
+    /// directory is per-call, so concurrent tests cannot see each other's stub.
+    fn stub_agy(body: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("agy-acp-stub-{}", Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("agy-stub");
+        fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    /// Runs one turn against `stub`, returning the response lines and the
+    /// adapter, so a test can assert on live children after the turn.
+    async fn run_turn(adapter: &mut Adapter, cancelled: Arc<AtomicBool>) -> Vec<String> {
+        let (notify_tx, _notify_rx) = tokio::sync::mpsc::unbounded_channel();
+        adapter
+            .handle_session_prompt(
+                json!(1),
+                &json!({ "sessionId": "sess-1", "prompt": [{ "text": "hello" }] }),
+                cancelled,
+                notify_tx,
+            )
+            .await
+    }
+
+    fn sole_response(lines: &[String]) -> Value {
+        assert_eq!(lines.len(), 1, "expected exactly one response line");
+        serde_json::from_str(&lines[0]).unwrap()
+    }
+
+    /// A spawn that never happens still has to answer the request, and must not
+    /// leave a pid registered -- `handle_session_prompt` returns before the
+    /// `child_guard` is ever taken on this path.
+    #[tokio::test]
+    async fn spawn_failure_answers_with_an_error_and_registers_no_child() {
+        let mut adapter = Adapter::new_for_test();
+        adapter.agy_bin = "/nonexistent/agy-acp-not-a-real-binary".to_string();
+
+        let lines = run_turn(&mut adapter, Arc::new(AtomicBool::new(false))).await;
+
+        let response = sole_response(&lines);
+        assert_eq!(response["error"]["code"], -32000);
+        assert!(
+            response["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("failed to run agy"),
+            "unexpected message: {}",
+            response["error"]["message"]
+        );
+        assert!(response["result"].is_null());
+        assert_eq!(adapter.live_children().len(), 0);
+    }
+
+    /// A cancelled turn reports `cancelled`, not a provider failure, and the
+    /// killed child is unregistered rather than left behind.
+    #[tokio::test]
+    async fn cancel_ends_the_turn_as_cancelled() {
+        let mut adapter = Adapter::new_for_test();
+        adapter.agy_bin = stub_agy("sleep 30").display().to_string();
+
+        let cancelled = Arc::new(AtomicBool::new(true));
+        let lines = run_turn(&mut adapter, cancelled).await;
+
+        let response = sole_response(&lines);
+        assert_eq!(
+            response["result"]["stopReason"], "cancelled",
+            "got {response}"
+        );
+        assert!(response["error"].is_null());
+        assert_eq!(adapter.live_children().len(), 0);
+    }
 }
