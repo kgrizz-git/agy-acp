@@ -231,8 +231,12 @@ extracted `drain_agy_io` must keep `notify_tx` as its only output channel.
   per-helper complexity number the way `adapter.rs:819` records the current one —
   otherwise a helper that inherits the parent's complexity passes the gate unnoticed.
 - **E2E is required here, not optional.** This phase rewrites exactly what e2e covers.
-  Run `cargo test e2e -- --ignored --nocapture` locally with `GEMINI_API_KEY`, or get a
-  green `e2e.yml` run on the PR. Do not merge on unit tests alone. Note what that costs:
+  Run `cargo test e2e -- --ignored --nocapture` locally. It needs `agy` on PATH and
+  auth, but **not** a `GEMINI_API_KEY`: `prepare_auth` accepts an existing
+  `~/.gemini/antigravity-cli/settings.json` keyring login, which is what a developer
+  machine already has. The key is a CI requirement, because a runner has no keyring.
+  Build `--release` first; the tests drive the built binary. Do not merge on unit tests
+  alone. What the CI route costs, if the local one is unavailable:
   `e2e.yml` gates on the protected `e2e` environment and needs a maintainer to approve the
   run (`e2e.yml:1-4, 16-24`), and it skips entirely for fork PRs, which cannot receive the
   secret. So for this phase, plan on the local run with a real key as the primary path and
@@ -311,8 +315,9 @@ stated problem worse. So the target is not "tests live next to source" but **no 
   plus the cognitive-complexity reporting step from `ci.yml:57`.
 - **Cross-platform**: the `windows-latest` MSRV job is the only thing that catches a
   mis-gated module. It must be green — a green Linux build proves nothing about Phase 2.
-- **E2E**: `cargo test e2e -- --ignored --nocapture` locally with `GEMINI_API_KEY`, or a
-  green `e2e.yml` run. Required for Phase 3 (see above); nice-to-have for the others.
+- **E2E**: `cargo test e2e -- --ignored --nocapture` locally (keyring auth is enough --
+  see Phase 3), or a green `e2e.yml` run. Required for Phase 3; nice-to-have for the
+  others.
 
 ## Sequencing note
 TODO.md is explicit that this must not run while a behavioural change is in flight. Check
