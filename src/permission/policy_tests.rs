@@ -10,7 +10,7 @@ use super::test_support::*;
 
 #[test]
 fn only_ask_question_is_auto_allowed_by_default() {
-    let policy = AutoAllowPolicy::from_env();
+    let policy = AutoAllowPolicy::from_spec(DEFAULT_AUTO_ALLOW, "");
     assert!(policy.allows("ask_question"));
     for tool in ["view_file", "list_dir", "grep_search", "run_command"] {
         assert!(!policy.allows(tool), "{tool} must not be auto-allowed");

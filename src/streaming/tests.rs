@@ -190,12 +190,19 @@ fn stream_processor_survives_invalid_utf8_in_a_line() {
     use crate::streaming::StreamProcessor;
 
     // A byte slice with an invalid UTF-8 byte (0xff) decodes to U+FFFD via
-    // from_utf8_lossy, so one bad line must not stop the stream.
-    let bad_bytes = b"{\"event\":\"result\",\"result\":{\"status\":\"\xff\"}}";
+    // from_utf8_lossy, so one bad line must not stop the stream. The bad byte
+    // sits outside any JSON string, so the decoded line really is unparseable --
+    // inside one it would still deserialize, and the test would pass on a line
+    // that never reached the error path.
+    let bad_bytes = b"{\"event\":\xff\"result\",\"result\":{\"status\":\"SUCCESS\"}}";
     let bad_line = String::from_utf8_lossy(bad_bytes);
     assert!(
         bad_line.contains('\u{fffd}'),
         "precondition: line carries a replacement char"
+    );
+    assert!(
+        serde_json::from_str::<serde_json::Value>(&bad_line).is_err(),
+        "precondition: the decoded line does not parse"
     );
 
     let mut processor = StreamProcessor::new(false);
@@ -203,6 +210,10 @@ fn stream_processor_survives_invalid_utf8_in_a_line() {
     assert!(
         from_bad.is_empty(),
         "a malformed line yields no notifications"
+    );
+    assert!(
+        !processor.saw_result,
+        "a line that never parsed cannot have completed the turn"
     );
 
     // A valid event fed right after must still be processed normally.

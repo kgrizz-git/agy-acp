@@ -78,7 +78,6 @@ async fn only_the_users_own_refusal_counts_as_a_refusal() {
     );
 
     // The user's own answer.
-    bridge.set_active_session(Some("session-1")).await;
     bridge.register_conversation("conv-1", "session-1").await;
     bridge.set_active_session(Some("session-1")).await;
     let asking = {
@@ -229,12 +228,16 @@ async fn cancelled_permission_requests_deny() {
     };
 
     let request = expect_permission_request(&mut rx).await;
-    bridge
-        .resolve_response(
-            &request["id"],
-            Some(json!({ "outcome": { "outcome": "cancelled" } })),
-        )
-        .await;
+    assert!(
+        bridge
+            .resolve_response(
+                &request["id"],
+                Some(json!({ "outcome": { "outcome": "cancelled" } })),
+            )
+            .await,
+        "the id must match a pending request -- otherwise the await below hangs \
+         instead of failing"
+    );
 
     assert_eq!(asking.await.unwrap().0, Decision::Deny);
 }

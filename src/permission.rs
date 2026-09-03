@@ -876,7 +876,14 @@ impl AutoAllowPolicy {
             .ok()
             .filter(|v| !v.trim().is_empty())
             .unwrap_or_else(|| DEFAULT_AUTO_ALLOW.to_string());
+        AutoAllowPolicy::from_spec(&raw, &std::env::var(SENSITIVE_ENV).unwrap_or_default())
+    }
 
+    /// Parses the two policy strings. Split out from [`Self::from_env`] so the
+    /// default spec can be tested without an inherited `AGY_ACP_AUTO_ALLOW`
+    /// deciding the result; tests run threaded in one process, so setting the
+    /// variable is not a safe alternative.
+    fn from_spec(raw: &str, sensitive: &str) -> Self {
         let mut tools: Vec<String> = Vec::new();
         for entry in raw.split(',').map(str::trim).filter(|e| !e.is_empty()) {
             match entry {
@@ -887,8 +894,7 @@ impl AutoAllowPolicy {
             }
         }
 
-        let extra_sensitive = std::env::var(SENSITIVE_ENV)
-            .unwrap_or_default()
+        let extra_sensitive = sensitive
             .split(',')
             .map(|p| p.trim().to_lowercase())
             .filter(|p| !p.is_empty())

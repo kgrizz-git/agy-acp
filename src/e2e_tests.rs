@@ -4,7 +4,6 @@
 
 use serde_json::{json, Value};
 
-
 fn prepare_auth() -> bool {
     if std::env::var("GEMINI_API_KEY")
         .map(|v| !v.is_empty())
@@ -100,10 +99,14 @@ fn test_e2e_agy_acp_full_round_trip() {
         let msg: Value = serde_json::from_str(line.trim()).unwrap();
         if msg.get("method") == Some(&json!("session/update")) {
             got_notification = true;
-            response_text = msg["params"]["update"]["content"]["text"]
-                .as_str()
-                .unwrap_or("")
-                .to_string();
+            // Accumulate: the answer arrives as deltas, and the last one is often
+            // just a newline. Overwriting made the assertion below depend on how
+            // the model happened to chunk its reply.
+            response_text.push_str(
+                msg["params"]["update"]["content"]["text"]
+                    .as_str()
+                    .unwrap_or(""),
+            );
         }
         if msg.get("id") == Some(&json!(3)) {
             assert!(msg["error"].is_null(), "Got error: {}", msg["error"]);
@@ -171,6 +174,32 @@ fn send_recv(
     line
 }
 
+/// Like [`send_recv`], but skips ahead to the response carrying `id`.
+///
+/// A successful `session/load` replays the stored transcript as `session/update`
+/// notifications *before* its response, so a single `read_line` would return a
+/// notification instead of the reply.
+fn send_recv_id(
+    stdin: &mut std::process::ChildStdin,
+    reader: &mut std::io::BufReader<std::process::ChildStdout>,
+    id: u64,
+    msg: &str,
+) -> Value {
+    use std::io::{BufRead, Write};
+    writeln!(stdin, "{}", msg).unwrap();
+    stdin.flush().unwrap();
+    loop {
+        let mut line = String::new();
+        if reader.read_line(&mut line).unwrap() == 0 {
+            panic!("agy-acp closed stdout before answering id {}", id);
+        }
+        let msg: Value = serde_json::from_str(line.trim()).unwrap();
+        if msg.get("id") == Some(&json!(id)) {
+            return msg;
+        }
+    }
+}
+
 fn send_prompt_wait(
     stdin: &mut std::process::ChildStdin,
     reader: &mut std::io::BufReader<std::process::ChildStdout>,
@@ -189,6 +218,7 @@ fn send_prompt_wait(
     stdin.flush().unwrap();
 
     let deadline = std::time::Instant::now() + Duration::from_secs(120);
+    // Accumulated, not overwritten -- see the round-trip test above.
     let mut notification_text: Option<String> = None;
     loop {
         if std::time::Instant::now() > deadline {
@@ -202,9 +232,12 @@ fn send_prompt_wait(
         }
         let msg: Value = serde_json::from_str(line.trim()).unwrap();
         if msg.get("method") == Some(&json!("session/update")) {
-            notification_text = msg["params"]["update"]["content"]["text"]
+            let delta = msg["params"]["update"]["content"]["text"]
                 .as_str()
-                .map(String::from);
+                .unwrap_or_default();
+            notification_text
+                .get_or_insert_with(String::new)
+                .push_str(delta);
         }
         if msg.get("id") == Some(&json!(id)) {
             return (notification_text, msg);
@@ -299,10 +332,26 @@ fn test_e2e_session_load() {
         resp1["error"]
     );
 
-    let (text2, resp2) = send_prompt_wait(
+    // What the test is named for: reload the session, then keep prompting it.
+    let loaded = send_recv_id(
         &mut stdin,
         &mut reader,
         4,
+        &format!(
+            r#"{{"jsonrpc":"2.0","id":4,"method":"session/load","params":{{"sessionId":"{}"}}}}"#,
+            session_id
+        ),
+    );
+    assert!(
+        loaded["error"].is_null(),
+        "session/load error: {}",
+        loaded["error"]
+    );
+
+    let (text2, resp2) = send_prompt_wait(
+        &mut stdin,
+        &mut reader,
+        5,
         &session_id,
         "Reply with exactly one word: SECOND",
     );
