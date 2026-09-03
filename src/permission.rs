@@ -884,21 +884,33 @@ impl AutoAllowPolicy {
     /// deciding the result; tests run threaded in one process, so setting the
     /// variable is not a safe alternative.
     fn from_spec(raw: &str, sensitive: &str) -> Self {
+        // Parsed before the `none` arm below, which used to return
+        // `AutoAllowPolicy::default()` and drop this list on the floor. That list
+        // is not only an auto-allow filter: `escapes_containment` also re-checks
+        // it before honouring a sticky "Always allow", so discarding it let a
+        // grant the user gave for one command cover a sensitive path they never
+        // saw. `none` is the most restrictive setting, so it was the setting that
+        // silently ignored the user's own patterns.
+        let extra_sensitive: Vec<String> = sensitive
+            .split(',')
+            .map(|p| p.trim().to_lowercase())
+            .filter(|p| !p.is_empty())
+            .collect();
+
         let mut tools: Vec<String> = Vec::new();
         for entry in raw.split(',').map(str::trim).filter(|e| !e.is_empty()) {
             match entry {
-                "none" => return AutoAllowPolicy::default(),
+                "none" => {
+                    return AutoAllowPolicy {
+                        tools: Vec::new(),
+                        extra_sensitive,
+                    };
+                }
                 "reads" => tools.extend(READ_TOOLS.iter().map(|t| t.to_string())),
                 "searches" => tools.extend(SEARCH_TOOLS.iter().map(|t| t.to_string())),
                 tool => tools.push(tool.to_string()),
             }
         }
-
-        let extra_sensitive = sensitive
-            .split(',')
-            .map(|p| p.trim().to_lowercase())
-            .filter(|p| !p.is_empty())
-            .collect();
 
         AutoAllowPolicy {
             tools,

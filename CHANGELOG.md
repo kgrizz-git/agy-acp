@@ -12,6 +12,14 @@ of its own yet, so everything below is unreleased.
 
 ### Fixed
 
+- `AGY_ACP_AUTO_ALLOW=none` no longer discards `AGY_ACP_SENSITIVE_PATTERNS`. The
+  `none` arm returned a default policy, dropping the user's patterns, and that
+  list is not only an auto-allow filter: `escapes_containment` re-checks it
+  before honouring a sticky "Always allow". So the most restrictive auto-allow
+  setting was the one that let an "Always allow" granted for one command cover a
+  path the user had marked sensitive and never saw. The built-in patterns always
+  applied; only user-supplied ones were lost.
+
 - A turn that failed to spawn `agy` left the permission bridge bound to it. The
   binding is cleared on that path now, so the generation bump that stops a
   decision landing in the gap from matching a finished turn actually happens —

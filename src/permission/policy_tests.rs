@@ -18,6 +18,22 @@ fn only_ask_question_is_auto_allowed_by_default() {
 }
 
 #[test]
+fn none_still_keeps_the_users_sensitive_patterns() {
+    // `none` auto-allows nothing, but the sensitive list is also what
+    // `escapes_containment` re-checks before honouring a sticky "Always allow".
+    // Dropping it on this path made the most restrictive setting the one that
+    // ignored the user's own patterns.
+    let policy = AutoAllowPolicy::from_spec("none", "my-vault,Client-Files");
+    assert!(!policy.allows("view_file"), "none allows nothing");
+    assert!(policy.is_sensitive("/home/me/my-vault/keys"));
+    assert!(
+        policy.is_sensitive("/home/me/CLIENT-FILES/notes"),
+        "patterns are matched case-insensitively"
+    );
+    assert!(!policy.is_sensitive("/home/me/src/main.rs"));
+}
+
+#[test]
 fn groups_and_none_are_understood() {
     let readers = AutoAllowPolicy {
         tools: READ_TOOLS.iter().map(|t| t.to_string()).collect(),
