@@ -443,7 +443,11 @@ mod tests {
         let table = [(10, 1), (20, 10), (30, 20), (11, 1), (21, 11), (40, 40)];
         let mut found = descendants(&table, 10);
         found.sort_unstable();
-        assert_eq!(found, vec![20, 30], "the walk must not stop at direct children");
+        assert_eq!(
+            found,
+            vec![20, 30],
+            "the walk must not stop at direct children"
+        );
         assert!(
             descendants(&table, 30).is_empty(),
             "a leaf has no descendants"

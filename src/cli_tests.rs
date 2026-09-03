@@ -1,6 +1,5 @@
 //! Tests for command-line parsing.
 
-
 use crate::Cli;
 use clap::Parser;
 

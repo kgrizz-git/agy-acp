@@ -12,7 +12,9 @@ use super::*;
 /// A missing prompt is the interesting failure here -- it means a check was
 /// bypassed -- and without a timeout that shows up as the whole suite
 /// hanging rather than as a red test.
-pub(super) async fn expect_permission_request(rx: &mut mpsc::UnboundedReceiver<Option<String>>) -> Value {
+pub(super) async fn expect_permission_request(
+    rx: &mut mpsc::UnboundedReceiver<Option<String>>,
+) -> Value {
     let raw = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
         .await
         .expect("the bridge must ask the user, not decide on its own")
@@ -27,7 +29,10 @@ pub(super) async fn expect_permission_request(rx: &mut mpsc::UnboundedReceiver<O
 /// asks instead. The mirror of `expect_permission_request`: an unwanted
 /// prompt goes unanswered here and would otherwise block for the whole
 /// nine-minute response timeout, reading as a hung suite, not a red test.
-pub(super) async fn expect_auto_decision(bridge: &PermissionBridge, payload: Value) -> (Decision, String) {
+pub(super) async fn expect_auto_decision(
+    bridge: &PermissionBridge,
+    payload: Value,
+) -> (Decision, String) {
     tokio::time::timeout(std::time::Duration::from_secs(5), bridge.decide(&payload))
         .await
         .expect("the bridge must decide on its own, not ask the user")

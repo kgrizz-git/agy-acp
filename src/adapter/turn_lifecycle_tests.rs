@@ -9,8 +9,8 @@ use uuid::Uuid;
 use crate::adapter::Adapter;
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
 use std::sync::Arc;
+use std::time::Duration;
 
 /// An executable `/bin/sh` stub standing in for agy, removed when the test
 /// drops it. The scratch directory is per-call, so concurrent tests cannot
@@ -219,13 +219,8 @@ async fn non_zero_exit_answers_with_an_error() {
     let lines = run_turn(&mut adapter, Arc::new(AtomicBool::new(false))).await;
 
     let response = sole_response(&lines);
-    assert_eq!(
-        response["error"]["code"], -32000,
-        "got {response}"
-    );
-    let message = response["error"]["message"]
-        .as_str()
-        .unwrap_or("");
+    assert_eq!(response["error"]["code"], -32000, "got {response}");
+    let message = response["error"]["message"].as_str().unwrap_or("");
     assert!(
         message.contains("boom"),
         "stderr text 'boom' should appear in the error message, got: {message}"
@@ -320,7 +315,10 @@ async fn a_successful_turn_binds_persists_and_releases_the_bridge() {
     let lines = run_turn_for(&mut adapter, &session_id, Arc::new(AtomicBool::new(false))).await;
 
     let response = sole_response(&lines);
-    assert_eq!(response["result"]["stopReason"], "end_turn", "got {response}");
+    assert_eq!(
+        response["result"]["stopReason"], "end_turn",
+        "got {response}"
+    );
 
     // Bound in memory, so the next turn can pass --conversation.
     assert_eq!(
@@ -367,8 +365,7 @@ async fn bridge_binding_is_cleared_after_spawn_failure() {
 
     let mut adapter = Adapter::new_for_test();
     adapter.agy_bin = "/nonexistent/agy-acp-not-a-real-binary".to_string();
-    let hook_root =
-        std::env::temp_dir().join(format!("agy-acp-hook-{}", Uuid::new_v4()));
+    let hook_root = std::env::temp_dir().join(format!("agy-acp-hook-{}", Uuid::new_v4()));
     fs::create_dir_all(&hook_root).unwrap();
     adapter.enable_permission_bridge(&bridge, &hook_root);
 

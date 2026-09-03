@@ -525,7 +525,10 @@ impl PermissionBridge {
         // be drained. Registering revalidates rather than assuming the check
         // still holds, which is what makes the pair atomic in the only sense that
         // matters: the entry is never created for a turn that is over.
-        if !self.register_pending(&request_id, &session_id, turn, tx).await {
+        if !self
+            .register_pending(&request_id, &session_id, turn, tx)
+            .await
+        {
             return (
                 Decision::Deny,
                 "agy-acp: the turn ended before this was asked".to_string(),
@@ -1185,14 +1188,13 @@ fn hook_roundtrip(socket_path: &str, payload: &str) -> std::io::Result<String> {
     Ok(response)
 }
 
-
-#[cfg(test)]
-mod test_support;
-#[cfg(test)]
-mod tests;
 #[cfg(test)]
 mod policy_tests;
 #[cfg(test)]
 mod sticky_tests;
+#[cfg(test)]
+mod test_support;
+#[cfg(test)]
+mod tests;
 #[cfg(test)]
 mod turn_tests;

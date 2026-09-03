@@ -5,8 +5,8 @@
 //! Their own file rather than an inline module: permission.rs was the largest
 //! file in the repo, and two thirds of it was this.
 
-use super::*;
 use super::test_support::*;
+use super::*;
 
 #[tokio::test]
 async fn ending_a_turn_answers_its_pending_permission_request() {
@@ -126,7 +126,13 @@ async fn a_late_allow_after_the_turn_ended_does_not_become_sticky() {
         )
         .await;
     assert!(
-        !bridge.state.lock().await.always.values().any(|d| *d == Decision::Allow),
+        !bridge
+            .state
+            .lock()
+            .await
+            .always
+            .values()
+            .any(|d| *d == Decision::Allow),
         "a late allow must not become a sticky allow for the rest of the session"
     );
 }
@@ -359,7 +365,11 @@ async fn a_question_is_not_registered_if_its_turn_ended_while_deciding() {
 
     // What teardown does, in the gap between the check and the registration.
     bridge.set_active_session(None).await;
-    assert_eq!(bridge.abandon_pending("session-1").await, 0, "nothing to drain yet");
+    assert_eq!(
+        bridge.abandon_pending("session-1").await,
+        0,
+        "nothing to drain yet"
+    );
 
     let (tx, _rx_answer) = oneshot::channel();
     assert!(
@@ -634,9 +644,7 @@ async fn forget_session_clears_only_that_sessions_answers() {
         bridge
             .resolve_response(
                 &request["id"],
-                Some(
-                    json!({ "outcome": { "outcome": "selected", "optionId": "allow_always" } }),
-                ),
+                Some(json!({ "outcome": { "outcome": "selected", "optionId": "allow_always" } })),
             )
             .await;
         assert_eq!(asking.await.unwrap().0, Decision::Allow);
