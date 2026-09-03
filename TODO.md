@@ -10,8 +10,6 @@ carries no work items.
 
 The few things worth picking up next. Each is a pointer; the detail lives below.
 
-- [Split the two files and the one function that have outgrown reading](#split-the-two-files-and-the-one-function-that-have-outgrown-reading)
-  — path containment and the turn phases are split out; `tests.rs` is the remainder.
 - [Verify the port under Paseo](#verify-the-port-under-paseo) — done except the
   reopened-thread path.
 - [Reconcile the tool lists with agy's real toolset](#reconcile-the-tool-lists-with-agys-real-toolset)
@@ -21,8 +19,12 @@ The few things worth picking up next. Each is a pointer; the detail lives below.
   two sources of truth for the same findings.
 - [Rename the binary and crate](#rename-the-binary-and-crate) — cheaper now than
   after anyone else installs it.
+- [Make the tree rustfmt-clean](#make-the-tree-rustfmt-clean) — one mechanical
+  commit plus a CI gate, to retire the "do not run bare `cargo fmt`" rule.
 - [Configure the protected e2e environment](#configure-the-protected-e2e-environment)
-  — key-backed PR e2e is intentionally deferred; deterministic CI already runs.
+  — **add `E2E_GEMINI_API_KEY` to a protected `e2e` environment.** Until then the
+  e2e job skips on every PR, and the only e2e evidence is whatever a maintainer
+  runs locally.
 
 ## Active
 
@@ -77,6 +79,14 @@ job currently skips after its secret gate. Fork pull requests skip before
 requesting environment approval because they cannot receive Actions secrets.
 This does not weaken the deterministic CI jobs or expose a repository secret to
 pull-request code.
+
+What it costs, concretely: the turn-lifecycle refactor (#13) and the test split
+(#14) both landed with `e2e` reported as *skipping*, and the only e2e evidence
+was a local run. That works because `prepare_auth` accepts an existing
+`~/.gemini/antigravity-cli/settings.json` keyring login, so a developer machine
+with `agy` needs no key at all -- but a GitHub runner has no keyring, which is
+the whole reason CI needs the secret. Anyone reviewing a PR that touches the turn
+loop is currently taking the author's word for the e2e result.
 
 When it becomes useful to run paid e2e on pull requests:
 
@@ -333,45 +343,6 @@ which is most of what the quality-gates entry above wants from `cargo clippy` an
 findings and a second place to silence a lint. Worth picking one deliberately
 rather than adding Sonar because the account is already there.
 
-#### Split the two files and the one function that have outgrown reading
-
-Plan: plans/split-large-files.md. Phases 1-3 have landed: the turn lifecycle has
-tests, `permission.rs` gave up its path containment to `permission/path_rules.rs`,
-and `handle_session_prompt` is now spawn/drain/teardown phases with the complexity
-lints denied module-wide. `tests.rs` is what is left.
-
-Sizes as of this entry, from `wc -l` and a scan of function lengths:
-
-| Unit | Lines |
-|---|---|
-| `src/tests.rs` | 2419 |
-| `src/permission.rs` | 2207 |
-| `adapter.rs::handle_session_prompt` | 322 |
-| `permission.rs::decide` | 141 |
-
-`handle_session_prompt` is the one that actually hurts. It spawns agy, wires two
-reader tasks, runs the `select!` that races the child against cancellation, kills
-the tree, drains both readers, binds the conversation id, tears down the bridge,
-persists the session and builds the response — and it holds the single adapter
-mutex across all of it, which is its own entry above. Every recent bug in the
-turn lifecycle has been somewhere in this function, and each fix has had to be
-argued against the whole of it. Splitting the spawn/drain/teardown phases apart
-would let them be tested without a real agy, which is the gap review keeps
-finding: the call sites in there are covered by nothing.
-
-`decide` is long but linear — a policy cascade, read top to bottom. Lower value.
-
-The two big files are cohesive, so a split is only worth it with a real seam.
-`permission.rs` has an obvious one: the containment and path logic
-(`outside_workspace`, `is_inside`, `resolve`, `lexical_normalize`, `PATH_FIELDS`)
-is self-contained and heavily tested, and would move out whole. `tests.rs` is
-large because it is one flat module per subject; splitting it by subject is
-mechanical and would make the permission tests findable, which they currently are
-not.
-
-Do not do this while a behavioural change is in flight -- a move that touches
-every line makes the next real diff unreviewable.
-
 #### Replay without agy's private schema
 
 replay works, but only by parsing agy's undocumented conversation DB — the
@@ -420,6 +391,22 @@ the private hook directory and workspace-bound read policy.
 
 reproduce the foreground task-state and trailing-newline whole-file-revert
 issues reported by `paseo-agy-acp` before adopting their fixes.
+
+### Make the tree rustfmt-clean
+
+The repo has never been formatted: no `rustfmt.toml`, no fmt commit in 157, and
+`AGENTS.md` turns the fact into a rule ("do not run bare `cargo fmt`") that every
+contributor and agent has to be told. The drift is only hand-wrapping rustfmt
+disagrees with, but it ratchets — 9 hunks when CI was set up, 11 on `main`, 27
+after the file split, because each new file is written by hand and never
+formatted.
+
+Do it as its own PR: one `cargo fmt` commit, a `cargo fmt --check` step in CI
+next to the file-length gate, the hash in `.git-blame-ignore-revs`, and the two
+`cargo fmt` prohibitions deleted from `AGENTS.md` and `ci.yml:1`. Nothing else in
+the diff. `#[rustfmt::skip]` is available for blocks that genuinely read better
+by hand — `protobuf.rs:432`, where rustfmt explodes a 4-tuple return type over
+six lines, is the one known candidate.
 
 ## Icebox
 

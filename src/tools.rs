@@ -213,3 +213,6 @@ pub fn thought_text_from_value(input: &Value) -> Option<String> {
         (content_type == Some("text")).then(|| text.map(str::to_string))?
     })
 }
+
+#[cfg(test)]
+mod tests;
