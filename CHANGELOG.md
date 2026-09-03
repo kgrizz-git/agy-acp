@@ -10,6 +10,18 @@ of its own yet, so everything below is unreleased.
 
 ## Unreleased
 
+### Maintenance
+
+- The tree is rustfmt-formatted and CI enforces it with `cargo fmt --check`.
+  Formatting drift only ratchets — 9 hunks when CI was set up, 27 after the
+  test-module split — because every file was written by hand, and `AGENTS.md`
+  had to tell each contributor and agent not to run bare `cargo fmt`. That rule
+  is gone. The pre-push hook checks formatting too, so the gate is reachable
+  before a push rather than only after one. The formatting commit is listed in
+  `.git-blame-ignore-revs`; run
+  `git config blame.ignoreRevsFile .git-blame-ignore-revs` once to keep blame
+  readable locally, as GitHub already does.
+
 ### Fixed
 
 - `AGY_ACP_AUTO_ALLOW=none` no longer discards `AGY_ACP_SENSITIVE_PATTERNS`. The

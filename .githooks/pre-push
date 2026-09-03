@@ -8,7 +8,7 @@
 # After cloning, run once:
 #     git config core.hooksPath .githooks
 #
-# Local quality gates (clippy + unit tests) run on every push unless
+# Local quality gates (fmt + clippy + unit tests) run on every push unless
 # SKIP_LOCAL_GATES=1 is set. The fork guard always runs.
 #
 # Bypass everything with `git push --no-verify` when you mean it.
@@ -43,5 +43,6 @@ if [ "$SKIP_LOCAL_GATES" = "1" ]; then
 	exit 0
 fi
 
+run_timeout 60 cargo fmt --check
 run_timeout 300 cargo clippy --all-targets -- -W clippy::all -D clippy::all
 run_timeout 300 cargo test
