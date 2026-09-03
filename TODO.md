@@ -19,6 +19,8 @@ The few things worth picking up next. Each is a pointer; the detail lives below.
   two sources of truth for the same findings.
 - [Rename the binary and crate](#rename-the-binary-and-crate) — cheaper now than
   after anyone else installs it.
+- [Make the tree rustfmt-clean](#make-the-tree-rustfmt-clean) — one mechanical
+  commit plus a CI gate, to retire the "do not run bare `cargo fmt`" rule.
 - [Configure the protected e2e environment](#configure-the-protected-e2e-environment)
   — **add `E2E_GEMINI_API_KEY` to a protected `e2e` environment.** Until then the
   e2e job skips on every PR, and the only e2e evidence is whatever a maintainer
@@ -389,6 +391,22 @@ the private hook directory and workspace-bound read policy.
 
 reproduce the foreground task-state and trailing-newline whole-file-revert
 issues reported by `paseo-agy-acp` before adopting their fixes.
+
+### Make the tree rustfmt-clean
+
+The repo has never been formatted: no `rustfmt.toml`, no fmt commit in 157, and
+`AGENTS.md` turns the fact into a rule ("do not run bare `cargo fmt`") that every
+contributor and agent has to be told. The drift is only hand-wrapping rustfmt
+disagrees with, but it ratchets — 9 hunks when CI was set up, 11 on `main`, 27
+after the file split, because each new file is written by hand and never
+formatted.
+
+Do it as its own PR: one `cargo fmt` commit, a `cargo fmt --check` step in CI
+next to the file-length gate, the hash in `.git-blame-ignore-revs`, and the two
+`cargo fmt` prohibitions deleted from `AGENTS.md` and `ci.yml:1`. Nothing else in
+the diff. `#[rustfmt::skip]` is available for blocks that genuinely read better
+by hand — `protobuf.rs:432`, where rustfmt explodes a 4-tuple return type over
+six lines, is the one known candidate.
 
 ## Icebox
 
