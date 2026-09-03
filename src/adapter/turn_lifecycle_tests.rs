@@ -150,10 +150,11 @@ async fn cancel_ends_the_turn_as_cancelled() {
 /// wait. Pinned because the obvious "unreadable stdout" stub is this one, and
 /// treating it as undrainable would kill turns that are still working.
 ///
-/// The `undrainable` flag covers a different case: the read
-/// itself erroring *and* the follow-up drain to a sink also failing. No shell
-/// stub can produce that, so it stays uncovered rather than faked; the Phase 1
-/// section of plans/completed/split-large-files.md records why.
+/// The `undrainable` flag covers a different case: the read itself erroring
+/// *and* the follow-up drain to a sink also failing. A stub can arrange neither
+/// -- a script can close a pipe or stop writing to it, but not make a healthy
+/// pipe return an I/O error to its reader -- so that flag stays uncovered rather
+/// than faked by a test that only looks like it reaches it.
 #[tokio::test]
 async fn a_child_that_closes_stdout_is_waited_for_not_killed() {
     let mut adapter = Adapter::new_for_test();

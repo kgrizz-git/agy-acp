@@ -39,6 +39,17 @@ completion. When a piece of work gets a plan (kept under `plans/`):
   commit before merge is the earliest safe point, not an invitation to delete
   during planning.
 
+**Code does not cite plans.** A comment in `src/` never points at
+`plans/<name>.md`. Plans move (`plans/` → `plans/completed/`), so the path rots;
+worse, a plan is a snapshot of intent that the work is free to contradict, and
+completed plans are frozen as historical record — so a reader who follows the
+pointer can land on an argument for something that never happened. If a comment
+needs a reason, the comment carries the reason. `git blame` reaches the commit
+and the PR, which is where the discussion actually lives, and neither of those
+paths can go stale. Citing an immutable id (a PR number, a commit hash) is fine
+when the history genuinely matters; citing `dev-docs/` is fine too, since it is
+maintained as current reference rather than as a record of a decision.
+
 ### Plans and CHANGELOG discipline
 
 Plans live in three buckets:
