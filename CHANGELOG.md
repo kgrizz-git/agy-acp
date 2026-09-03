@@ -17,7 +17,9 @@ of its own yet, so everything below is unreleased.
   test-module split — because every file was written by hand, and `AGENTS.md`
   had to tell each contributor and agent not to run bare `cargo fmt`. That rule
   is gone. The pre-push hook checks formatting too, so the gate is reachable
-  before a push rather than only after one. The formatting commit is listed in
+  before a push rather than only after one, and `rustfmt.toml` names the style
+  edition so the gate's answer does not move when the floating `stable`
+  toolchain does. The formatting commit is listed in
   `.git-blame-ignore-revs`; run
   `git config blame.ignoreRevsFile .git-blame-ignore-revs` once to keep blame
   readable locally, as GitHub already does.
