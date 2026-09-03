@@ -102,11 +102,7 @@ fn test_e2e_agy_acp_full_round_trip() {
             // Accumulate: the answer arrives as deltas, and the last one is often
             // just a newline. Overwriting made the assertion below depend on how
             // the model happened to chunk its reply.
-            response_text.push_str(
-                msg["params"]["update"]["content"]["text"]
-                    .as_str()
-                    .unwrap_or(""),
-            );
+            response_text.push_str(agent_text(&msg));
         }
         if msg.get("id") == Some(&json!(3)) {
             assert!(msg["error"].is_null(), "Got error: {}", msg["error"]);
@@ -174,6 +170,19 @@ fn send_recv(
     line
 }
 
+/// The agent's answer text from a `session/update`, and nothing else.
+///
+/// `agent_thought_chunk` carries the identical `content.text` shape, so matching
+/// on the payload alone would let a model's reasoning ("reply with exactly one
+/// word: PONG") satisfy an assertion about its answer.
+fn agent_text(msg: &Value) -> &str {
+    let update = &msg["params"]["update"];
+    if update["sessionUpdate"] != json!("agent_message_chunk") {
+        return "";
+    }
+    update["content"]["text"].as_str().unwrap_or("")
+}
+
 /// Like [`send_recv`], but skips ahead to the response carrying `id`.
 ///
 /// A successful `session/load` replays the stored transcript as `session/update`
@@ -186,14 +195,26 @@ fn send_recv_id(
     msg: &str,
 ) -> Value {
     use std::io::{BufRead, Write};
+    use std::time::Duration;
+
     writeln!(stdin, "{}", msg).unwrap();
     stdin.flush().unwrap();
+
+    // Bounds a reply that never comes but keeps the pipe busy -- endless replay
+    // notifications, say. A read blocked with nothing arriving is not covered:
+    // std pipes take no read timeout, and the e2e workflow's own
+    // `timeout-minutes` is what catches that.
+    let deadline = std::time::Instant::now() + Duration::from_secs(120);
     loop {
+        if std::time::Instant::now() > deadline {
+            panic!("Timed out waiting for the response to id {}", id);
+        }
         let mut line = String::new();
         if reader.read_line(&mut line).unwrap() == 0 {
             panic!("agy-acp closed stdout before answering id {}", id);
         }
-        let msg: Value = serde_json::from_str(line.trim()).unwrap();
+        let msg: Value = serde_json::from_str(line.trim())
+            .unwrap_or_else(|e| panic!("non-JSON line on stdout: {e}: {:?}", line));
         if msg.get("id") == Some(&json!(id)) {
             return msg;
         }
@@ -232,12 +253,9 @@ fn send_prompt_wait(
         }
         let msg: Value = serde_json::from_str(line.trim()).unwrap();
         if msg.get("method") == Some(&json!("session/update")) {
-            let delta = msg["params"]["update"]["content"]["text"]
-                .as_str()
-                .unwrap_or_default();
             notification_text
                 .get_or_insert_with(String::new)
-                .push_str(delta);
+                .push_str(agent_text(&msg));
         }
         if msg.get("id") == Some(&json!(id)) {
             return (notification_text, msg);
