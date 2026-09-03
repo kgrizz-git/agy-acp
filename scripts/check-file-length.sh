@@ -64,7 +64,11 @@ while IFS= read -r file; do
     [ -n "$file" ] || continue
     # awk counts records, so a final line with no trailing newline still counts.
     # `wc -l` counts newlines and would report 1200 for a 1201-line file.
-    lines=$(awk 'END { print NR }' "$file")
+    #
+    # Redirected, not passed as an operand: awk reads `name=value` operands as
+    # variable assignments, so a file called `lines=1201.rs` would assign instead
+    # of being opened, leaving awk on empty stdin and reporting 0 lines.
+    lines=$(awk 'END { print NR }' <"$file")
     ceiling=$(printf '%s\n' "$EXEMPT" | awk -F'\t' -v f="$file" '$1 == f { print $2 }')
 
     if [ -n "$ceiling" ]; then
