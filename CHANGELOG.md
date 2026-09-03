@@ -12,6 +12,11 @@ of its own yet, so everything below is unreleased.
 
 ### Fixed
 
+- A turn that failed to spawn `agy` left the permission bridge bound to it. The
+  binding is cleared on that path now, so the generation bump that stops a
+  decision landing in the gap from matching a finished turn actually happens —
+  without it a stray "always" could survive into the next turn.
+
 - One "Always allow" on a command tool no longer approves every later command.
   Remembered answers were keyed by `(session, tool name)`, so approving
   `echo verification-one` silently approved a later `rm -f other.txt` — reproduced
@@ -130,6 +135,14 @@ of its own yet, so everything below is unreleased.
 
 ### Maintenance
 
+- The two files and one function that had outgrown reading are split.
+  `handle_session_prompt` is four phases instead of 317 lines, path containment
+  moved out of `permission.rs` into `permission/path_rules.rs`, and the flat
+  2879-line `tests.rs` became per-subject test files beside the modules they
+  exercise. The turn lifecycle has tests for the first time, driven by stub
+  binaries rather than a real `agy`. Complexity lints are denied crate-wide and
+  file length is capped by `scripts/check-file-length.sh`
+  ([plans/completed/split-large-files.md](plans/completed/split-large-files.md)).
 - `pr_compliance_checklist.yaml` gains a rule for what a cancel has to reach, so
   an automated review that sees `child.kill()` reappear on a kill path, or the
   walk swapped back for `killpg`, has the measurement to judge it by.

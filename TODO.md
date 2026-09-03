@@ -10,8 +10,6 @@ carries no work items.
 
 The few things worth picking up next. Each is a pointer; the detail lives below.
 
-- [Split the two files and the one function that have outgrown reading](#split-the-two-files-and-the-one-function-that-have-outgrown-reading)
-  — path containment and the turn phases are split out; `tests.rs` is the remainder.
 - [Verify the port under Paseo](#verify-the-port-under-paseo) — done except the
   reopened-thread path.
 - [Reconcile the tool lists with agy's real toolset](#reconcile-the-tool-lists-with-agys-real-toolset)
@@ -342,48 +340,6 @@ which is most of what the quality-gates entry above wants from `cargo clippy` an
 `cargo llvm-cov` directly. Running both means two sources of truth for the same
 findings and a second place to silence a lint. Worth picking one deliberately
 rather than adding Sonar because the account is already there.
-
-#### Split the two files and the one function that have outgrown reading
-
-Plan: plans/split-large-files.md. Done. The turn lifecycle has tests driven by
-stub binaries, `permission.rs` gave up its path containment to
-`permission/path_rules.rs`, `handle_session_prompt` is spawn/drain/teardown phases
-with the complexity lints denied module-wide, and the flat `tests.rs` is gone --
-tests now sit in their own files beside the module they exercise.
-
-Sizes after the split, from `wc -l` and a scan of function lengths. The first two
-numbers in the original entry were taken before the inline test modules existed
-and undercounted by ~1500 lines:
-
-| Unit | Before | After |
-|---|---|---|
-| `src/tests.rs` | 2879 | gone -- split by subject |
-| `src/permission.rs` | 3724 | 1175 plus five test files |
-| `adapter.rs::handle_session_prompt` | 317 | 61, over four phases |
-| `permission.rs::decide` | 141 | 141, unchanged and deliberately so |
-
-`handle_session_prompt` is the one that actually hurts. It spawns agy, wires two
-reader tasks, runs the `select!` that races the child against cancellation, kills
-the tree, drains both readers, binds the conversation id, tears down the bridge,
-persists the session and builds the response — and it holds the single adapter
-mutex across all of it, which is its own entry above. Every recent bug in the
-turn lifecycle has been somewhere in this function, and each fix has had to be
-argued against the whole of it. Splitting the spawn/drain/teardown phases apart
-would let them be tested without a real agy, which is the gap review keeps
-finding: the call sites in there are covered by nothing.
-
-`decide` is long but linear — a policy cascade, read top to bottom. Lower value.
-
-The two big files are cohesive, so a split is only worth it with a real seam.
-`permission.rs` has an obvious one: the containment and path logic
-(`outside_workspace`, `is_inside`, `resolve`, `lexical_normalize`, `PATH_FIELDS`)
-is self-contained and heavily tested, and would move out whole. `tests.rs` is
-large because it is one flat module per subject; splitting it by subject is
-mechanical and would make the permission tests findable, which they currently are
-not.
-
-Do not do this while a behavioural change is in flight -- a move that touches
-every line makes the next real diff unreviewable.
 
 #### Replay without agy's private schema
 

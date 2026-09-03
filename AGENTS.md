@@ -24,14 +24,20 @@ code works today. Completed work is recorded in [CHANGELOG.md](CHANGELOG.md).
 TODO.md entries are the source of truth for what's next; a *plan* is not
 completion. When a piece of work gets a plan (kept under `plans/`):
 
-- Keep the TODO.md entry and its "Next Up" pointer **on the board until the work
-  actually lands** (PR merged). Do not delete them while planning or implementing.
+- Keep the TODO.md entry and its "Next Up" pointer **on the board while the work
+  is being planned and implemented**. Do not delete them early.
 - **Link** the plan from the TODO entry (a one-line `Plan: plans/<name>.md`
   pointer) so the entry and the plan cross-reference.
-- **Delete** the entry as the **final step of implementation** — never during
-  planning. Per TODO.md's own rule, entries are deleted on landing, not ticked.
+- **Delete** the entry in the **last commit of the pull request**, together with
+  the plan move and the CHANGELOG entry — not after the merge. A cleanup that
+  happens after landing has no owner: the branch is gone, the reviewer has moved
+  on, and what is left is a TODO entry for work that shipped and a plan sitting
+  in `plans/` claiming to be in flight. Putting it in the PR also lets a reviewer
+  see the claim that the work is done in the same diff as the work.
 - This applies symmetrically: if an entry is removed before its work ships, the
-  work becomes untracked. Premature deletion is the bug to avoid.
+  work becomes untracked. Premature deletion is still the bug to avoid — the last
+  commit before merge is the earliest safe point, not an invitation to delete
+  during planning.
 
 ### Plans and CHANGELOG discipline
 
@@ -47,8 +53,10 @@ Plans live in three buckets:
 
 Filenames keep their topic (`permission-command-keying.md`), not a status
 prefix; the directory carries the status. In-flight plans are linked from
-`TODO.md` as `Plan: plans/<name>.md`. On landing, move the plan to
-`plans/completed/<name>.md` and delete the TODO entry.
+`TODO.md` as `Plan: plans/<name>.md`. Move the plan to
+`plans/completed/<name>.md` in the pull request's last commit, alongside
+deleting the TODO entry and adding the CHANGELOG line — a plan still sitting in
+`plans/` after its work merged reads as in-flight to everyone who comes next.
 
 **CHANGELOG** entries are bullets only — one short clause per observable change.
 Categories under each version, in order: **Added**, **Changed**, **Fixed**,
