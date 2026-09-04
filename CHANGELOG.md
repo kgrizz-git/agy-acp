@@ -10,7 +10,39 @@ of its own yet, so everything below is unreleased.
 
 ## Unreleased
 
+### Changed
+
+- The auto-allow groups and tool classification name only tools agy has actually
+  been observed to emit. `view_code_item`, `codebase_search`, `edit_file`,
+  `propose_code` and `command_status` were upstream vocabulary this fork
+  inherited: absent from agy's self-reported list and never seen in a captured
+  payload, including on prompts written to draw them out. Keeping them was not
+  free. `tool_kind` is not only a display label — `sticky_scope` asks
+  `KEYED_BY_TOOL_KINDS` whether a kind may be remembered by tool name alone, and
+  `"read"`, `"edit"` and `"search"` may — so classifying a tool nobody has seen
+  promised its arguments were constrained by the path checks on no evidence that
+  they were, and one "Always allow" would have covered every later call to it.
+  Unknown tools now fall through to `"other"`, which is keyed by arguments and
+  always prompts. `AGY_ACP_AUTO_ALLOW=reads` covers `view_file` and `list_dir`;
+  `searches` covers `grep_search` and `find_by_name`.
+
+  agy's seven self-reported but unobserved tools — `manage_task`, `send_message`,
+  `schedule`, `invoke_subagent`, `define_subagent`, `manage_subagents`,
+  `generate_image` — still reach `"other"` and still always prompt. The behaviour
+  is unchanged; it is now a recorded decision with a test behind it rather than
+  an omission. `schedule` and `invoke_subagent` are why it was worth deciding:
+  one defers work past the end of the turn, the other spawns an agent.
+
 ### Maintenance
+
+- `permission.rs` was sitting at exactly the 1200-line cap, so the next line
+  added to it -- a doc comment, in this case -- failed the length gate. The
+  cluster that decides how broad a remembered "Always" answer may be
+  (`sticky_scope`, `KEYED_BY_TOOL_KINDS`, `args_fingerprint`, `tool_kind` and
+  the two reach checks) moved to `permission/sticky_rules.rs`, alongside the
+  existing `path_rules.rs`. Behaviour is unchanged; the grouping is the point,
+  since getting the breadth wrong is how one "Always allow" covers a call the
+  user never saw.
 
 - The tree is rustfmt-formatted and CI enforces it with `cargo fmt --check`.
   Formatting drift only ratchets — 9 hunks when CI was set up, 27 after the

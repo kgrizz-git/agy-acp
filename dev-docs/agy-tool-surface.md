@@ -129,8 +129,8 @@ workspace, that has to be said explicitly.
 
 ## Mismatches with this fork's lists
 
-Five names in `src/permission.rs` — `view_code_item`, `codebase_search`,
-`edit_file`, `propose_code`, `command_status` — are absent from the self-reported
+Five names once in `src/permission.rs` — `view_code_item`, `codebase_search`,
+`edit_file`, `propose_code`, `command_status` — were absent from the self-reported
 list *and* never appeared in a captured payload, including on prompts that should
 have drawn them out: a request for semantic search produced `grep_search`, one to
 view a specific code item produced `view_file`, and one to edit produced
@@ -139,13 +139,28 @@ Stated that way deliberately: absence of evidence across two sources is strong,
 but it is not the same as knowing agy cannot emit them under some other
 configuration or version.
 
+**They have been removed**, and that uncertainty is the reason rather than an
+argument against. Being wrong in each direction costs something different. A name
+kept costs nothing *if* agy never sends it — but `tool_kind` is not only a label:
+`sticky_scope` asks `KEYED_BY_TOOL_KINDS` whether a kind may be remembered by
+tool name alone, and `"read"`, `"edit"` and `"search"` may. Pre-classifying a
+tool nobody has seen therefore promises that its arguments are constrained by the
+path checks, on no evidence that they are, and one "Always allow" would then
+cover every later call to it. A name removed costs a prompt: an unknown tool
+falls to `"other"`, is keyed by its arguments, and asks. So the wrong guess is
+the cheap one only in the direction of removal, which is why the removal does not
+wait for proof that agy cannot emit them.
+
 Seven tools in the self-reported list are unclassified here — `manage_task`,
 `send_message`, `schedule`, `invoke_subagent`, `define_subagent`,
 `manage_subagents`, `generate_image`. Only `generate_image` has been observed in
 a payload; the rest are self-reported and unobserved. All seven fall through
 `tool_kind` to `"other"` and belong to no auto-allow group, so they always
-prompt — the right default, but reached by omission, and that is true whether or
-not the self-report is complete.
+prompt. That was already the behaviour; what changed is that it is now a decision
+rather than an omission, recorded in `tool_kind`'s doc comment and pinned by a
+test. `schedule` and `invoke_subagent` are why it was worth deciding: one defers
+work past the end of the turn and the other spawns an agent, so neither should
+ever inherit an answer the user gave about something else.
 
 agy has **no dedicated delete tool**: asked to delete a file it shells out to
 `rm` via `run_command`, so deletion is governed by the command path.

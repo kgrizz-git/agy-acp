@@ -12,17 +12,14 @@ The few things worth picking up next. Each is a pointer; the detail lives below.
 
 - [Verify the port under Paseo](#verify-the-port-under-paseo) — done except the
   reopened-thread path.
-- [Reconcile the tool lists with agy's real toolset](#reconcile-the-tool-lists-with-agys-real-toolset)
-  — five names are for tools agy lacks; seven of its tools are unclassified.
 - [SonarCloud analyses nothing today](#sonarcloud-analyses-nothing-today-and-only-ci-based-analysis-can-change-that)
   — overlaps with the cargo clippy/llvm-cov gates now in CI; running both gives
   two sources of truth for the same findings.
 - [Rename the binary and crate](#rename-the-binary-and-crate) — cheaper now than
   after anyone else installs it.
-- [Configure the protected e2e environment](#configure-the-protected-e2e-environment)
-  — **add `E2E_GEMINI_API_KEY` to a protected `e2e` environment.** Until then the
-  e2e job skips on every PR, and the only e2e evidence is whatever a maintainer
-  runs locally.
+- [Confirm the e2e environment actually runs](#confirm-the-e2e-environment-actually-runs)
+  — the environment, its secret and its approval rule exist now; no run has gone
+  through them yet, so the gate is configured but unproven.
 
 ## Active
 
@@ -69,34 +66,30 @@ field, so a shell request arrives as `detail.command: "Run \`echo hi\`"` and an
 edit as `detail.filePath: "write_to_file /path/to/x"`, rather than the bare
 command or path. Our `rawInput` is passed through untouched.
 
-### Configure the protected e2e environment
+### Confirm the e2e environment actually runs
 
-`e2e.yml` deliberately reads its key only from the approval-gated GitHub
-environment named `e2e`; the environment has not been created yet, so the e2e
-job currently skips after its secret gate. Fork pull requests skip before
-requesting environment approval because they cannot receive Actions secrets.
-This does not weaken the deterministic CI jobs or expose a repository secret to
-pull-request code.
+The `e2e` environment exists, holds `E2E_GEMINI_API_KEY` as an environment
+secret, and requires reviewer approval; the repository-level `GEMINI_API_KEY`
+that no workflow referenced has been removed. What has not happened is a run
+through any of it.
 
-What it costs, concretely: the turn-lifecycle refactor (#13) and the test split
-(#14) both landed with `e2e` reported as *skipping*, and the only e2e evidence
-was a local run. That works because `prepare_auth` accepts an existing
-`~/.gemini/antigravity-cli/settings.json` keyring login, so a developer machine
-with `agy` needs no key at all -- but a GitHub runner has no keyring, which is
-the whole reason CI needs the secret. Anyone reviewing a PR that touches the turn
-loop is currently taking the author's word for the e2e result.
+That matters because the parts are only load-bearing together. `e2e.yml` skips
+fork pull requests before they request the environment, since they cannot receive
+secrets and would otherwise wait for an approval that could never help them; the
+gate job then reads the secret and reports whether it is present; only then does
+the e2e job check out pull-request code. A mistake anywhere in that chain reads
+as *skipping*, which is exactly what a missing secret used to read as. Until a
+run is watched end to end, "configured" and "working" are indistinguishable from
+the outside.
 
-When it becomes useful to run paid e2e on pull requests:
+Note that `deployment_branch_policy` is deliberately unset. `e2e.yml` triggers on
+`pull_request`, so the ref requesting the environment is the PR's head branch,
+which is never protected — a protected-branches-only policy would refuse every
+PR and reproduce the skip it was meant to prevent.
 
-1. Create the `e2e` GitHub environment and require reviewer approval before a
-   job can use it.
-2. Add `E2E_GEMINI_API_KEY` as an environment secret. Do not use a
-   repository-level e2e key; the job checks out pull-request code.
-3. If the existing repository-level `GEMINI_API_KEY` is only for this workflow,
-   remove it after the environment secret works.
-4. Re-run e2e on a same-repository PR or use `workflow_dispatch`, and confirm
-   the gate proceeds, the pinned agy archive verifies, and all four e2e tests
-   run.
+Remaining: re-run e2e on a same-repository PR or via `workflow_dispatch`, approve
+it, and confirm the gate proceeds, the pinned agy archive verifies, and all four
+e2e tests run. It costs a paid API call, so it wants doing once, deliberately.
 
 ### Security and permission boundaries
 
@@ -140,28 +133,6 @@ only, and it would have to fail toward prompting.
 Cheapest and weakest: a denylist over a string the shell will re-interpret is
 evaded by `cat .en"v"` or `cat $HOME/.env`. Worth doing as depth, never as the
 boundary.
-
-#### Reconcile the tool lists with agy's real toolset
-
-Reference: [dev-docs/agy-tool-surface.md](dev-docs/agy-tool-surface.md), which
-records what agy 1.1.22 actually sends and how it was captured.
-
-Capturing it closed the path-field question — `SearchDirectory` was missing and is
-now fixed — but turned up a mismatch in both directions that is still open.
-
-Five names in `permission.rs` match no tool agy was observed to emit and none it
-self-reports: `view_code_item`, `codebase_search`, `edit_file`, `propose_code`,
-`command_status`. They sit in `READ_TOOLS`, `SEARCH_TOOLS` and `tool_kind`, make
-the auto-allow groups look broader than they are, and cost real time — they sent
-one investigation chasing tools that were never produced. Delete them, or comment
-them as deliberate forward-compatibility.
-
-Seven tools in agy's self-reported list are unclassified here: `manage_task`,
-`send_message`, `schedule`, `invoke_subagent`, `define_subagent`,
-`manage_subagents`, `generate_image`. They fall to `"other"` and always prompt,
-which is the right default but is reached by omission rather than decision.
-`schedule` and `invoke_subagent` most deserve a deliberate call, since one defers
-work past the current turn and the other spawns another agent.
 
 #### Generated artifacts land outside the workspace
 

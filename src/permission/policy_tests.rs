@@ -109,7 +109,7 @@ async fn reads_inside_the_workspace_are_allowed_without_asking() {
     std::fs::create_dir_all(&workspace).unwrap();
     let (bridge, mut rx) = test_bridge(
         &workspace.display().to_string(),
-        &["ask_question", "view_file", "view_code_item", "list_dir"],
+        &["ask_question", "view_file", "list_dir"],
     )
     .await;
 
@@ -139,7 +139,7 @@ async fn reads_outside_the_workspace_still_ask() {
     std::fs::create_dir_all(&workspace).unwrap();
     let (bridge, mut rx) = test_bridge(
         &workspace.display().to_string(),
-        &["ask_question", "view_file", "view_code_item", "list_dir"],
+        &["ask_question", "view_file", "list_dir"],
     )
     .await;
 

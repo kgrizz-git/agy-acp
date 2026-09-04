@@ -29,6 +29,58 @@ fn tool_kinds_cover_the_common_agy_tools() {
     assert_eq!(tool_kind("mystery_tool"), "other");
 }
 
+/// The five names this fork inherited from upstream vocabulary and that agy was
+/// never observed to emit. Classifying one as read/edit/search would give it the
+/// weaker tool-level sticky key through `KEYED_BY_TOOL_KINDS`, so if agy ever
+/// does emit them they have to arrive as unknowns and be keyed by arguments.
+#[test]
+fn tools_agy_was_never_seen_to_emit_are_not_pre_classified() {
+    for tool in [
+        "view_code_item",
+        "codebase_search",
+        "edit_file",
+        "propose_code",
+        "command_status",
+    ] {
+        assert_eq!(
+            tool_kind(tool),
+            "other",
+            "{tool} must not be pre-classified"
+        );
+        assert!(
+            !KEYED_BY_TOOL_KINDS.contains(&tool_kind(tool)),
+            "{tool} must be keyed by its arguments, not by its name"
+        );
+        assert!(
+            sticky_scope(tool, &json!({ "AbsolutePath": "/tmp/a" })).is_some(),
+            "{tool} must get the argument-level sticky key"
+        );
+    }
+}
+
+/// agy self-reports these but no payload has carried one. They reach `"other"`
+/// by falling through, which is the safe answer -- `schedule` outlives the turn
+/// and `invoke_subagent` spawns an agent, so neither may inherit an answer
+/// remembered for a different call.
+#[test]
+fn self_reported_but_unobserved_tools_stay_unknown() {
+    for tool in [
+        "manage_task",
+        "send_message",
+        "schedule",
+        "invoke_subagent",
+        "define_subagent",
+        "manage_subagents",
+        "generate_image",
+    ] {
+        assert_eq!(tool_kind(tool), "other", "{tool} should still be unknown");
+        assert!(
+            sticky_scope(tool, &json!({ "Prompt": "go" })).is_some(),
+            "{tool} must be keyed by its arguments"
+        );
+    }
+}
+
 #[tokio::test]
 async fn unknown_conversations_are_denied() {
     let (tx, _rx) = mpsc::unbounded_channel();
