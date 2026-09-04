@@ -293,13 +293,28 @@ invocation and fully contained, never a blanket bypass. Open sub-choice: honour 
 whole list (faithful to what the user clicked) versus only its safe-prefix subset;
 leaning honour-safe-subset given that caveat.
 
-#### Workspace-supplied hooks
+#### Workspace-supplied hooks run outside the bridge
 
-the adapter passes the user workspace as an `--add-dir`, and `agy` discovers
-`.agents/hooks.json` in every workspace root. Determine whether opening an
-untrusted repository can execute its hook commands outside the ACP permission
-bridge. If yes, document the trust boundary and consider an opt-in
-allowlist/isolated hook discovery strategy.
+Plan: plans/workspace-hook-trust-boundary.md
+
+Confirmed on agy 1.1.26 (2026-09-04): opening an untrusted repo executes its own
+`.agents/hooks.json` commands with no prompt and outside the bridge. A
+`PreInvocation` hook ran before the model was even called; a `Stop` hook ran at
+loop end. The repo was not in `trustedWorkspaces` and no flag was set. The bridge
+is a `PreToolUse` hook and cannot see these events; agy runs every hook command
+directly. The adapter is exposed because it sets agy's CWD to the workspace
+(`adapter.rs:955`) and adds it as a root (`:905`), both on agy's `.agents/`
+discovery path.
+
+The bridge's veto is *not* broken: two merged `PreToolUse` hooks (allow + deny)
+were tested in both name orders under `--dangerously-skip-permissions`, and deny
+won every time, so a repo cannot flip a bridge deny to allow. The exposure is
+out-of-band arbitrary execution, not a gate bypass. `trustedWorkspaces` is not a
+lever — discovery ignored it.
+
+Next: fix the README's "bridge is the sole gate" language to exclude hook
+commands (ship now), then add opt-in detect-and-surface of a workspace hook dir
+before the first turn. Isolated hook discovery needs an upstream agy flag.
 
 #### Permission socket hardening
 
