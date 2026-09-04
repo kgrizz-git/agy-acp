@@ -154,6 +154,8 @@ pub(super) const PATH_FIELDS: &[&str] = &[
     "SearchDirectory",
     "Cwd",
     "Paths",
+    "ImagePaths",
+    "Workspace",
 ];
 
 /// Collects every string sitting under a `PATH_FIELDS` key, at any depth.
@@ -231,6 +233,23 @@ mod tests {
             outside(json!({ "Query": "foo..bar" })),
             None,
             "a query is not a path, with or without a root"
+        );
+    }
+
+    /// The two path fields added on evidence (agy 1.1.26): `ImagePaths` holds an
+    /// array of paths, and `Workspace` sits nested inside `invoke_subagent`'s
+    /// `Subagents[]`. Both must be collected so containment sees them.
+    #[test]
+    fn image_paths_and_nested_subagent_workspace_are_path_fields() {
+        let found = path_field_args(&json!({
+            "ImagePaths": ["/tmp/a.png", "/tmp/b.png"],
+            "Subagents": [{ "TypeName": "general", "Workspace": "/tmp/outside" }],
+        }));
+        assert!(found.contains(&"/tmp/a.png".to_string()));
+        assert!(found.contains(&"/tmp/b.png".to_string()));
+        assert!(
+            found.contains(&"/tmp/outside".to_string()),
+            "a subagent Workspace nested in Subagents[] must be seen as a path"
         );
     }
 

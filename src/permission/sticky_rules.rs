@@ -139,11 +139,16 @@ pub(super) fn has_unconstrained_reach(args: &Value) -> bool {
 /// [`KEYED_BY_TOOL_KINDS`], so naming a tool nobody has seen would hand that key
 /// to something whose arguments were never checked against the path rules.
 ///
-/// The fallthrough is therefore the safe answer, and agy's self-reported but
-/// unobserved tools are left to reach it. `schedule` and `invoke_subagent` are
-/// why that is worth stating rather than leaving to omission: one defers work
-/// past the end of the turn and the other spawns an agent, so neither should
-/// ever be covered by an answer the user gave about something else.
+/// The fallthrough is therefore the safe answer, and agy's self-reported tools
+/// are left to reach it. `schedule` and `invoke_subagent` are why that is worth
+/// stating rather than leaving to omission, and both were checked by capture
+/// (agy 1.1.25/1.1.26; see dev-docs/agy-tool-surface.md) rather than assumed.
+/// `invoke_subagent` spawns an agent whose own tool calls do reach this same
+/// hook under their own conversationId, so keying it by name would let one
+/// "Always allow" cover a later call that grants different capabilities.
+/// `schedule` runs its work in-turn under headless `agy -p`, but a remembered
+/// answer keyed only by name would still cover a later schedule of a different
+/// duration or command, which is not what the user approved. Both stay "other".
 pub(super) fn tool_kind(tool_name: &str) -> &'static str {
     match tool_name {
         "view_file" | "list_dir" | "read_url_content" => "read",

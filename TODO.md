@@ -12,10 +12,9 @@ The few things worth picking up next. Each is a pointer; the detail lives below.
 
 - [Verify the port under Paseo](#verify-the-port-under-paseo) — done except the
   reopened-thread path.
-- [Decide what `schedule` and `invoke_subagent` get](#decide-what-schedule-and-invoke_subagent-get)
-  — Plan: plans/unclassified-tool-decision.md. Unblocked: the subagent capture is
-  done and answered it, so what is left is two path fields, a doc comment, a
-  test and a wording fix.
+- [Label subagent-origin in the permission prompt](#label-subagent-origin-in-the-permission-prompt)
+  — spun out of the now-landed schedule/invoke_subagent decision; low priority,
+  a clarity improvement rather than a containment gap.
 - [SonarCloud analyses nothing today](#sonarcloud-analyses-nothing-today-and-only-ci-based-analysis-can-change-that)
   — overlaps with the cargo clippy/llvm-cov gates now in CI; running both gives
   two sources of truth for the same findings.
@@ -179,25 +178,20 @@ is trivial to read. Whether to *seed* the classifier from it, or to honour it
 directly, is the open design question — see "Does agy-acp use agy's own
 permission grants?" below for why reading it is not automatically safe.
 
-#### Decide what `schedule` and `invoke_subagent` get
+#### Label subagent-origin in the permission prompt
 
-Plan: plans/unclassified-tool-decision.md
-
-Reference: [dev-docs/agy-tool-surface.md](dev-docs/agy-tool-surface.md).
-
-The capture that blocked this is done, on agy 1.1.25. A subagent's tool calls do
-reach the same hook, under their own `conversationId`, so the bridge is still one
-chokepoint. Every `schedule` call observed parked the turn and ran the work as
-later steps of the same conversation rather than deferring past it (not proven for
-every interval, but that is the pattern) — so the scoping worry behind this entry
-was misplaced, and the real cost is a turn held open for up to the 60 minute print
-timeout.
-
-Both tools therefore keep `"other"`. What is left is small and listed in the
-plan: add the two newly observed path fields (`ImagePaths`,
-`Subagents[].Workspace`), record the verdict in `tool_kind`'s doc comment, pin
-the unknown-`conversationId` path with a test, and say in the prompt text both
-that a `schedule` call holds the turn open and that a call came from a subagent.
+Spun out of the `schedule`/`invoke_subagent` decision (now landed; see
+plans/completed/unclassified-tool-decision.md). That work added a `schedule`
+note to the prompt title ("runs in this turn; may hold it open"), but the other
+half — telling the user a call came from a spawned subagent rather than the agent
+they are talking to — turned out to be more than wording. An unregistered
+`conversationId` is *not* a reliable subagent signal: the parent's own first call
+is also unregistered until `register_conversation` runs, so naive labelling would
+mislabel the common case. Doing it right needs the bridge to track which
+conversationIds belong to subagents (observed via `invoke_subagent`), which is
+state, not a string. Low priority: it is an honesty/clarity improvement, not a
+containment gap — a subagent's calls are still gated by the same hook and the
+same path checks.
 
 #### Characterize agy's full tool surface
 

@@ -988,6 +988,11 @@ fn tool_title(tool_name: &str, args: &Value) -> String {
     if let Some(query) = field("Query").or_else(|| field("SearchTerm")) {
         return format!("{tool_name} {query}");
     }
+    // `schedule` runs its work as later steps of this same turn under headless
+    // agy, so approving it approves holding the turn open, not just one call.
+    if tool_name == "schedule" {
+        return "schedule (runs in this turn; may hold it open until the timer or iterations finish)".to_string();
+    }
     tool_name.to_string()
 }
 

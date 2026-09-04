@@ -59,9 +59,10 @@ fn tools_agy_was_never_seen_to_emit_are_not_pre_classified() {
 }
 
 /// agy self-reports these but no payload has carried one. They reach `"other"`
-/// by falling through, which is the safe answer -- `schedule` outlives the turn
-/// and `invoke_subagent` spawns an agent, so neither may inherit an answer
-/// remembered for a different call.
+/// by falling through, which is the safe answer -- `schedule` runs its work
+/// in-turn but a name-only key would still cover a schedule of a different
+/// duration, and `invoke_subagent` spawns an agent whose calls reach this same
+/// hook, so neither may inherit an answer remembered for a different call.
 #[test]
 fn self_reported_but_unobserved_tools_stay_unknown() {
     for tool in [
@@ -302,4 +303,39 @@ async fn responses_for_other_ids_are_left_alone() {
     };
     assert!(!bridge.resolve_response(&json!(17), None).await);
     assert!(!bridge.resolve_response(&json!("some-other-id"), None).await);
+}
+
+/// A subagent runs under its own `conversationId`, which the bridge has never
+/// registered. It must fall back to the active session and be gated there --
+/// not rejected as "no session", which would break every subagent tool call.
+/// The no-active-session case is covered by `unknown_conversations_are_denied`;
+/// this pins the fallback arm the plan flagged as untested.
+#[tokio::test]
+async fn an_unknown_conversation_falls_back_to_the_active_session() {
+    let workspace = std::env::temp_dir().join(format!("agy-acp-fallback-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&workspace);
+    let file = workspace.join("f.txt");
+    let _ = std::fs::write(&file, "f");
+
+    let (bridge, _rx) = test_bridge(&workspace.display().to_string(), &["view_file"]).await;
+
+    // A conversationId the bridge never registered (test_bridge registers only
+    // "conv-1"), arriving while "session-1" is the active turn.
+    let (decision, reason) = expect_auto_decision(
+        &bridge,
+        json!({
+            "conversationId": "subagent-unregistered-999",
+            "toolCall": {
+                "name": "view_file",
+                "args": { "AbsolutePath": file.display().to_string() },
+            },
+        }),
+    )
+    .await;
+
+    assert_eq!(
+        decision,
+        Decision::Allow,
+        "an unknown conversationId must resolve to the active session, not be denied: {reason}"
+    );
 }

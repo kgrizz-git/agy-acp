@@ -12,6 +12,17 @@ of its own yet, so everything below is unreleased.
 
 ### Changed
 
+- `schedule` and `invoke_subagent` are now a decided classification rather than a
+  deferred one, settled by capturing agy 1.1.25/1.1.26. Both stay `"other"`
+  (argument-keyed, always prompt): a subagent's tool calls reach the same
+  `PreToolUse` hook under their own conversationId, and `schedule` runs its work
+  in-turn, so neither may inherit an answer keyed by tool name alone. Two newly
+  observed path fields, `ImagePaths` (`generate_image`) and `Subagents[].Workspace`
+  (`invoke_subagent`), are added to `PATH_FIELDS` so containment checks them; a
+  missed path field fails silently, so this closes real coverage. The permission
+  prompt for a `schedule` call now says it may hold the turn open. See
+  plans/completed/unclassified-tool-decision.md and dev-docs/agy-tool-surface.md.
+
 - The auto-allow groups and tool classification name only tools agy has actually
   been observed to emit. `view_code_item`, `codebase_search`, `edit_file`,
   `propose_code` and `command_status` were upstream vocabulary this fork
