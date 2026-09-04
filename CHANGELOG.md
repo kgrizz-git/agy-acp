@@ -29,9 +29,11 @@ of its own yet, so everything below is unreleased.
   agy's seven self-reported but unobserved tools — `manage_task`, `send_message`,
   `schedule`, `invoke_subagent`, `define_subagent`, `manage_subagents`,
   `generate_image` — still reach `"other"` and still always prompt. The behaviour
-  is unchanged; it is now a recorded decision with a test behind it rather than
-  an omission. `schedule` and `invoke_subagent` are why it was worth deciding:
-  one defers work past the end of the turn, the other spawns an agent.
+  is unchanged, and the classification is now recorded and tested rather than
+  reached by omission. Whether `"other"` is the *right* answer for `schedule`,
+  which defers work past the turn its permission was scoped to, and for
+  `invoke_subagent`, whose spawned agent may never route its tool calls back
+  through this bridge, is deliberately still open.
 
 ### Maintenance
 

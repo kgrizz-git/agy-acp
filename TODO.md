@@ -12,6 +12,9 @@ The few things worth picking up next. Each is a pointer; the detail lives below.
 
 - [Verify the port under Paseo](#verify-the-port-under-paseo) — done except the
   reopened-thread path.
+- [Decide what `schedule` and `invoke_subagent` get](#decide-what-schedule-and-invoke_subagent-get)
+  — Plan: plans/unclassified-tool-decision.md. Blocked on capturing a subagent
+  run; the five phantom tool names are already gone.
 - [SonarCloud analyses nothing today](#sonarcloud-analyses-nothing-today-and-only-ci-based-analysis-can-change-that)
   — overlaps with the cargo clippy/llvm-cov gates now in CI; running both gives
   two sources of truth for the same findings.
@@ -133,6 +136,39 @@ only, and it would have to fail toward prompting.
 Cheapest and weakest: a denylist over a string the shell will re-interpret is
 evaded by `cat .en"v"` or `cat $HOME/.env`. Worth doing as depth, never as the
 boundary.
+
+#### Decide what `schedule` and `invoke_subagent` get
+
+Plan: plans/unclassified-tool-decision.md
+
+Reference: [dev-docs/agy-tool-surface.md](dev-docs/agy-tool-surface.md).
+
+The five names agy never emits — `view_code_item`, `codebase_search`,
+`edit_file`, `propose_code`, `command_status` — are gone. What is left is the
+half that needs a decision rather than an edit.
+
+Seven self-reported tools fall through to `"other"` and always prompt. That is
+recorded and tested now, but recorded is not decided. Two of them break a bridge
+assumption apiece. `schedule` defers work past the turn the permission was scoped
+to. `invoke_subagent` spawns an agent whose own tool calls may never reach this
+adapter's hook, and if they do not, no classification of `invoke_subagent` fixes
+it. Neither has appeared in a captured payload, so the plan settles the subagent
+question by capture before deciding anything.
+
+#### Characterize agy's full tool surface
+
+The seventeen names in `dev-docs/agy-tool-surface.md` are what agy *self-reports*,
+and ten of those have been observed. Self-reporting has already been wrong once:
+it listed `find_by_name.FullPath` among parameter names and observation showed a
+boolean. So the list is a lower bound, not an inventory — a tool agy never
+mentions and this fork never sees still reaches the bridge as an unknown, and
+unknowns are handled safely but blindly.
+
+Worth doing: drive agy across a wider spread of prompts under the dumping
+`PreToolUse` hook and diff the observed names against the seventeen. Anything new
+needs its path fields identified for `PATH_FIELDS`, which is the part that fails
+silently — a missed path field means a value judged only by shape, so a relative
+path escaping through a symlink is never checked.
 
 #### Generated artifacts land outside the workspace
 
