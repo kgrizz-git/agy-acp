@@ -13,8 +13,9 @@ The few things worth picking up next. Each is a pointer; the detail lives below.
 - [Verify the port under Paseo](#verify-the-port-under-paseo) — done except the
   reopened-thread path.
 - [Decide what `schedule` and `invoke_subagent` get](#decide-what-schedule-and-invoke_subagent-get)
-  — Plan: plans/unclassified-tool-decision.md. Blocked on capturing a subagent
-  run; the five phantom tool names are already gone.
+  — Plan: plans/unclassified-tool-decision.md. Unblocked: the subagent capture is
+  done and answered it, so what is left is two path fields, a doc comment, a
+  test and a wording fix.
 - [SonarCloud analyses nothing today](#sonarcloud-analyses-nothing-today-and-only-ci-based-analysis-can-change-that)
   — overlaps with the cargo clippy/llvm-cov gates now in CI; running both gives
   two sources of truth for the same findings.
@@ -137,38 +138,82 @@ Cheapest and weakest: a denylist over a string the shell will re-interpret is
 evaded by `cat .en"v"` or `cat $HOME/.env`. Worth doing as depth, never as the
 boundary.
 
+#### One-and-done approval for safe commands (backlog goal)
+
+The ergonomic target the argument-keying deliberately does not reach: let a user
+approve `ls` or `cat` *once* and not be prompted for every later variant. Reads
+already have this — `view_file`, `list_dir`, `grep_search` are in
+`KEYED_BY_TOOL_KINDS`, so one "Always allow" ends the prompting. `run_command`
+does not, and cannot get it by the same route, because its reach is one opaque
+`CommandLine` the shell re-interprets. A directory listing the model runs as the
+`list_dir` tool is already one-and-done; the same listing run as
+`run_command "ls"` is keyed by the exact string and reprompts on the next path.
+
+Closing that means a **safe-command classifier**, not a wider sticky key: parse
+the command line, prove it is a single invocation of an allowlisted read-only
+program with no shell metacharacters, no chaining, no `$()`/backticks and no
+redirection, extract its path arguments, and run *those* through the existing
+containment and sensitive-path checks. Only then may the answer be remembered by
+program prefix rather than by exact string. That last step is itself a new sticky
+behaviour, not just a new decision: `run_command` is keyed today by the full
+argument fingerprint (`args_fingerprint`), so the classifier would have to emit a
+*normalised key* — e.g. `(session, "run_command", Some("ls"))` — or the sticky
+logic learn to recognise its output, or "always allow ls" is not sticky at all and
+reprompts on every new argument. Naming that scope change is part of the work, not
+a footnote. Every parse error is a hole — a
+missed `;` turns "always allow ls" into "always allow `ls; rm -rf`" — so it fails
+toward prompting, and it must not trust the model's self-reported command. The
+shell was observed to be `zsh`, so `sh` parsing cannot be assumed. This shares
+the hazard recorded under "Deliberately not taken: parsing what a command does";
+the difference is intent — that entry is about *containment depth*, this is about
+*approval ergonomics* — but the parser is the same dangerous object and should be
+built once if built at all.
+
+Achievable, and there is a working reference for the allowlist half: agy already
+maintains exactly this. In normal CLI use, "Always allow" writes a
+`command(<glob>)` rule into `~/.gemini/antigravity-cli/settings.json` under
+`permissions.allow` — 223 entries here, e.g. `command(ls)`, `command(ls .*)`,
+`command(grep .*)`, alongside very specific one-off strings the user approved
+once. So a user-curated safe-prefix list already exists on disk in plaintext and
+is trivial to read. Whether to *seed* the classifier from it, or to honour it
+directly, is the open design question — see "Does agy-acp use agy's own
+permission grants?" below for why reading it is not automatically safe.
+
 #### Decide what `schedule` and `invoke_subagent` get
 
 Plan: plans/unclassified-tool-decision.md
 
 Reference: [dev-docs/agy-tool-surface.md](dev-docs/agy-tool-surface.md).
 
-The five names agy never emits — `view_code_item`, `codebase_search`,
-`edit_file`, `propose_code`, `command_status` — are gone. What is left is the
-half that needs a decision rather than an edit.
+The capture that blocked this is done, on agy 1.1.25. A subagent's tool calls do
+reach the same hook, under their own `conversationId`, so the bridge is still one
+chokepoint. Every `schedule` call observed parked the turn and ran the work as
+later steps of the same conversation rather than deferring past it (not proven for
+every interval, but that is the pattern) — so the scoping worry behind this entry
+was misplaced, and the real cost is a turn held open for up to the 60 minute print
+timeout.
 
-Seven self-reported tools fall through to `"other"` and always prompt. That is
-recorded and tested now, but recorded is not decided. Two of them break a bridge
-assumption apiece. `schedule` defers work past the turn the permission was scoped
-to. `invoke_subagent` spawns an agent whose own tool calls may never reach this
-adapter's hook, and if they do not, no classification of `invoke_subagent` fixes
-it. Neither has appeared in a captured payload, so the plan settles the subagent
-question by capture before deciding anything.
+Both tools therefore keep `"other"`. What is left is small and listed in the
+plan: add the two newly observed path fields (`ImagePaths`,
+`Subagents[].Workspace`), record the verdict in `tool_kind`'s doc comment, pin
+the unknown-`conversationId` path with a test, and say in the prompt text both
+that a `schedule` call holds the turn open and that a call came from a subagent.
 
 #### Characterize agy's full tool surface
 
-The seventeen names in `dev-docs/agy-tool-surface.md` are what agy *self-reports*,
-and ten of those have been observed. Self-reporting has already been wrong once:
-it listed `find_by_name.FullPath` among parameter names and observation showed a
-boolean. So the list is a lower bound, not an inventory — a tool agy never
-mentions and this fork never sees still reaches the bridge as an unknown, and
-unknowns are handled safely but blindly.
+Largely answered by the same capture, and the answer is that it cannot be
+finished. Every tool in the seventeen-name list has now been observed except
+`manage_task` — and the binary's
+`exa.cortex_pb.CascadeToolConfig` enable map names about thirty-five tools
+against the seventeen exposed here, two of them names this fork removed
+(`view_code_item`, `command_status`) — config-gated rather than absent. `agy mcp add` then puts tool and argument names in third-party hands
+entirely.
 
-Worth doing: drive agy across a wider spread of prompts under the dumping
-`PreToolUse` hook and diff the observed names against the seventeen. Anything new
-needs its path fields identified for `PATH_FIELDS`, which is the part that fails
-silently — a missed path field means a value judged only by shape, so a relative
-path escaping through a symlink is never checked.
+So the remaining work is not enumeration. It is to make the `"other"`
+fallthrough — unknown tool, argument-keyed sticky, always prompt — read as the
+contract it is, in `tool_kind` and in the README's account of what the bridge
+guarantees. Anything newly observed still needs its path fields identified for
+`PATH_FIELDS`, which is the part that fails silently.
 
 #### Generated artifacts land outside the workspace
 
@@ -187,6 +232,66 @@ reads.
 
 Worth checking which other tools share the behaviour before deciding — anything
 that produces a file without taking a path is in the same position.
+
+#### Does agy-acp use agy's own permission grants? (no, by design — but worth deciding)
+
+Recorded because it will be asked, and because the answer bears on the
+safe-command goal above.
+
+**Today the adapter reads none of agy's permission config.** It touches exactly
+one thing agy owns: the conversation SQLite DBs under
+`~/.gemini/antigravity-cli/conversations/<id>.db`, read-only, for replay
+(`db.rs`, `adapter.rs`). It never reads `settings.json`. And it runs agy with
+`--dangerously-skip-permissions`, so agy's own permission engine is bypassed
+wholesale — the bridge is the only gate, on purpose. That means a grant the user
+made in the normal agy CLI (`permissions.allow`, the file/URL/command rules, the
+execution policy, the command allowlist/denylist) has **no effect** under the
+adapter. The two permission systems are entirely separate.
+
+**Could we read it? Trivially — it is plaintext JSON.** `permissions.allow` is a
+flat list of `command(<glob>)` rules, and it is **global, not per-repo** — checked
+by looking inside repos (`.agents/` there holds skills and hooks only), for any
+project-keyed store under `~/.gemini/antigravity-cli`, and for any other json
+carrying a `permissions` key. Only the one global file has them. The strongest
+sign it is global by design: repo-specific one-offs the user approved while in a
+particular repo (a `grep` on `coverage.xml`, `sed -n` on `mypyskindose/...`) all
+landed in that one global list. agy's own settings docs agree — project-level
+overrides exist for file/internet/sandbox/execution policy, but the command
+allowlist is not among them. `trustedWorkspaces` is a plain list of trusted
+roots. Nothing is encrypted. (CLI storage, this version; the desktop app may
+differ, and absence is not proof.)
+
+**Should we? Not without a decision, and not naively.** Three reasons honouring
+it directly is not free. It is *global* — a user who once allowed `command(rm
+.*)` anywhere would have it apply everywhere, and the bridge's whole point is that
+the host, not a file agy writes, decides. It *mixes* durable safe prefixes with
+one-off exact strings the user clicked through once, so the list is not uniformly
+"safe". And it moves the trust boundary onto a file outside the ACP client's
+view, which no ACP host has agreed to. The defensible use is narrow: read
+`permissions.allow` as a *source of candidate safe prefixes* to seed the
+classifier in the goal above, still subject to every containment check, never as
+a grant that bypasses a prompt on its own.
+
+**Resolution direction: an opt-in, default-off flag.** The counter-argument is
+sound — a user who granted these in native agy has already consented, and
+re-asking is friction they cleared. So the answer is a per-host flag (off by
+default) that honours `permissions.allow`, not a refusal to read it. Two things
+keep it honest and are why it stays opt-in. The grantor and the gate differ under
+ACP: the human who approved `command(rm .*)` in their local agy did not thereby
+agree to let a *remote* ACP host — a cloud agent, a teammate's session — invoke
+it unprompted, so trusting the list is a decision per host, not a default.
+And honouring the allowlist is not a faithful replay of native agy: there the
+command allowlist sat *alongside* file-access, sandbox and internet policies that
+`--dangerously-skip-permissions` removes, so a matched command must still pass the
+bridge's containment and sensitive-path checks — command-consent from agy,
+path-containment from the bridge. One caveat sharpens the sub-choice: `run_command`
+is keyed today by the *full command string*, so honouring a broad glob like
+`command(rm .*)` and leaning on containment to clean up is strictly weaker than the
+bridge is now — it would let `rm <anything-in-workspace>` through on one grant where
+today each distinct command reprompts. So even honour-all must stay keyed per
+invocation and fully contained, never a blanket bypass. Open sub-choice: honour the
+whole list (faithful to what the user clicked) versus only its safe-prefix subset;
+leaning honour-safe-subset given that caveat.
 
 #### Workspace-supplied hooks
 
