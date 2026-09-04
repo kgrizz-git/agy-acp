@@ -201,19 +201,27 @@ that a `schedule` call holds the turn open and that a call came from a subagent.
 
 #### Characterize agy's full tool surface
 
-Largely answered by the same capture, and the answer is that it cannot be
-finished. Every tool in the seventeen-name list has now been observed except
-`manage_task` — and the binary's
-`exa.cortex_pb.CascadeToolConfig` enable map names about thirty-five tools
-against the seventeen exposed here, two of them names this fork removed
-(`view_code_item`, `command_status`) — config-gated rather than absent. `agy mcp add` then puts tool and argument names in third-party hands
-entirely.
+Answered on 1.1.26, and the answer is that the *native* headless surface is
+closed. Asked to enumerate its session tools, agy returned exactly the seventeen
+and explicitly denied having `notebook_edit`; every one except `manage_task` has
+also been observed in a payload. So the seventeen is the ceiling for a headless
+`agy -p` client, not a lower bound.
 
-So the remaining work is not enumeration. It is to make the `"other"`
-fallthrough — unknown tool, argument-keyed sticky, always prompt — read as the
-contract it is, in `tool_kind` and in the README's account of what the bridge
-guarantees. Anything newly observed still needs its path fields identified for
-`PATH_FIELDS`, which is the part that fails silently.
+Two channels add tools beyond the seventeen, both captured and both documented in
+`dev-docs/agy-tool-surface.md` ("Extension channels"): MCP servers, whose tools
+appear as `mcp_<server>_<tool>` with third-party argument names (captured
+`mcp_chrome_devtools_new_page {url}`), and the `/browser` subagent, which is just
+`invoke_subagent TypeName:"browser"` driving those MCP tools. The `CascadeToolConfig`
+names, few-shot exemplars, and IDE-only tools (`read_terminal`, `workspace_api`,
+`view_code_item`, `code_search`) are negotiated off for the headless client and
+never appear — confirmed by agy failing to offer `notebook_edit` and falling back
+to `run_command`.
+
+So enumeration is done as far as it can be. The remaining work is what it always
+was: keep the `"other"` fallthrough as the contract for MCP/unknown tools in
+`tool_kind` and the README, and identify path fields for anything newly observed
+(the part that fails silently). This entry can be closed once that README wording
+lands.
 
 #### Generated artifacts land outside the workspace
 

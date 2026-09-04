@@ -35,8 +35,11 @@ Anything below marked self-reported has not been seen in a payload.
 
 ## Tools
 
-Seventeen in this configuration, self-reported and unchanged between 1.1.22 and
-1.1.25:
+Seventeen, and this is the **complete** headless `agy -p` toolset, not a lower
+bound. Unchanged 1.1.22 → 1.1.26. Asked twice on 1.1.26 to enumerate exactly the
+tools available in its session, agy returned precisely this set and, told to use
+`notebook_edit`, replied that it is "unavailable to me" and listed these same
+seventeen:
 
 ```
 view_file    run_command           manage_task      send_message      schedule
@@ -44,6 +47,11 @@ list_dir     write_to_file         invoke_subagent  define_subagent   manage_sub
 grep_search  replace_file_content  generate_image   read_url_content  search_web
 find_by_name ask_question
 ```
+
+Two channels can add tools *beyond* these seventeen in a headless session; see
+"Extension channels" below. Everything else the binary knows (the
+`CascadeToolConfig` names, the few-shot exemplars) is negotiated off for the
+headless client and does not appear.
 
 ## Observed arguments
 
@@ -232,30 +240,50 @@ above. So `schedule` *can* defer past a turn in daemon mode; under the adapter i
 does not, which is why the hedge above ("not observed to defer") is the right
 framing rather than a flat "cannot".
 
-## Why the list cannot be closed
+## Extension channels: how a headless session gets more than seventeen
 
-The binary carries an `exa.cortex_pb.CascadeToolConfig` — a per-tool enable map
-whose fields name about thirty-five tools, against the seventeen this
-configuration exposes. Among them: `view_code_item`, `command_status`,
-`code_search`, `internal_search`, `knowledge_base_search`, `notebook_edit`,
-`browser_subagent`, `antigravity_browser`, `memory`, `skill_search`, `mquery`,
-`workspace_api`, `ask_permission`. Those are tools this binary can be configured
-to turn on, so "never observed" means "not enabled here", not "cannot be
-emitted".
+The native set is closed at seventeen, but two channels inject additional tools
+into a headless session. Both were captured on 1.1.26.
 
-Beyond that map the binary also carries baked-in few-shot prompt examples that
-*show the model* tool calls by name — `codebase_search` with `Query` and
-`TargetDirectories`, `edit_file` with `TargetFile`, `CodeEdit`,
-`CodeMarkdownLanguage` and `Blocking` — and Cortex step types such as
-`CortexStepProposeCode`. A name in the exemplars is a name the model has been
-taught to write, which is a second route by which something outside the
-seventeen could arrive at the bridge.
+**MCP servers.** A server registered with `agy mcp add` (or an `mcpServers` block
+in `settings.json`) contributes tools that appear as first-class calls named
+`mcp_<server>_<tool>`, with argument names the server chose. Captured, via the
+user's pre-existing chrome-devtools plugin:
 
-`agy mcp add` puts the other end of it beyond enumeration entirely: under an MCP
-server both the tool name and its argument names are whatever a third party
-chose. `PATH_FIELDS` therefore cannot be completed by listing, and the `"other"`
+```
+mcp_chrome_devtools_new_page   {"url": "https://example.com"}
+```
+
+Here `url` is not a path and not a `PATH_FIELDS` concern, but that is luck: an MCP
+tool's arguments are whatever a third party defined, so this is the part of the
+surface that genuinely cannot be enumerated. It is exactly why the `"other"`
 fallthrough in `tool_kind` — unknown tool, argument-keyed sticky, always prompt —
-is the contract rather than a gap waiting to be filled.
+is the contract, not a gap to be filled by listing.
+
+**The browser subagent.** The `/browser` slash command does not add browser tools
+to the parent. It makes the model call `invoke_subagent` with `TypeName:
+"browser"`, `Role: "Browser Agent"`, and that subagent drives the browser through
+MCP tools (the `mcp_chrome_devtools_*` above), so browser control reduces to the
+two channels already covered — a subagent (same hook) using MCP tools.
+
+## What the binary knows but headless never exposes
+
+The binary carries an `exa.cortex_pb.CascadeToolConfig` enable map naming ~35
+tools, plus few-shot exemplars and Cortex step types, for names outside the
+seventeen: `notebook_edit`, `read_terminal`, `workspace_api`, `view_code_item`,
+`code_search`, `command_status`, `memory`, `browser_subagent`, `codebase_search`
+(exemplar), `edit_file` (exemplar), `CortexStepProposeCode` (step type), and
+more. None of these appears in a headless session, and the reason is client
+negotiation, not chance: agy's account (self-reported, consistent with the
+capture) is that the toolset is filtered by client type, so an `ide-desktop`
+client gets IDE-coupled tools — `read_terminal` (reads a GUI terminal's
+scrollback), `workspace_api` (open editor tabs / cursor), `view_code_item` and
+`code_search` (LSP / semantic index) — that a `headless-cli` client is masked out
+of. `notebook_edit` is workspace-context-gated on detecting a Jupyter workspace;
+in headless it was not offered and the model fell back to editing the `.ipynb`
+with `run_command` python. Treat these as present in the binary, absent from this
+runtime, and do **not** pre-classify them in `tool_kind` — an unobserved tool
+must keep the `"other"` fallthrough and its argument-keyed sticky.
 
 ## Mismatches with this fork's lists
 
