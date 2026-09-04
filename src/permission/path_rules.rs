@@ -236,6 +236,37 @@ mod tests {
         );
     }
 
+    /// The new path fields must be judged by `outside_workspace`, not just
+    /// collected. This pins the case only the path-field branch catches: a plain
+    /// relative value under `ImagePaths` — no leading `/`, no `~`, no `..`, so
+    /// `absolute_paths` and the `..` check both miss it — that leaves the
+    /// workspace through a symlink. If `ImagePaths` were dropped from
+    /// `PATH_FIELDS`, this would wrongly read as contained.
+    #[test]
+    fn a_new_path_field_catches_a_relative_symlink_escape() {
+        let base = std::env::temp_dir().join(format!("agy-acp-imgpath-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let workspace = base.join("work");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.png"), "s").unwrap();
+        std::os::unix::fs::symlink(&outside, workspace.join("link")).unwrap();
+        let roots = vec![workspace.clone()];
+
+        assert!(
+            outside_workspace(&json!({ "ImagePaths": ["link/secret.png"] }), &roots).is_some(),
+            "a relative ImagePaths entry escaping through a symlink must be caught"
+        );
+        // Control: the same value under a non-path key is invisible to the shape
+        // checks, which is exactly why the field has to be in PATH_FIELDS.
+        assert_eq!(
+            outside_workspace(&json!({ "NotAPath": "link/secret.png" }), &roots),
+            None,
+            "the same string under a non-path key is not judged"
+        );
+    }
+
     /// The two path fields added on evidence (agy 1.1.26): `ImagePaths` holds an
     /// array of paths, and `Workspace` sits nested inside `invoke_subagent`'s
     /// `Subagents[]`. Both must be collected so containment sees them.

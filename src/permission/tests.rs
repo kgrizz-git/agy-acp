@@ -317,10 +317,16 @@ async fn an_unknown_conversation_falls_back_to_the_active_session() {
     let file = workspace.join("f.txt");
     let _ = std::fs::write(&file, "f");
 
+    // Two registered sessions, and "session-2" is the one whose turn is running.
+    // This is what makes the assertion mean "the *active* session", not merely
+    // "some registered session": a fallback that picked any registered session
+    // could pick "session-1", and then the turn-generation check
+    // (`active_session != session_id`) would deny instead of allow. Only a
+    // fallback to the active session passes.
     let (bridge, _rx) = test_bridge(&workspace.display().to_string(), &["view_file"]).await;
+    bridge.register_conversation("conv-2", "session-2").await;
+    bridge.set_active_session(Some("session-2")).await;
 
-    // A conversationId the bridge never registered (test_bridge registers only
-    // "conv-1"), arriving while "session-1" is the active turn.
     let (decision, reason) = expect_auto_decision(
         &bridge,
         json!({
@@ -336,6 +342,7 @@ async fn an_unknown_conversation_falls_back_to_the_active_session() {
     assert_eq!(
         decision,
         Decision::Allow,
-        "an unknown conversationId must resolve to the active session, not be denied: {reason}"
+        "an unknown conversationId must resolve to the *active* session (session-2), \
+         not another registered one and not a deny: {reason}"
     );
 }
