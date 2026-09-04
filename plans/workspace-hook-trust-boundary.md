@@ -63,9 +63,11 @@ problem.
 
 `trustedWorkspaces` cannot be leaned on as the gate, though state this precisely:
 the test repo was **absent** from that list and its hooks ran anyway, so
-membership is not required for hook execution. Whether agy consults the trust
-list for hooks at all was not established — only that being outside it does not
-stop them. Either way there is no lever here for the adapter.
+membership is not required for hook execution. Asked to review this, agy's own
+account (self-reported, so corroboration not proof) is that `trustedWorkspaces`
+is an IDE/UI trust setting and the headless CLI runtime does not gate hook loading
+or execution on it at all — consistent with the observation. Either way there is
+no lever here for the adapter.
 
 ## Scope of the risk
 
@@ -99,8 +101,9 @@ adapter to contain an untrusted repo does not get that for hook commands.
    `.agents/` while still installing the bridge. No clean lever exists today:
    discovery is driven by CWD and `--add-dir`, both of which the adapter needs.
    Would require an agy feature (a flag to disable workspace hook discovery, or
-   to name an explicit hook root and ignore others). File upstream; do not block
-   on it.
+   to name an explicit hook root and ignore others — agy's own review suggested
+   shapes like `--disable-workspace-hooks`, `--no-workspace-customizations`, or an
+   explicit `--hooks-dir`). File upstream; do not block on it.
 
 ## Recommendation
 
