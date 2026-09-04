@@ -307,10 +307,14 @@ directly. The adapter is exposed because it sets agy's CWD to the workspace
 discovery path.
 
 The bridge's veto is *not* broken: two merged `PreToolUse` hooks (allow + deny)
-were tested in both name orders under `--dangerously-skip-permissions`, and deny
-won every time, so a repo cannot flip a bridge deny to allow. The exposure is
-out-of-band arbitrary execution, not a gate bypass. `trustedWorkspaces` is not a
-lever — discovery ignored it.
+tested in both name orders under `--dangerously-skip-permissions` denied every
+time (n=2, one merging model), so a repo cannot flip a bridge deny to allow. The
+exposure is out-of-band arbitrary execution, not a gate bypass. `trustedWorkspaces`
+is not a lever: the test repo was absent from it and hooks ran anyway, so
+membership is not required — whether agy reads the list for hooks at all was not
+established. (One caveat found while a free-model review re-ran this: the firing
+hook must use the flat `PreInvocation` shape, not the `PreToolUse` matcher
+wrapper, or agy silently skips it — a repro footgun, not a mitigation.)
 
 Next: fix the README's "bridge is the sole gate" language to exclude hook
 commands (ship now), then add opt-in detect-and-surface of a workspace hook dir
