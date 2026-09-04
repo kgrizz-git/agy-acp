@@ -12,10 +12,17 @@ captured 2026-09-03. Everything is captured one of three ways:
   `agy -p '<prompt>' --add-dir <ws>`. Needs no adapter build and no Paseo. The
   hook fires at `PreToolUse` and captures the payload whether or not agy then
   executes the tool, so this enumerates the tool *surface* — names and arguments —
-  without `--dangerously-skip-permissions`. It is **not** evidence a tool ran:
-  AGENTS.md records that without that flag a hook `allow` loses to agy's headless
-  soft-deny (only a `deny` is honoured), so observing execution still needs the
-  flag. Ground truth for names and arguments; not for outcomes.
+  without `--dangerously-skip-permissions`. It is **not** evidence a tool ran.
+  Verified on agy 1.1.26 (2026-09-04): with no flag, a `write_to_file` whose hook
+  returned `{"decision":"allow"}` was still auto-denied — agy printed *"a tool
+  required the 'write_file' permission that headless mode cannot prompt for, so it
+  was auto-denied"* — identically whether the hook allowed, denied, or was absent.
+  So a hook `allow` does not override the headless soft-deny; only a `deny` is
+  honoured, matching the AGENTS.md finding. The one thing that *does* run without
+  the flag is a command agy's own `permissions.allow` already covers: `touch`
+  executed in an earlier capture only because `command(touch)` is in that list, not
+  because the hook allowed it. Ground truth for names and arguments; not for
+  outcomes.
 - *Read out of the binary* — `strings` over the `agy` executable. It carries the
   `exa.cortex_pb` protobuf descriptors, so a name found there is a name the
   binary knows. It says nothing about whether the name is enabled.
