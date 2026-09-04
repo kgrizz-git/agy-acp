@@ -222,6 +222,16 @@ This is also how the model waits. Told to wait for a subagent it called
 `schedule` with `DurationSeconds: 600`, `TimerCondition: "any"` and
 `Prompt: "Wait for subagent"`, so the tool is routine rather than exotic.
 
+Asked directly, agy describes `schedule` the other way — as deferring work to a
+*new* turn, run as a background task that wakes it by notification when the timer
+fires. That is its daemon/IDE behaviour (self-reported, so not authoritative).
+The two reconcile: headless `agy -p`, which is what the adapter runs, has no
+daemon to wake it later, so the deferral collapses into keeping the one turn open
+and running the work as continuation steps — the in-turn behaviour observed
+above. So `schedule` *can* defer past a turn in daemon mode; under the adapter it
+does not, which is why the hedge above ("not observed to defer") is the right
+framing rather than a flat "cannot".
+
 ## Why the list cannot be closed
 
 The binary carries an `exa.cortex_pb.CascadeToolConfig` — a per-tool enable map
