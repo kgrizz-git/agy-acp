@@ -1253,9 +1253,9 @@ pub fn is_narration(text: &str) -> bool {
 }
 
 #[cfg(test)]
-mod tests;
-#[cfg(test)]
 mod model_tests;
+#[cfg(test)]
+mod tests;
 // Unix-only: the stubs are /bin/sh scripts and the Windows MSRV job runs the
 // same `cargo test`.
 #[cfg(all(test, unix))]

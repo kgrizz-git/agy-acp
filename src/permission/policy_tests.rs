@@ -5,8 +5,8 @@
 //! Their own file rather than an inline module: permission.rs was the largest
 //! file in the repo, and two thirds of it was this.
 
-use super::*;
 use super::test_support::*;
+use super::*;
 
 #[test]
 fn only_ask_question_is_auto_allowed_by_default() {
@@ -281,8 +281,7 @@ async fn a_relative_dot_dot_that_stays_inside_the_workspace_is_still_inside() {
 async fn an_ordinary_string_argument_is_not_mistaken_for_a_path() {
     let workspace = std::env::temp_dir().join("agy-acp-query-test");
     std::fs::create_dir_all(&workspace).unwrap();
-    let (bridge, mut rx) =
-        test_bridge(&workspace.display().to_string(), &["grep_search"]).await;
+    let (bridge, mut rx) = test_bridge(&workspace.display().to_string(), &["grep_search"]).await;
 
     let (decision, reason) = bridge
         .decide(&json!({

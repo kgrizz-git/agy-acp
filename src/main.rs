@@ -28,9 +28,9 @@ mod types;
 #[cfg(test)]
 mod cli_tests;
 #[cfg(test)]
-mod test_support;
-#[cfg(test)]
 mod e2e_tests;
+#[cfg(test)]
+mod test_support;
 
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};

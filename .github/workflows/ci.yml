@@ -1,4 +1,4 @@
-# Build and deterministic tests. No formatting gate: tree is not rustfmt-clean.
+# Build, formatting, and deterministic tests.
 name: ci
 
 on:
@@ -46,12 +46,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
           toolchain: stable
-          components: clippy
+          components: clippy, rustfmt
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       # -W/-D clippy::all (not -D warnings). cognitive_complexity and
       # too_many_lines are nursery/pedantic, so -D clippy::all does not reach
       # them; main.rs denies both crate-wide instead, and this job is where that
       # deny bites.
+      # Format first: it takes seconds and clippy takes minutes, and a failing
+      # step ends the job, so the cheap gate has to report before the dear one.
+      - name: Format
+        run: cargo fmt --check
       - name: Clippy
         run: cargo clippy --all-targets -- -W clippy::all -D clippy::all
       - name: File length

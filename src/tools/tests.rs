@@ -1,6 +1,5 @@
 //! Tests for tool classification.
 
-
 use crate::tools::tool_kind;
 
 #[test]

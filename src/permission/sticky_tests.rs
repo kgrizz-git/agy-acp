@@ -5,8 +5,8 @@
 //! Their own file rather than an inline module: permission.rs was the largest
 //! file in the repo, and two thirds of it was this.
 
-use super::*;
 use super::test_support::*;
+use super::*;
 
 #[tokio::test]
 async fn always_allow_is_remembered_for_later_calls() {
@@ -385,7 +385,10 @@ async fn a_remembered_answer_is_explained_in_the_words_it_was_given_in() {
         .await;
     let (decision, reason) = asking.await.unwrap();
     assert_eq!(decision, Decision::Allow);
-    assert!(reason.contains("this exact call"), "at the prompt: {reason}");
+    assert!(
+        reason.contains("this exact call"),
+        "at the prompt: {reason}"
+    );
 
     // Second call: the remembered answer applies with no prompt, and explains
     // itself the same way.
@@ -449,7 +452,10 @@ async fn the_always_options_name_the_tool_for_path_tools() {
             .to_string()
     };
     assert_eq!(named("allow_always"), "Always allow view_file this session");
-    assert_eq!(named("reject_always"), "Always reject view_file this session");
+    assert_eq!(
+        named("reject_always"),
+        "Always reject view_file this session"
+    );
     for kind in ["allow_once", "allow_always", "reject_once", "reject_always"] {
         assert!(options.iter().any(|o| o["kind"] == kind), "missing {kind}");
     }
@@ -579,7 +585,10 @@ fn tool_level_keying_has_to_be_earned() {
     )
     .is_some());
     assert_ne!(
-        sticky_scope("read_url_content", &json!({ "Url": "https://example.com/a" })),
+        sticky_scope(
+            "read_url_content",
+            &json!({ "Url": "https://example.com/a" })
+        ),
         sticky_scope("read_url_content", &json!({ "Url": "https://evil.test/b" })),
         "two different URLs must not share a remembered answer"
     );
@@ -587,9 +596,11 @@ fn tool_level_keying_has_to_be_earned() {
     // A URL reached under some other field name, or nested, is caught too --
     // the field name is not what makes it unconstrained.
     assert!(sticky_scope("view_file", &json!({ "Source": "https://evil.test/x" })).is_some());
-    assert!(
-        sticky_scope("list_dir", &json!({ "opts": { "Url": "http://evil.test" } })).is_some()
-    );
+    assert!(sticky_scope(
+        "list_dir",
+        &json!({ "opts": { "Url": "http://evil.test" } })
+    )
+    .is_some());
 
     // The ordinary path tools keep the tool-level key: for them the checks
     // really do read the argument as a path.

@@ -5,8 +5,8 @@
 //! Their own file rather than an inline module: permission.rs was the largest
 //! file in the repo, and two thirds of it was this.
 
-use super::*;
 use super::test_support::*;
+use super::*;
 
 #[test]
 fn tool_titles_prefer_the_most_specific_argument() {
@@ -96,9 +96,7 @@ async fn only_the_users_own_refusal_counts_as_a_refusal() {
         bridge
             .resolve_response(
                 &request["id"],
-                Some(
-                    json!({ "outcome": { "outcome": "selected", "optionId": "reject_once" } })
-                ),
+                Some(json!({ "outcome": { "outcome": "selected", "optionId": "reject_once" } })),
             )
             .await
     );

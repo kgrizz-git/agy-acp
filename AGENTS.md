@@ -7,14 +7,15 @@ Single Rust crate. ACP (Agent Client Protocol) stdio adapter for Google Antigrav
 ```bash
 cargo build                    # debug build
 cargo build --release          # release build (required for e2e tests)
+cargo fmt                      # format (CI runs `cargo fmt --check`)
 cargo clippy --all-targets -- -W clippy::all -D clippy::all  # lint (same bar as CI)
 cargo test                     # unit tests (fast; some use a scratch dir in $TMPDIR)
 cargo test -- --include-ignored  # adds session persist/restore and DB tests
 cargo test e2e -- --ignored --nocapture  # e2e only (needs agy binary + auth)
 ```
 
-No separate typecheck/format commands — `cargo build` and `cargo clippy` cover
-those. The tree is not rustfmt-clean; do not run bare `cargo fmt`.
+No separate typecheck command — `cargo build` and `cargo clippy` cover it. The
+tree is rustfmt-clean and CI enforces it, so run `cargo fmt` before pushing.
 
 Work items live in [TODO.md](TODO.md), not here — this file describes how the
 code works today. Completed work is recorded in [CHANGELOG.md](CHANGELOG.md).
@@ -261,14 +262,16 @@ in the repository settings.
   clean and `git add -A` skips it, which reads exactly like success. These notes
   started as `AGENTS.local.md` and sat uncommitted for exactly that reason, then
   lived in `AGENTS.fork.md` until the hard fork folded them into this file.
-- **Do not run bare `cargo fmt`.** The repo is not kept rustfmt-clean and has no
-  format command, so it reflows files a change does not touch. Format specific
-  files, or restore the rest afterwards with `git checkout HEAD -- <path>`.
 - **Pre-push hook.** After cloning, run `git config core.hooksPath .githooks`
-  once. The hook runs the same clippy bar as CI (`-W clippy::all -D clippy::all`;
-  complexity lints on `handle_session_prompt` are `#[warn]` only) and the unit
-  tier (`cargo test`). Set `SKIP_LOCAL_GATES=1` to bypass those for one push;
-  the fork-guard URL check always runs.
+  once. The hook runs `cargo fmt --check`, the same clippy bar as CI
+  (`-W clippy::all -D clippy::all`; complexity lints on `handle_session_prompt`
+  are `#[warn]` only), and the unit tier (`cargo test`). Set
+  `SKIP_LOCAL_GATES=1` to bypass those for one push; the fork-guard URL check
+  always runs.
+- **Blame skips the formatting commit.** Run
+  `git config blame.ignoreRevsFile .git-blame-ignore-revs` once, so `git blame`
+  reaches the commit that wrote a line rather than the one that rewrapped it.
+  GitHub's blame view honours the file without any configuration.
 - **Local coverage.** `cargo-llvm-cov` is not a dev-dependency. Install with
   `cargo install cargo-llvm-cov --locked` to reproduce the CI coverage report.
 - Paseo runs the adapter as `["agy-acp", "--permission-prompts"]` in

@@ -1,0 +1,6 @@
+# Revisions that only reformat. Ignore them when reading blame:
+#     git config blame.ignoreRevsFile .git-blame-ignore-revs
+# (GitHub's blame view honours this file automatically.)
+
+# Format the tree with rustfmt
+ceeb297e2f8302c742c4368a1b74476fe4a556b4

@@ -1,0 +1,16 @@
+# Pin the formatting rules, not the toolchain.
+#
+# CI installs `stable`, which floats, so `cargo fmt --check` is a gate whose
+# answer can change when the toolchain moves under it. Pinning the toolchain
+# would stop that at the cost of freezing every other gate to one rustc.
+# Naming the style edition is narrower: rule changes are gated on it, so the
+# predictable churn -- a style edition bump, a changed default -- cannot reach
+# us. Rustfmt still exempts its own bug fixes from that guarantee, so this
+# removes the routine drift, not all of it.
+#
+# Tracks `edition = "2021"`. That is already the default, so the tree is
+# unchanged; saying it is what stops a later edition bump from reformatting
+# everything as a side effect. Rustfmt older than 1.85 does not know the key and
+# warns rather than fails, which is right -- 2021 is the only style edition it
+# implements, so it formats the same way regardless.
+style_edition = "2021"
