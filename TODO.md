@@ -20,9 +20,6 @@ The few things worth picking up next. Each is a pointer; the detail lives below.
   two sources of truth for the same findings.
 - [Rename the binary and crate](#rename-the-binary-and-crate) — cheaper now than
   after anyone else installs it.
-- [Confirm the e2e environment actually runs](#confirm-the-e2e-environment-actually-runs)
-  — the environment, its secret and its approval rule exist now; no run has gone
-  through them yet, so the gate is configured but unproven.
 
 ## Active
 
@@ -68,31 +65,6 @@ normalized permission payload puts the tool-call *title* into the structured
 field, so a shell request arrives as `detail.command: "Run \`echo hi\`"` and an
 edit as `detail.filePath: "write_to_file /path/to/x"`, rather than the bare
 command or path. Our `rawInput` is passed through untouched.
-
-### Confirm the e2e environment actually runs
-
-The `e2e` environment exists, holds `E2E_GEMINI_API_KEY` as an environment
-secret, and requires reviewer approval; the repository-level `GEMINI_API_KEY`
-that no workflow referenced has been removed. What has not happened is a run
-through any of it.
-
-That matters because the parts are only load-bearing together. `e2e.yml` skips
-fork pull requests before they request the environment, since they cannot receive
-secrets and would otherwise wait for an approval that could never help them; the
-gate job then reads the secret and reports whether it is present; only then does
-the e2e job check out pull-request code. A mistake anywhere in that chain reads
-as *skipping*, which is exactly what a missing secret used to read as. Until a
-run is watched end to end, "configured" and "working" are indistinguishable from
-the outside.
-
-Note that `deployment_branch_policy` is deliberately unset. `e2e.yml` triggers on
-`pull_request`, so the ref requesting the environment is the PR's head branch,
-which is never protected — a protected-branches-only policy would refuse every
-PR and reproduce the skip it was meant to prevent.
-
-Remaining: re-run e2e on a same-repository PR or via `workflow_dispatch`, approve
-it, and confirm the gate proceeds, the pinned agy archive verifies, and all four
-e2e tests run. It costs a paid API call, so it wants doing once, deliberately.
 
 ### Security and permission boundaries
 
@@ -192,30 +164,6 @@ conversationIds belong to subagents (observed via `invoke_subagent`), which is
 state, not a string. Low priority: it is an honesty/clarity improvement, not a
 containment gap — a subagent's calls are still gated by the same hook and the
 same path checks.
-
-#### Characterize agy's full tool surface
-
-Answered on 1.1.26, and the answer is that the *native* headless surface is
-closed. Asked to enumerate its session tools, agy returned exactly the seventeen
-and explicitly denied having `notebook_edit`; every one except `manage_task` has
-also been observed in a payload. So the seventeen is the ceiling for a headless
-`agy -p` client, not a lower bound.
-
-Two channels add tools beyond the seventeen, both captured and both documented in
-`dev-docs/agy-tool-surface.md` ("Extension channels"): MCP servers, whose tools
-appear as `mcp_<server>_<tool>` with third-party argument names (captured
-`mcp_chrome_devtools_new_page {url}`), and the `/browser` subagent, which is just
-`invoke_subagent TypeName:"browser"` driving those MCP tools. The `CascadeToolConfig`
-names, few-shot exemplars, and IDE-only tools (`read_terminal`, `workspace_api`,
-`view_code_item`, `code_search`) are negotiated off for the headless client and
-never appear — confirmed by agy failing to offer `notebook_edit` and falling back
-to `run_command`.
-
-So enumeration is done as far as it can be. The remaining work is what it always
-was: keep the `"other"` fallthrough as the contract for MCP/unknown tools in
-`tool_kind` and the README, and identify path fields for anything newly observed
-(the part that fails silently). This entry can be closed once that README wording
-lands.
 
 #### Generated artifacts land outside the workspace
 
@@ -318,8 +266,9 @@ established. (One caveat found while a free-model review re-ran this: the firing
 hook must use the flat `PreInvocation` shape, not the `PreToolUse` matcher
 wrapper, or agy silently skips it — a repro footgun, not a mitigation.)
 
-Next: fix the README's "bridge is the sole gate" language to exclude hook
-commands (ship now), then add opt-in detect-and-surface of a workspace hook dir
+The README wording is now fixed: it says the bridge gates the model's tool calls
+but not a workspace's own `.agents/hooks.json` lifecycle-hook commands, which run
+outside it. Remaining: add opt-in detect-and-surface of a workspace hook dir
 before the first turn. Isolated hook discovery needs an upstream agy flag.
 
 #### Permission socket hardening
