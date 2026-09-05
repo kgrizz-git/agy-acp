@@ -57,9 +57,13 @@ of its own yet, so everything below is unreleased.
   agy version: with no model selected the adapter passes no `--model`, so agy
   used its default Gemini Pro model, which a free-tier `GEMINI_API_KEY` cannot
   call. Reproduced locally against the CI config with the real key, both the
-  failure (default model) and the fix (`gemini-3.6-flash-low` succeeds). The
+  failure (default model) and the fix (any Gemini Flash tier succeeds). The
   `settings.json` `model` field is keyed by display label, not slug, so the
-  workflow now pins `"Gemini 3.6 Flash (Low)"`. (3) Incidentally the pin was
+  configure step now selects the newest `*-flash-low` label from the live
+  `agy models` list and writes it -- self-updating, so a catalog rename (3.5 was
+  already dropped, 3.8 is now default) needs no manual bump; it falls back to
+  `"Gemini 3.6 Flash (Low)"` if the query returns nothing. (3) Incidentally the
+  pin was
   bumped `1.1.16` -> `1.1.26` (sha updated); this was not the turn-execution fix
   but keeps CI on the version used locally. A local preflight that used the
   installer-provided `agy` rather than extracting the raw archive, and that ran

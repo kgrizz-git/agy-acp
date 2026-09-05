@@ -79,13 +79,30 @@ jobs:
         # model that a free GEMINI_API_KEY cannot call, which aborts every turn
         # with "Agent execution terminated due to error". The e2e sessions never
         # select a model, so the adapter passes no --model and agy falls back to
-        # this settings default. The field is keyed by display label, not slug
-        # (slug only works via the --model flag), so use "Gemini 3.6 Flash (Low)"
-        # (slug gemini-3.6-flash-low), verified runnable on a free key.
+        # this settings default. Every Gemini Flash tier runs on a free key, so
+        # pin one. Rather than hardcode a version (the catalog drifts -- 3.5 was
+        # dropped, 3.8 is now default), pick the newest `*-flash-low` from the
+        # live `agy models` list so a rename needs no manual bump. The field is
+        # keyed by display label, not slug (slug only works via --model), so we
+        # take column 2. Fall back to a known-good label if the query comes back
+        # empty.
+        env:
+          GEMINI_API_KEY: ${{ secrets.E2E_GEMINI_API_KEY }}
         run: |
           mkdir -p "$HOME/.gemini/antigravity-cli"
-          printf '%s\n' '{"modelProvider":"gemini","model":"Gemini 3.6 Flash (Low)"}' \
-            >"$HOME/.gemini/antigravity-cli/settings.json"
+          SETTINGS="$HOME/.gemini/antigravity-cli/settings.json"
+          printf '%s\n' '{"modelProvider":"gemini"}' >"$SETTINGS"
+          MODEL_LABEL=$(agy models 2>/dev/null \
+            | awk -F'\t' '$1 ~ /-flash-low$/ {print $2; exit}')
+          if [ -z "$MODEL_LABEL" ]; then
+            echo "warning: no *-flash-low in 'agy models'; using fallback" >&2
+            MODEL_LABEL="Gemini 3.6 Flash (Low)"
+          fi
+          echo "pinning e2e model: $MODEL_LABEL"
+          python3 - "$MODEL_LABEL" <<'PY' >"$SETTINGS"
+          import json, sys
+          print(json.dumps({"modelProvider": "gemini", "model": sys.argv[1]}))
+          PY
       - name: Build (release)
         run: cargo build --release --verbose
       - name: Run e2e tests
