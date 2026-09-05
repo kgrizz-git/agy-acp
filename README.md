@@ -124,7 +124,9 @@ Tool calls then arrive as ACP `session/request_permission` requests, with **Allo
 This works by installing a `PreToolUse` hook for `agy` in a private directory of the adapter's own — nothing is written to your workspace or to your global `agy` config, so plain `agy` use in a terminal is unaffected.
 
 > [!IMPORTANT]
-> Enabling this runs `agy` with `--dangerously-skip-permissions`, because a hook cannot grant a permission that `agy`'s own checks have already denied — while they are active a hook can only veto. The adapter becomes the only gate on tool execution, so anything it cannot resolve (no host to ask, host disconnected, no answer in time) is denied.
+> Enabling this runs `agy` with `--dangerously-skip-permissions`, because a hook cannot grant a permission that `agy`'s own checks have already denied — while they are active a hook can only veto. The adapter becomes the only gate on the model's **tool calls**, so anything it cannot resolve (no host to ask, host disconnected, no answer in time) is denied.
+>
+> One thing it does *not* gate: `agy` also runs any lifecycle-hook commands a workspace ships in its own `.agents/hooks.json` — a `PreInvocation` hook before the turn, a `Stop` hook at the end — and those execute directly, outside this bridge. Opening an untrusted repository can therefore run its hook commands with no prompt, even when the repository is not in `trustedWorkspaces`. The bridge's veto over tool calls still holds regardless; the exposure is out-of-band command execution, not a way to flip a bridge deny to allow.
 
 ### What runs without asking
 
@@ -160,6 +162,16 @@ still constrain. An argument that carries a command line or a URL reaches
 somewhere those checks cannot follow, so the answer is pinned to the exact
 arguments instead. That is why **Always allow** on `read_url_content` covers the
 one URL you approved and not the next one.
+
+A tool this fork does not recognise falls through to the same narrow treatment,
+by design. An MCP server tool (`mcp_<server>_<tool>`), a subagent-driven call, or
+anything new `agy` starts emitting is classed as **other**: it never earns the
+broad per-tool key, is remembered only by its exact arguments, and is in no
+auto-allow group, so it always prompts. `agy`'s native headless surface is a
+fixed set, but MCP servers and the `/browser` subagent can extend it at runtime;
+treating everything outside the known read/edit/search tools as **other** is the
+contract that keeps those open-ended additions prompting rather than silently
+allowed.
 
 "Exact" means exact: the arguments are compared as-is, with no tokenizing and no
 shell semantics. `ls -l` and `ls  -l` are different commands and each is asked
