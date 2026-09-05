@@ -29,6 +29,59 @@ fn tool_kinds_cover_the_common_agy_tools() {
     assert_eq!(tool_kind("mystery_tool"), "other");
 }
 
+/// The five names this fork inherited from upstream vocabulary and that agy was
+/// never observed to emit. Classifying one as read/edit/search would give it the
+/// weaker tool-level sticky key through `KEYED_BY_TOOL_KINDS`, so if agy ever
+/// does emit them they have to arrive as unknowns and be keyed by arguments.
+#[test]
+fn tools_agy_was_never_seen_to_emit_are_not_pre_classified() {
+    for tool in [
+        "view_code_item",
+        "codebase_search",
+        "edit_file",
+        "propose_code",
+        "command_status",
+    ] {
+        assert_eq!(
+            tool_kind(tool),
+            "other",
+            "{tool} must not be pre-classified"
+        );
+        assert!(
+            !KEYED_BY_TOOL_KINDS.contains(&tool_kind(tool)),
+            "{tool} must be keyed by its arguments, not by its name"
+        );
+        assert!(
+            sticky_scope(tool, &json!({ "AbsolutePath": "/tmp/a" })).is_some(),
+            "{tool} must get the argument-level sticky key"
+        );
+    }
+}
+
+/// agy self-reports these but no payload has carried one. They reach `"other"`
+/// by falling through, which is the safe answer -- `schedule` runs its work
+/// in-turn but a name-only key would still cover a schedule of a different
+/// duration, and `invoke_subagent` spawns an agent whose calls reach this same
+/// hook, so neither may inherit an answer remembered for a different call.
+#[test]
+fn self_reported_but_unobserved_tools_stay_unknown() {
+    for tool in [
+        "manage_task",
+        "send_message",
+        "schedule",
+        "invoke_subagent",
+        "define_subagent",
+        "manage_subagents",
+        "generate_image",
+    ] {
+        assert_eq!(tool_kind(tool), "other", "{tool} should still be unknown");
+        assert!(
+            sticky_scope(tool, &json!({ "Prompt": "go" })).is_some(),
+            "{tool} must be keyed by its arguments"
+        );
+    }
+}
+
 #[tokio::test]
 async fn unknown_conversations_are_denied() {
     let (tx, _rx) = mpsc::unbounded_channel();
@@ -250,4 +303,46 @@ async fn responses_for_other_ids_are_left_alone() {
     };
     assert!(!bridge.resolve_response(&json!(17), None).await);
     assert!(!bridge.resolve_response(&json!("some-other-id"), None).await);
+}
+
+/// A subagent runs under its own `conversationId`, which the bridge has never
+/// registered. It must fall back to the active session and be gated there --
+/// not rejected as "no session", which would break every subagent tool call.
+/// The no-active-session case is covered by `unknown_conversations_are_denied`;
+/// this pins the fallback arm the plan flagged as untested.
+#[tokio::test]
+async fn an_unknown_conversation_falls_back_to_the_active_session() {
+    let workspace = std::env::temp_dir().join(format!("agy-acp-fallback-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&workspace);
+    let file = workspace.join("f.txt");
+    let _ = std::fs::write(&file, "f");
+
+    // Two registered sessions, and "session-2" is the one whose turn is running.
+    // This is what makes the assertion mean "the *active* session", not merely
+    // "some registered session": a fallback that picked any registered session
+    // could pick "session-1", and then the turn-generation check
+    // (`active_session != session_id`) would deny instead of allow. Only a
+    // fallback to the active session passes.
+    let (bridge, _rx) = test_bridge(&workspace.display().to_string(), &["view_file"]).await;
+    bridge.register_conversation("conv-2", "session-2").await;
+    bridge.set_active_session(Some("session-2")).await;
+
+    let (decision, reason) = expect_auto_decision(
+        &bridge,
+        json!({
+            "conversationId": "subagent-unregistered-999",
+            "toolCall": {
+                "name": "view_file",
+                "args": { "AbsolutePath": file.display().to_string() },
+            },
+        }),
+    )
+    .await;
+
+    assert_eq!(
+        decision,
+        Decision::Allow,
+        "an unknown conversationId must resolve to the *active* session (session-2), \
+         not another registered one and not a deny: {reason}"
+    );
 }

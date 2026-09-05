@@ -10,7 +10,74 @@ of its own yet, so everything below is unreleased.
 
 ## Unreleased
 
+### Changed
+
+- `schedule` and `invoke_subagent` are now a decided classification rather than a
+  deferred one, settled by capturing agy 1.1.25/1.1.26. Both stay `"other"`
+  (argument-keyed, always prompt): a subagent's tool calls reach the same
+  `PreToolUse` hook under their own conversationId, and `schedule` runs its work
+  in-turn, so neither may inherit an answer keyed by tool name alone. Two newly
+  observed path fields, `ImagePaths` (`generate_image`) and `Subagents[].Workspace`
+  (`invoke_subagent`), are added to `PATH_FIELDS` so containment checks them; a
+  missed path field fails silently, so this closes real coverage. The permission
+  prompt for a `schedule` call now says it may hold the turn open. See
+  plans/completed/unclassified-tool-decision.md and dev-docs/agy-tool-surface.md.
+
+- The auto-allow groups and tool classification name only tools agy has actually
+  been observed to emit. `view_code_item`, `codebase_search`, `edit_file`,
+  `propose_code` and `command_status` were upstream vocabulary this fork
+  inherited: absent from agy's self-reported list and never seen in a captured
+  payload, including on prompts written to draw them out. Keeping them was not
+  free. `tool_kind` is not only a display label — `sticky_scope` asks
+  `KEYED_BY_TOOL_KINDS` whether a kind may be remembered by tool name alone, and
+  `"read"`, `"edit"` and `"search"` may — so classifying a tool nobody has seen
+  promised its arguments were constrained by the path checks on no evidence that
+  they were, and one "Always allow" would have covered every later call to it.
+  Unknown tools now fall through to `"other"`, which is keyed by arguments and
+  always prompts. `AGY_ACP_AUTO_ALLOW=reads` covers `view_file` and `list_dir`;
+  `searches` covers `grep_search` and `find_by_name`.
+
+  agy's seven self-reported but unobserved tools — `manage_task`, `send_message`,
+  `schedule`, `invoke_subagent`, `define_subagent`, `manage_subagents`,
+  `generate_image` — still reach `"other"` and still always prompt. The behaviour
+  is unchanged, and the classification is now recorded and tested rather than
+  reached by omission. Whether `"other"` is the *right* answer for `schedule`,
+  which defers work past the turn its permission was scoped to, and for
+  `invoke_subagent`, whose spawned agent may never route its tool calls back
+  through this bridge, is deliberately still open.
+
 ### Maintenance
+
+- The e2e workflow could not run agy. Three things, all surfaced on the gate's
+  first real runs (it had been "configured but unproven"). (1) The install step
+  looked for a binary named `agy`, but the release `linux_x64` archive ships it
+  as `antigravity`, so `find` matched nothing and the step died on a silent
+  `test -n`; the find now accepts either name. (2) Every real turn aborted with
+  "Agent execution terminated due to error". The cause was the model, not the
+  agy version: with no model selected the adapter passes no `--model`, so agy
+  used its default Gemini Pro model, which a free-tier `GEMINI_API_KEY` cannot
+  call. Reproduced locally against the CI config with the real key, both the
+  failure (default model) and the fix (any Gemini Flash tier succeeds). The
+  `settings.json` `model` field is keyed by display label, not slug, so the
+  configure step now selects the newest `*-flash-low` label from the live
+  `agy models` list and writes it -- self-updating, so a catalog rename (3.5 was
+  already dropped, 3.8 is now default) needs no manual bump; it falls back to
+  `"Gemini 3.6 Flash (Low)"` if the query returns nothing. (3) Incidentally the
+  pin was
+  bumped `1.1.16` -> `1.1.26` (sha updated); this was not the turn-execution fix
+  but keeps CI on the version used locally. A local preflight that used the
+  installer-provided `agy` rather than extracting the raw archive, and that ran
+  under OAuth rather than a free API key, would have masked both the name
+  mismatch and the model failure, which is how they reached CI.
+
+- `permission.rs` was sitting at exactly the 1200-line cap, so the next line
+  added to it -- a doc comment, in this case -- failed the length gate. The
+  cluster that decides how broad a remembered "Always" answer may be
+  (`sticky_scope`, `KEYED_BY_TOOL_KINDS`, `args_fingerprint`, `tool_kind` and
+  the two reach checks) moved to `permission/sticky_rules.rs`, alongside the
+  existing `path_rules.rs`. Behaviour is unchanged; the grouping is the point,
+  since getting the breadth wrong is how one "Always allow" covers a call the
+  user never saw.
 
 - The tree is rustfmt-formatted and CI enforces it with `cargo fmt --check`.
   Formatting drift only ratchets — 9 hunks when CI was set up, 27 after the

@@ -6,3 +6,6 @@ target
 
 # macOS writes these into every directory it opens.
 .DS_Store
+
+# Local secrets for reproducing the e2e run (GEMINI_API_KEY). Never committed.
+.env*.local

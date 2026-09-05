@@ -54,12 +54,12 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - name: Install agy
         # Pinned agy release and SHA-256 are deliberate compatibility inputs, as is
-        # the modelProvider: gemini config below. Run the local 1.1.16 preflight
+        # the modelProvider: gemini config below. Run the local 1.1.26 preflight
         # from plans/completed/ci-workflow.md before merging this workflow.
         run: |
-          AGY_VERSION=1.1.16
+          AGY_VERSION=1.1.26
           AGY_ARCHIVE="$RUNNER_TEMP/agy_cli_linux_x64.tar.gz"
-          AGY_SHA256=7742953b7835b457e9102f1357a493913657dfd147435584f609d58356ec085a
+          AGY_SHA256=c47c0726266b3513660b7094bceceecbd03d8ae907786aa269c507ceb7e4ee54
           curl --fail --location --retry 3 \
             --output "$AGY_ARCHIVE" \
             "https://github.com/google-antigravity/antigravity-cli/releases/download/${AGY_VERSION}/agy_cli_linux_x64.tar.gz"
@@ -67,16 +67,46 @@ jobs:
           AGY_EXTRACT="$RUNNER_TEMP/agy-extract"
           mkdir -p "$AGY_EXTRACT" "$RUNNER_TEMP/bin"
           tar -xzf "$AGY_ARCHIVE" -C "$AGY_EXTRACT"
-          AGY_BIN=$(find "$AGY_EXTRACT" -type f -name agy -perm -u+x -print -quit)
+          # The linux_x64 archive ships the binary as `antigravity`, not
+          # `agy`; accept either so a future rename does not silently break this.
+          AGY_BIN=$(find "$AGY_EXTRACT" -type f \( -name agy -o -name antigravity \) -perm -u+x -print -quit)
           test -n "$AGY_BIN"
           install -m 755 "$AGY_BIN" "$RUNNER_TEMP/bin/agy"
           echo "$RUNNER_TEMP/bin" >>"$GITHUB_PATH"
           "$RUNNER_TEMP/bin/agy" --version
       - name: Configure agy for GEMINI_API_KEY
+        # Pin a model the free-tier key can run. agy's default is a Gemini Pro
+        # model that a free GEMINI_API_KEY cannot call, which aborts every turn
+        # with "Agent execution terminated due to error". The e2e sessions never
+        # select a model, so the adapter passes no --model and agy falls back to
+        # this settings default. Every Gemini Flash tier runs on a free key, so
+        # pin one. Rather than hardcode a version (the catalog drifts -- 3.5 was
+        # dropped, 3.8 is now default), pick the newest `*-flash-low` from the
+        # live `agy models` list so a rename needs no manual bump. The field is
+        # keyed by display label, not slug (slug only works via --model), so we
+        # take column 2. Fall back to a known-good label if the query comes back
+        # empty.
+        env:
+          GEMINI_API_KEY: ${{ secrets.E2E_GEMINI_API_KEY }}
         run: |
           mkdir -p "$HOME/.gemini/antigravity-cli"
-          printf '%s\n' '{"modelProvider":"gemini"}' \
-            >"$HOME/.gemini/antigravity-cli/settings.json"
+          SETTINGS="$HOME/.gemini/antigravity-cli/settings.json"
+          # Constrain the match to the Gemini family (`gemini-<ver>-flash-low`),
+          # not any slug ending `-flash-low`, so a future non-Gemini or otherwise
+          # non-free row can never be auto-selected.
+          MODEL_LABEL=$(agy models 2>/dev/null \
+            | awk -F'\t' '$1 ~ /^gemini-[0-9.]+-flash-low$/ {print $2; exit}')
+          if [ -z "$MODEL_LABEL" ]; then
+            echo "warning: no gemini flash-low in 'agy models'; using fallback" >&2
+            MODEL_LABEL="Gemini 3.6 Flash (Low)"
+          fi
+          echo "pinning e2e model: $MODEL_LABEL"
+          # jq (guaranteed on the runner) builds the JSON with correct escaping.
+          # Fail loudly rather than leave a truncated/empty settings.json, which
+          # would silently drop agy back to its unrunnable default model.
+          jq -n --arg m "$MODEL_LABEL" \
+            '{modelProvider: "gemini", model: $m}' >"$SETTINGS"
+          test -s "$SETTINGS"
       - name: Build (release)
         run: cargo build --release --verbose
       - name: Run e2e tests

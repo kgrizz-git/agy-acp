@@ -5,11 +5,27 @@ depend on knowing which arguments are paths, so this is reference material for
 `PATH_FIELDS` in `src/permission/path_rules.rs`, and for `READ_TOOLS`,
 `SEARCH_TOOLS` and `tool_kind` in `src/permission.rs`.
 
-**Provenance.** agy 1.1.22, captured 2026-08-30, two ways:
+**Provenance.** agy 1.1.22 captured 2026-08-30, extended on agy 1.1.25
+captured 2026-09-03. Everything is captured one of three ways:
 
 - *Observed* — a `PreToolUse` hook that appends the payload and allows, driven by
-  `agy -p '<prompt>' --add-dir <ws> --dangerously-skip-permissions`. Needs no
-  adapter build and no Paseo. This is ground truth.
+  `agy -p '<prompt>' --add-dir <ws>`. Needs no adapter build and no Paseo. The
+  hook fires at `PreToolUse` and captures the payload whether or not agy then
+  executes the tool, so this enumerates the tool *surface* — names and arguments —
+  without `--dangerously-skip-permissions`. It is **not** evidence a tool ran.
+  Verified on agy 1.1.26 (2026-09-04): with no flag, a `write_to_file` whose hook
+  returned `{"decision":"allow"}` was still auto-denied — agy printed *"a tool
+  required the 'write_file' permission that headless mode cannot prompt for, so it
+  was auto-denied"* — identically whether the hook allowed, denied, or was absent.
+  So a hook `allow` does not override the headless soft-deny; only a `deny` is
+  honoured, matching the AGENTS.md finding. The one thing that *does* run without
+  the flag is a command agy's own `permissions.allow` already covers: `touch`
+  executed in an earlier capture only because `command(touch)` is in that list, not
+  because the hook allowed it. Ground truth for names and arguments; not for
+  outcomes.
+- *Read out of the binary* — `strings` over the `agy` executable. It carries the
+  `exa.cortex_pb` protobuf descriptors, so a name found there is a name the
+  binary knows. It says nothing about whether the name is enabled.
 - *Self-reported* — agy asked to enumerate its tools and their parameter names.
   Useful for finding things to look for, **not** authoritative: it reported
   `find_by_name.FullPath` in a list of parameter names, and observation showed it
@@ -19,7 +35,11 @@ Anything below marked self-reported has not been seen in a payload.
 
 ## Tools
 
-Seventeen, self-reported:
+Seventeen, and this is the **complete** headless `agy -p` toolset, not a lower
+bound. Unchanged 1.1.22 → 1.1.26. Asked twice on 1.1.26 to enumerate exactly the
+tools available in its session, agy returned precisely this set and, told to use
+`notebook_edit`, replied that it is "unavailable to me" and listed these same
+seventeen:
 
 ```
 view_file    run_command           manage_task      send_message      schedule
@@ -27,6 +47,11 @@ list_dir     write_to_file         invoke_subagent  define_subagent   manage_sub
 grep_search  replace_file_content  generate_image   read_url_content  search_web
 find_by_name ask_question
 ```
+
+Two channels can add tools *beyond* these seventeen in a headless session; see
+"Extension channels" below. Everything else the binary knows (the
+`CascadeToolConfig` names, the few-shot exemplars) is negotiated off for the
+headless client and does not appear.
 
 ## Observed arguments
 
@@ -45,7 +70,13 @@ text that changes between otherwise identical calls.
 | `replace_file_content` | `TargetFile`, `TargetContent`, `ReplacementContent`, `Instruction`, `StartLine`, `EndLine`, `AllowMultiple`, `Description` | `TargetFile` |
 | `read_url_content` | `Url` | none |
 | `search_web` | `query` | none |
-| `generate_image` | `ImageName`, `Prompt` | none — see below |
+| `generate_image` | `ImageName`, `Prompt`, `AspectRatio`, `ImagePaths` | `ImagePaths` — see below |
+| `ask_question` | `questions[]` (`question`, `options`, `is_multi_select`) | none |
+| `schedule` | `CronExpression`, `DurationSeconds`, `MaxIterations`, `Prompt`, `TimerCondition` | none |
+| `send_message` | `Message`, `Recipient` | none |
+| `define_subagent` | `name`, `description`, `system_prompt`, `enable_write_tools`, `enable_mcp_tools`, `enable_subagent_tools` | none |
+| `invoke_subagent` | `Subagents[]` (`TypeName`, `Role`, `Prompt`, `Workspace`) | `Subagents[].Workspace` |
+| `manage_subagents` | `Action`, `ConversationIds` | none |
 
 Deliberately *not* path fields: `Url`, `query`, `Pattern`, and `FullPath`, which
 is a boolean despite its name. Note the casing is inconsistent — `grep_search`
@@ -58,18 +89,36 @@ whether it appeared at all.
 
 ## Self-reported arguments, unobserved
 
-| tool | reported parameters |
-|---|---|
-| `generate_image` | `AspectRatio`, `ImageName`, `ImagePaths`, `Prompt` |
-| `manage_task` | `Action`, `Input`, `TaskId` |
-| `send_message` | `Message`, `Recipient` |
-| `schedule` | `CronExpression`, `DurationSeconds`, `MaxIterations`, `Prompt`, `TimerCondition` |
-| `invoke_subagent` | `Subagents` |
-| `define_subagent` | `description`, `enable_mcp_tools`, `enable_subagent_tools`, `enable_write_tools`, `name`, `system_prompt` |
-| `manage_subagents` | `Action`, `ConversationIds` |
+One tool is left unobserved, and a handful of optional parameters on observed
+tools have never appeared in a payload. Self-reported on 1.1.25.
 
-`ImagePaths` is the one worth watching: if it holds paths it belongs in
-`PATH_FIELDS`, but no call has produced it, so it is not there yet.
+| tool | reported parameters not yet seen |
+|---|---|
+| `manage_task` | `Action` (`list`/`kill`/`status`/`send_input`), `Input`, `TaskId` — whole tool unobserved |
+| `view_file` | `ContentOffset`, `StartLine`, `EndLine` |
+| `grep_search` | `CaseInsensitive`, `Includes`, `IsRegex`, `MatchPerLine` |
+| `find_by_name` | `Excludes` |
+| `replace_file_content` | `TargetLintErrorIds` |
+| `search_web` | `domain` |
+| `invoke_subagent` | `Subagents[].Model` |
+
+None of them names a path a containment check would run on. `Includes`/`Excludes`
+are the borderline pair — they hold glob patterns, which can look path-like — but
+they filter *within* `SearchDirectory`/`SearchPath`, which are already path-checked,
+so they do not independently reach the filesystem. They are the entry to revisit
+if a capture ever shows an absolute glob.
+
+`ImagePaths` has now been observed holding an absolute path
+(`["/tmp/agycap/img/seed.txt"]`), so the question it used to raise is settled: it
+is a path field. So is `Subagents[].Workspace`, observed carrying
+`/tmp/agycap/outside`. Antigravity also documents `inherit`, `branch` and `share`
+as values for that field; a bare word resolves inside the workspace and does not
+prompt, so accepting both shapes costs nothing.
+
+`manage_task` takes `Action` in `list`, `kill`, `status`, `send_input` — there is
+no create action, and `schedule` is what creates a task. `schedule` rejects
+`MaxIterations` with `DurationSeconds`, and `TimerCondition` with
+`CronExpression`.
 
 On whether to add a candidate before seeing it: the two failure directions are
 not symmetric, but neither is free. A missing name fails **silently** — the value
@@ -127,25 +176,156 @@ The adapter passes the user's workspace with `--add-dir` but does not instruct
 agy to prefer it for generated artifacts. If artifacts should land in the
 workspace, that has to be said explicitly.
 
+## How subagents reach the bridge
+
+`define_subagent` then `invoke_subagent` produces four hook payloads, and the
+fourth is the subagent's own work:
+
+```
+e995df2e step 2  define_subagent   {name: scribe, enable_write_tools: true, ...}
+e995df2e step 4  invoke_subagent   {Subagents: [{TypeName, Role, Prompt}]}
+e995df2e step 6  manage_subagents  {Action: list}
+b414bc71 step 2  write_to_file     {TargetFile: .../scribe.txt}   <- the subagent
+```
+
+So a subagent is gated by the same hook as its parent: the bridge is still one
+chokepoint. Three details matter to the code.
+
+The subagent runs under its **own `conversationId`**, which the bridge has never
+registered. `decide` misses in `state.conversations` and falls back to
+`active_session`, which is the parent — correct because the adapter spawns one
+`agy` per turn and serializes prompts, not because anything checks.
+
+The subagent's payload reports the **parent's** `workspacePaths` even when it was
+given `Workspace: /tmp/agycap/outside` and writes there. The bridge does not read
+that field; it checks argument paths against its own `workspace_roots`, so the
+outside write is caught. A containment check that trusted `workspacePaths` would
+have been wrong here.
+
+A subagent does not outlive the `agy` process. In two captures the subagent's
+`write_to_file` was allowed by the hook but never produced a file, and the parent
+reported the subagent "canceled by the system" — consistent with the subagent
+being killed when the parent turn ended, though these runs had no
+`--dangerously-skip-permissions`, so a headless soft-deny of the write cannot be
+ruled out as the cause. Either way the file did not land.
+
+## What `schedule` actually does
+
+In every call observed it did not defer work past the turn: it parked the turn
+and ran the work as further steps of the same conversation. Only a couple of
+parameter shapes were tried, so read this as "not observed to defer", not a proof
+it cannot for some interval or duration:
+
+```
+1788490605 e1e54c9a step 2  schedule    {DurationSeconds: 45, Prompt: "Run ... touch fired.txt"}
+1788490656 e1e54c9a step 6  run_command {CommandLine: "touch fired.txt"}
+```
+
+A cron is the same: `"*/1 * * * *"` with `MaxIterations 5` fired in process and
+held the turn open for about five minutes. So a `schedule` call is a
+turn-duration decision, bounded by `PERMISSION_PRINT_TIMEOUT` (60 minutes in
+`adapter.rs`), and the scheduled work arrives at the hook as ordinary tool calls.
+
+This is also how the model waits. Told to wait for a subagent it called
+`schedule` with `DurationSeconds: 600`, `TimerCondition: "any"` and
+`Prompt: "Wait for subagent"`, so the tool is routine rather than exotic.
+
+Asked directly, agy describes `schedule` the other way — as deferring work to a
+*new* turn, run as a background task that wakes it by notification when the timer
+fires. That is its daemon/IDE behaviour (self-reported, so not authoritative).
+The two reconcile: headless `agy -p`, which is what the adapter runs, has no
+daemon to wake it later, so the deferral collapses into keeping the one turn open
+and running the work as continuation steps — the in-turn behaviour observed
+above. So `schedule` *can* defer past a turn in daemon mode; under the adapter it
+does not, which is why the hedge above ("not observed to defer") is the right
+framing rather than a flat "cannot".
+
+## Extension channels: how a headless session gets more than seventeen
+
+The native set is closed at seventeen, but two channels inject additional tools
+into a headless session. Both were captured on 1.1.26.
+
+**MCP servers.** A server registered with `agy mcp add` (or an `mcpServers` block
+in `settings.json`) contributes tools that appear as first-class calls named
+`mcp_<server>_<tool>`, with argument names the server chose. Captured, via the
+user's pre-existing chrome-devtools plugin:
+
+```
+mcp_chrome_devtools_new_page   {"url": "https://example.com"}
+```
+
+Here `url` is not a path and not a `PATH_FIELDS` concern, but that is luck: an MCP
+tool's arguments are whatever a third party defined, so this is the part of the
+surface that genuinely cannot be enumerated. It is exactly why the `"other"`
+fallthrough in `tool_kind` — unknown tool, argument-keyed sticky, always prompt —
+is the contract, not a gap to be filled by listing.
+
+**The browser subagent.** The `/browser` slash command does not add browser tools
+to the parent. It makes the model call `invoke_subagent` with `TypeName:
+"browser"`, `Role: "Browser Agent"`, and that subagent drives the browser through
+MCP tools (the `mcp_chrome_devtools_*` above), so browser control reduces to the
+two channels already covered — a subagent (same hook) using MCP tools.
+
+## What the binary knows but headless never exposes
+
+The binary carries an `exa.cortex_pb.CascadeToolConfig` enable map naming ~35
+tools, plus few-shot exemplars and Cortex step types, for names outside the
+seventeen: `notebook_edit`, `read_terminal`, `workspace_api`, `view_code_item`,
+`code_search`, `command_status`, `memory`, `browser_subagent`, `codebase_search`
+(exemplar), `edit_file` (exemplar), `CortexStepProposeCode` (step type), and
+more. None of these appears in a headless session, and the reason is client
+negotiation, not chance: agy's account (self-reported, consistent with the
+capture) is that the toolset is filtered by client type, so an `ide-desktop`
+client gets IDE-coupled tools — `read_terminal` (reads a GUI terminal's
+scrollback), `workspace_api` (open editor tabs / cursor), `view_code_item` and
+`code_search` (LSP / semantic index) — that a `headless-cli` client is masked out
+of. `notebook_edit` is workspace-context-gated on detecting a Jupyter workspace;
+in headless it was not offered and the model fell back to editing the `.ipynb`
+with `run_command` python. Treat these as present in the binary, absent from this
+runtime, and do **not** pre-classify them in `tool_kind` — an unobserved tool
+must keep the `"other"` fallthrough and its argument-keyed sticky.
+
 ## Mismatches with this fork's lists
 
-Five names in `src/permission.rs` — `view_code_item`, `codebase_search`,
-`edit_file`, `propose_code`, `command_status` — are absent from the self-reported
+Five names once in `src/permission.rs` — `view_code_item`, `codebase_search`,
+`edit_file`, `propose_code`, `command_status` — were absent from the self-reported
 list *and* never appeared in a captured payload, including on prompts that should
 have drawn them out: a request for semantic search produced `grep_search`, one to
 view a specific code item produced `view_file`, and one to edit produced
-`replace_file_content`. They read as upstream vocabulary this fork inherited.
-Stated that way deliberately: absence of evidence across two sources is strong,
-but it is not the same as knowing agy cannot emit them under some other
-configuration or version.
+`replace_file_content`. The binary knows all five, in three different senses, and the distinction is
+worth keeping straight. `view_code_item` and `command_status` are fields in the
+`CascadeToolConfig` enable map above, so they are **config-gated tools**.
+`codebase_search` and `edit_file` appear in the **few-shot prompt examples**,
+with full argument shapes. `propose_code` is a **step type**
+(`CortexStepProposeCode`), behind a `use_replace_content_propose_code` flag.
+
+So the earlier reading — "upstream vocabulary this fork inherited" — was too
+comfortable. None of the three senses says agy cannot emit these under another
+configuration; two of them say it plainly could.
+
+**They have been removed**, and that uncertainty is the reason rather than an
+argument against. Being wrong in each direction costs something different. A name
+kept costs nothing *if* agy never sends it — but `tool_kind` is not only a label:
+`sticky_scope` asks `KEYED_BY_TOOL_KINDS` whether a kind may be remembered by
+tool name alone, and `"read"`, `"edit"` and `"search"` may. Pre-classifying a
+tool nobody has seen therefore promises that its arguments are constrained by the
+path checks, on no evidence that they are, and one "Always allow" would then
+cover every later call to it. A name removed costs a prompt: an unknown tool
+falls to `"other"`, is keyed by its arguments, and asks. So the wrong guess is
+the cheap one only in the direction of removal, which is why the removal does not
+wait for proof that agy cannot emit them.
 
 Seven tools in the self-reported list are unclassified here — `manage_task`,
 `send_message`, `schedule`, `invoke_subagent`, `define_subagent`,
-`manage_subagents`, `generate_image`. Only `generate_image` has been observed in
-a payload; the rest are self-reported and unobserved. All seven fall through
-`tool_kind` to `"other"` and belong to no auto-allow group, so they always
-prompt — the right default, but reached by omission, and that is true whether or
-not the self-report is complete.
+`manage_subagents`, `generate_image`. All seven have since been observed in a
+payload except `manage_task` (see "How subagents reach the bridge" and "What
+`schedule` actually does" above). All fall through `tool_kind` to `"other"` and
+belong to no auto-allow group, so they always prompt. That was already the
+behaviour; what changed is that it is now a decision rather than an omission,
+recorded in `tool_kind`'s doc comment and pinned by a test. `schedule` and
+`invoke_subagent` are why it was worth deciding: one holds the turn open past the
+call the permission was scoped to and the other spawns an agent, so neither
+should ever inherit an answer the user gave about something else.
 
 agy has **no dedicated delete tool**: asked to delete a file it shells out to
 `rm` via `run_command`, so deletion is governed by the command path.

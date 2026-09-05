@@ -130,7 +130,7 @@ This works by installing a `PreToolUse` hook for `agy` in a private directory of
 
 Only `ask_question` by default: it asks you something and cannot touch the filesystem. Reads are *not* auto-allowed out of the box — `agy`'s own checks are off, so a read you never see is a read of anything the process can reach.
 
-Opt in with `AGY_ACP_AUTO_ALLOW`, which takes tool names and the groups `reads` (`view_file`, `view_code_item`, `list_dir`), `searches` (`grep_search`, `codebase_search`, `find_by_name`) and `none`:
+Opt in with `AGY_ACP_AUTO_ALLOW`, which takes tool names and the groups `reads` (`view_file`, `list_dir`), `searches` (`grep_search`, `find_by_name`) and `none`:
 
 ```json
 "env": { "AGY_ACP_AUTO_ALLOW": "ask_question,reads,searches" }
