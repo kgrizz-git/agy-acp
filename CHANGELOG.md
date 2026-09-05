@@ -48,11 +48,15 @@ of its own yet, so everything below is unreleased.
 
 ### Maintenance
 
-- The e2e workflow's agy install step looked for a binary named `agy`, but the
-  pinned 1.1.16 `linux_x64` archive ships it as `antigravity`, so the step failed
-  with a silent `test -n` before any test ran. The `find` now accepts either
-  name. This was the e2e gate's first real run; the local 1.1.16 preflight that
-  the workflow comment calls for had not actually been run against the archive.
+- The e2e workflow could not run agy. Two things, both surfaced on the gate's
+  first real run (it had been "configured but unproven"). The install step looked
+  for a binary named `agy`, but the release `linux_x64` archive ships it as
+  `antigravity`, so `find` matched nothing and the step died on a silent
+  `test -n`; the find now accepts either name. And the pin was `1.1.16`, which
+  failed turn execution against the current backend; bumped to `1.1.26` (the
+  version that completes turns locally), sha updated. A local preflight that used
+  the installer-provided `agy` rather than extracting the raw archive would have
+  masked the name mismatch, which is how it reached CI.
 
 - `permission.rs` was sitting at exactly the 1200-line cap, so the next line
   added to it -- a doc comment, in this case -- failed the length gate. The

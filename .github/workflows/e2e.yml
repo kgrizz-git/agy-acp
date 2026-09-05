@@ -54,12 +54,12 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - name: Install agy
         # Pinned agy release and SHA-256 are deliberate compatibility inputs, as is
-        # the modelProvider: gemini config below. Run the local 1.1.16 preflight
+        # the modelProvider: gemini config below. Run the local 1.1.26 preflight
         # from plans/completed/ci-workflow.md before merging this workflow.
         run: |
-          AGY_VERSION=1.1.16
+          AGY_VERSION=1.1.26
           AGY_ARCHIVE="$RUNNER_TEMP/agy_cli_linux_x64.tar.gz"
-          AGY_SHA256=7742953b7835b457e9102f1357a493913657dfd147435584f609d58356ec085a
+          AGY_SHA256=c47c0726266b3513660b7094bceceecbd03d8ae907786aa269c507ceb7e4ee54
           curl --fail --location --retry 3 \
             --output "$AGY_ARCHIVE" \
             "https://github.com/google-antigravity/antigravity-cli/releases/download/${AGY_VERSION}/agy_cli_linux_x64.tar.gz"
@@ -67,7 +67,7 @@ jobs:
           AGY_EXTRACT="$RUNNER_TEMP/agy-extract"
           mkdir -p "$AGY_EXTRACT" "$RUNNER_TEMP/bin"
           tar -xzf "$AGY_ARCHIVE" -C "$AGY_EXTRACT"
-          # The 1.1.16 linux_x64 archive ships the binary as `antigravity`, not
+          # The linux_x64 archive ships the binary as `antigravity`, not
           # `agy`; accept either so a future rename does not silently break this.
           AGY_BIN=$(find "$AGY_EXTRACT" -type f \( -name agy -o -name antigravity \) -perm -u+x -print -quit)
           test -n "$AGY_BIN"
