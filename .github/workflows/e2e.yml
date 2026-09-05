@@ -67,7 +67,9 @@ jobs:
           AGY_EXTRACT="$RUNNER_TEMP/agy-extract"
           mkdir -p "$AGY_EXTRACT" "$RUNNER_TEMP/bin"
           tar -xzf "$AGY_ARCHIVE" -C "$AGY_EXTRACT"
-          AGY_BIN=$(find "$AGY_EXTRACT" -type f -name agy -perm -u+x -print -quit)
+          # The 1.1.16 linux_x64 archive ships the binary as `antigravity`, not
+          # `agy`; accept either so a future rename does not silently break this.
+          AGY_BIN=$(find "$AGY_EXTRACT" -type f \( -name agy -o -name antigravity \) -perm -u+x -print -quit)
           test -n "$AGY_BIN"
           install -m 755 "$AGY_BIN" "$RUNNER_TEMP/bin/agy"
           echo "$RUNNER_TEMP/bin" >>"$GITHUB_PATH"

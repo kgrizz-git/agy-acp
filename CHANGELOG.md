@@ -48,6 +48,12 @@ of its own yet, so everything below is unreleased.
 
 ### Maintenance
 
+- The e2e workflow's agy install step looked for a binary named `agy`, but the
+  pinned 1.1.16 `linux_x64` archive ships it as `antigravity`, so the step failed
+  with a silent `test -n` before any test ran. The `find` now accepts either
+  name. This was the e2e gate's first real run; the local 1.1.16 preflight that
+  the workflow comment calls for had not actually been run against the archive.
+
 - `permission.rs` was sitting at exactly the 1200-line cap, so the next line
   added to it -- a doc comment, in this case -- failed the length gate. The
   cluster that decides how broad a remembered "Always" answer may be
