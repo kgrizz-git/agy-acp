@@ -91,18 +91,22 @@ jobs:
         run: |
           mkdir -p "$HOME/.gemini/antigravity-cli"
           SETTINGS="$HOME/.gemini/antigravity-cli/settings.json"
-          printf '%s\n' '{"modelProvider":"gemini"}' >"$SETTINGS"
+          # Constrain the match to the Gemini family (`gemini-<ver>-flash-low`),
+          # not any slug ending `-flash-low`, so a future non-Gemini or otherwise
+          # non-free row can never be auto-selected.
           MODEL_LABEL=$(agy models 2>/dev/null \
-            | awk -F'\t' '$1 ~ /-flash-low$/ {print $2; exit}')
+            | awk -F'\t' '$1 ~ /^gemini-[0-9.]+-flash-low$/ {print $2; exit}')
           if [ -z "$MODEL_LABEL" ]; then
-            echo "warning: no *-flash-low in 'agy models'; using fallback" >&2
+            echo "warning: no gemini flash-low in 'agy models'; using fallback" >&2
             MODEL_LABEL="Gemini 3.6 Flash (Low)"
           fi
           echo "pinning e2e model: $MODEL_LABEL"
-          python3 - "$MODEL_LABEL" <<'PY' >"$SETTINGS"
-          import json, sys
-          print(json.dumps({"modelProvider": "gemini", "model": sys.argv[1]}))
-          PY
+          # jq (guaranteed on the runner) builds the JSON with correct escaping.
+          # Fail loudly rather than leave a truncated/empty settings.json, which
+          # would silently drop agy back to its unrunnable default model.
+          jq -n --arg m "$MODEL_LABEL" \
+            '{modelProvider: "gemini", model: $m}' >"$SETTINGS"
+          test -s "$SETTINGS"
       - name: Build (release)
         run: cargo build --release --verbose
       - name: Run e2e tests
