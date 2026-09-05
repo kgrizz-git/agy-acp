@@ -48,15 +48,23 @@ of its own yet, so everything below is unreleased.
 
 ### Maintenance
 
-- The e2e workflow could not run agy. Two things, both surfaced on the gate's
-  first real run (it had been "configured but unproven"). The install step looked
-  for a binary named `agy`, but the release `linux_x64` archive ships it as
-  `antigravity`, so `find` matched nothing and the step died on a silent
-  `test -n`; the find now accepts either name. And the pin was `1.1.16`, which
-  failed turn execution against the current backend; bumped to `1.1.26` (the
-  version that completes turns locally), sha updated. A local preflight that used
-  the installer-provided `agy` rather than extracting the raw archive would have
-  masked the name mismatch, which is how it reached CI.
+- The e2e workflow could not run agy. Three things, all surfaced on the gate's
+  first real runs (it had been "configured but unproven"). (1) The install step
+  looked for a binary named `agy`, but the release `linux_x64` archive ships it
+  as `antigravity`, so `find` matched nothing and the step died on a silent
+  `test -n`; the find now accepts either name. (2) Every real turn aborted with
+  "Agent execution terminated due to error". The cause was the model, not the
+  agy version: with no model selected the adapter passes no `--model`, so agy
+  used its default Gemini Pro model, which a free-tier `GEMINI_API_KEY` cannot
+  call. Reproduced locally against the CI config with the real key, both the
+  failure (default model) and the fix (`gemini-3.6-flash-low` succeeds). The
+  `settings.json` `model` field is keyed by display label, not slug, so the
+  workflow now pins `"Gemini 3.6 Flash (Low)"`. (3) Incidentally the pin was
+  bumped `1.1.16` -> `1.1.26` (sha updated); this was not the turn-execution fix
+  but keeps CI on the version used locally. A local preflight that used the
+  installer-provided `agy` rather than extracting the raw archive, and that ran
+  under OAuth rather than a free API key, would have masked both the name
+  mismatch and the model failure, which is how they reached CI.
 
 - `permission.rs` was sitting at exactly the 1200-line cap, so the next line
   added to it -- a doc comment, in this case -- failed the length gate. The

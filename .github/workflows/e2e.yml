@@ -75,9 +75,16 @@ jobs:
           echo "$RUNNER_TEMP/bin" >>"$GITHUB_PATH"
           "$RUNNER_TEMP/bin/agy" --version
       - name: Configure agy for GEMINI_API_KEY
+        # Pin a model the free-tier key can run. agy's default is a Gemini Pro
+        # model that a free GEMINI_API_KEY cannot call, which aborts every turn
+        # with "Agent execution terminated due to error". The e2e sessions never
+        # select a model, so the adapter passes no --model and agy falls back to
+        # this settings default. The field is keyed by display label, not slug
+        # (slug only works via the --model flag), so use "Gemini 3.6 Flash (Low)"
+        # (slug gemini-3.6-flash-low), verified runnable on a free key.
         run: |
           mkdir -p "$HOME/.gemini/antigravity-cli"
-          printf '%s\n' '{"modelProvider":"gemini"}' \
+          printf '%s\n' '{"modelProvider":"gemini","model":"Gemini 3.6 Flash (Low)"}' \
             >"$HOME/.gemini/antigravity-cli/settings.json"
       - name: Build (release)
         run: cargo build --release --verbose
