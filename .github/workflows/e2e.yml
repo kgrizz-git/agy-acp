@@ -13,18 +13,26 @@ permissions:
   contents: read
 
 jobs:
-  gate:
-    # Fork PRs cannot receive Actions secrets. Skip before requesting the
-    # protected environment, so they do not wait for an approval that cannot
-    # lead to an e2e run.
+  e2e:
+    # Fork PRs cannot receive Actions secrets, so skip before requesting the
+    # protected environment -- they would otherwise wait on an approval that can
+    # never lead to a run. This condition needs no secret, only the event.
     if: >-
       github.event_name == 'workflow_dispatch' ||
       github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     environment: e2e
-    outputs:
-      has_key: ${{ steps.key.outputs.has_key }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
     steps:
+      # One job references the environment, so approval is requested once. The
+      # old two-job form (a `gate` job that read the secret, then this one) made
+      # every protected-environment job prompt separately -- two approvals for
+      # one run. The secret-presence check that `gate` did is now the first step
+      # here: if the key is absent the real steps below skip via `steps.key`, so
+      # a missing secret reads as a green no-op rather than a red failure, the
+      # same as before.
       - id: key
         env:
           GEMINI_API_KEY: ${{ secrets.E2E_GEMINI_API_KEY }}
@@ -32,27 +40,22 @@ jobs:
           if [ -n "$GEMINI_API_KEY" ]; then
             echo 'has_key=true' >>"$GITHUB_OUTPUT"
           else
+            echo 'has_key=false; skipping e2e (no E2E_GEMINI_API_KEY)' >&2
             echo 'has_key=false' >>"$GITHUB_OUTPUT"
           fi
-
-  e2e:
-    needs: gate
-    if: needs.gate.result == 'success' && needs.gate.outputs.has_key == 'true'
-    runs-on: ubuntu-latest
-    environment: e2e
-    timeout-minutes: 20
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      - if: steps.key.outputs.has_key == 'true'
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+      - if: steps.key.outputs.has_key == 'true'
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
           toolchain: stable
           profile: minimal
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - if: steps.key.outputs.has_key == 'true'
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - name: Install agy
+        if: steps.key.outputs.has_key == 'true'
         # Pinned agy release and SHA-256 are deliberate compatibility inputs, as is
         # the modelProvider: gemini config below. Run the local 1.1.26 preflight
         # from plans/completed/ci-workflow.md before merging this workflow.
@@ -75,6 +78,7 @@ jobs:
           echo "$RUNNER_TEMP/bin" >>"$GITHUB_PATH"
           "$RUNNER_TEMP/bin/agy" --version
       - name: Configure agy for GEMINI_API_KEY
+        if: steps.key.outputs.has_key == 'true'
         # Pin a model the free-tier key can run. agy's default is a Gemini Pro
         # model that a free GEMINI_API_KEY cannot call, which aborts every turn
         # with "Agent execution terminated due to error". The e2e sessions never
@@ -108,8 +112,10 @@ jobs:
             '{modelProvider: "gemini", model: $m}' >"$SETTINGS"
           test -s "$SETTINGS"
       - name: Build (release)
+        if: steps.key.outputs.has_key == 'true'
         run: cargo build --release --verbose
       - name: Run e2e tests
+        if: steps.key.outputs.has_key == 'true'
         env:
           GEMINI_API_KEY: ${{ secrets.E2E_GEMINI_API_KEY }}
         # Serialize (--test-threads=1). Each e2e test drives a real agy turn

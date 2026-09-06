@@ -48,6 +48,14 @@ of its own yet, so everything below is unreleased.
 
 ### Maintenance
 
+- The e2e workflow now asks for environment approval once, not twice. It had two
+  jobs referencing the `e2e` environment -- a `gate` job that read the secret to
+  check presence, then the test job -- and GitHub prompts for each protected-
+  environment job separately. Collapsed to one job: the fork-skip is the job
+  `if` (it needs only the event, no secret), and the secret-presence check is the
+  first step, with the real steps guarded on its output so a missing key still
+  reads as a green no-op rather than a failure.
+
 - e2e tests now run serially (`--test-threads=1`). Each drives a real agy turn
   against the Gemini API, and running the four in parallel burst against the
   free-tier key's low per-minute Flash quota, intermittently aborting one turn
