@@ -4,15 +4,19 @@ Plan for the `TODO.md` entry "One-and-done approval for safe commands (backlog
 goal)". Written before any implementation; decision points and open questions are
 collected at the end and each is flagged **(DP)** or **(OQ)** where it arises.
 
-Revised once against an external read-only review (kilo step-3.7-flash, 2026-09-06).
-Three of its findings were load-bearing and changed the plan: the tokenizer must
-be a character *allowlist*, never a metacharacter denylist (zsh here-strings and
-process substitution slip any reject-list); widening must apply to allows only,
-with denials still keyed by the exact `args_fingerprint` — the shared `always`
-map would otherwise widen rejects too; and the new `AlwaysScope::Program` variant
-has to be threaded through `decide`, `noun()`, and `permission_options` as one
-derivation or the label and the key can disagree. All three are resolved below in
-place rather than in an appendix.
+Revised twice against external read-only reviews. Pass 1 (kilo step-3.7-flash)
+found three load-bearing gaps: the tokenizer must be a character *allowlist*,
+never a metacharacter denylist; widening must apply to allows only with denials
+still keyed by fingerprint; and `AlwaysScope::Program` must be threaded through
+`decide`/`noun()`/`permission_options` as one derivation. Pass 2 (cursor
+grok-4.6) verified every code claim in the plan against the tree, read the real
+`~/.gemini/antigravity-cli/settings.json` for a ground-truth cross-check, and
+then found four more: the deny-split needed a lookup split and label split, not
+just a store split; check 2 had to be an explicit second conjunct in `decide`,
+joining extracted relatives against `Cwd`, not the workspace root; `=` could
+not stay in the charset at large because zsh `=name` expansion reads outside
+the workspace; and per-flag arity was the difference between "extracted all
+paths" and "classified without judging any". All are resolved in place below.
 
 ## Objective
 
@@ -105,15 +109,37 @@ contain any of the rejected substrings, so all would classify as safe. A list of
 known-bad constructs can never be complete against a shell the classifier does
 not model, so it works the other way:
 
-- Split the command line on unquoted ASCII whitespace only. A token is valid
-  only if every character comes from a small allowlisted set — roughly
-  alphanumerics plus `_ - . / ~ + , : = @ %` — with `=` and `~` further
-  constrained below. Anything outside the set (`*`, `?`, `$`, backquote, quotes,
-  backslash, `(`, `)`, `<`, `>`, `|`, `;`, `&`, `{`, `}` — and therefore every
-  glob, expansion, redirection, chain, and zsh-ism without having to name them)
-  makes the whole command unclassifiable. New zsh syntax fails closed by
-  construction, because a construct zsh adds tomorrow contains characters this
-  set has never heard of.
+- Split the command line on ASCII whitespace only (`char::is_ascii_whitespace`,
+  so tab and CR split just like space; a non-ASCII or NUL byte is outside the
+  charset and fails the whole command). A token is valid only if every character
+  comes from a small allowlisted set — alphanumerics plus `_ - . / + , : @ %`,
+  with `=` and `~` admitted only under the two rules below. Anything else (`*`,
+  `?`, `$`, backquote, quotes, backslash, `(`, `)`, `<`, `>`, `|`, `;`, `&`,
+  `{`, `}` — and therefore every glob, expansion, redirection, chain, and
+  zsh-ism without having to name them) makes the whole command unclassifiable.
+  New zsh syntax fails closed by construction, because a construct zsh adds
+  tomorrow contains characters this set has never heard of.
+- **`=` is allowed *only* inside a `--flag=value` token** (i.e. a token that
+  starts with `--` and matches an allowlisted long flag with an attached value).
+  Nowhere else. Review pass 2 found why: zsh expands a word that *starts* with
+  `=` to the path of a command (`ls =id` → `ls /usr/bin/id`), so a bare `=` in
+  the charset is a read-outside-the-workspace that no path check sees — the
+  extracted token is just `=id`, a harmless-looking relative name. A token
+  starting with `=` (unclassifiable) and a `NAME=value` token before the program
+  (also unclassifiable) are both pinned by tests.
+- **`~` is allowed only as the first character of an argument token**, where it
+  is home-relative and the containment check refuses it. Any `~` elsewhere is
+  benign in zsh, but the charset keeps it out anyway so the rule has one case,
+  not two. (Pass-2 note: the first revision promised `=`/`~` constraints "below"
+  and never wrote the `~` one; both are written here now.)
+- `--` (end-of-flags) is **not** given semantics: it is not a permitted flag for
+  any program, so a command containing it is unclassifiable. That is the
+  fail-closed default; if it is ever added, it must mean "everything after is an
+  operand" and be documented as such.
+- Long flags match the per-program allowlist **exactly**. GNU getopt accepts
+  unambiguous prefixes (`grep --col` → `--color`/`--context` ambiguity); the
+  classifier must not. An abbreviated long flag is an unknown flag, hence
+  unclassifiable, and `grep --col` is a pinned test.
 - Exactly one command results → one token list, no separators possible by
   construction.
 - The program token is a bare name on the program allowlist: no `/` in it (so
@@ -121,13 +147,21 @@ not model, so it works the other way:
   `time`, `nice`, `command`, `builtin`, `exec`), no environment-assignment
   prefix (a token matching `NAME=value` before the program disqualifies the
   whole line — `FOO=bar ls` is out).
-- Every remaining token is either a flag the program's flag allowlist permits or
-  an argument; every argument-valued token is extracted as a candidate path and
-  handed to the containment machinery. The candidate-path test is deliberately
-  the widest one this codebase already uses, not a new one: any token that
-  *could* be a path (`/`-, `~`-, or `..`-shaped, plus any non-flag argument
-  whatsoever for tools like `cat` whose bare arguments are filenames) is
-  treated as one.
+- Every remaining token is either a flag the program's flag allowlist permits —
+  **with a declared arity**: 0 (bare switch), or 1 with its value extracted as a
+  candidate path, in all spellings (`--flag=value` attached, `--flag value`
+  two-token, `-oFILE` attached, `-o FILE` two-token) — or an operand. Every
+  operand is extracted as a candidate path. **A token the tokenizer cannot
+  account for under one of those heads makes the whole command unclassifiable.**
+  This is the rule that closes the pass-2 hole where `ls --file=/etc/x` could
+  classify while no path ever reached check 2: unknown flag, unknown arity, or
+  an unextracted value is always a fail. Programs differ on whether a bare
+  operand is a path (`cat`/`ls`: yes; `date`: operands are formats, and a
+  file-reading flag changes that per flag — see DP1's arity table), so the
+  per-program entry also declares how leftovers are treated.
+- Every extracted candidate path, flag values included, is judged *as a path
+  field, resolved against the command's `Cwd`* — not joined to the workspace
+  root. The reason is in the containment section.
 
 **PATH resolution is out of the boundary, and the plan must say so.** The
 allowlist constrains the *string* the model typed; `ls` still resolves through
@@ -142,34 +176,60 @@ lands, not as a hole this plan closes.
 Programs that read and cannot write or execute, with flags: **(DP1)**
 
 - Straightforward members: `ls`, `cat`, `head`, `tail`, `wc`, `file`, `stat`,
-  `pwd`, `du`, `df`, `date`, `which`, `realpath`, `basename`, `dirname`.
-- `grep`/`rg`-style tools: read-only, but flags like `-r`/`--include` change
-  reach, not safety — likely in.
+  `pwd`, `du`, `df`, `date`, `which`. Candidates needing the per-flag review
+  before they join rather than after: `realpath`, `basename`, `dirname`.
+- `grep`/`rg`-style tools: read-only, but **"reach, not safety" is wrong as a
+  blanket claim** (pass 2): `rg --pre CMD` executes a preprocessor on every
+  match. They join only with a flag table that excludes the execution flags
+  (`--pre`, `--pre-glob`, `--hostname-bin`…), not on the "read-only" intuition.
 - Deliberately *out*, even though their common use looks read-only, because one
   flag or subcommand writes or executes: `find` (`-delete`, `-exec`), `sed`
   (`-i`), `awk`/`gawk` (`system()`, `print >`), `xargs`, `tee`, `truncate`,
   `cp`/`mv`/`ln`, `touch`, `dd`, `chmod`/`chown`, any shell, `python`/`node`/
   `ruby`/`perl`, `curl`/`wget` (network), `ssh`/`scp`/`rsync` (network),
   `tar` (`--to-command`, checkpoint actions; `tar tf` is tempting — flag),
-  `git` (see DP2).
-- Flag policy per program: **allowlist of permitted flags**, not a denylist of
-  dangerous ones. The asymmetry is the same one `UNKEYED_FIELDS` documents in
-  reverse: an unknown flag should make the command unclassifiable (costs a
-  prompt), because a new flag nobody classified must not silently widen. **(DP1)**
-  Short flags may bundle (`-la` iff `-l` and `-a` are each allowed); long flags
-  match the per-program allowlist exactly; a flag that takes a value is only
-  allowed when its value is itself extracted and contained (a `--file=X` whose
-  `X` is not checked would be a path that never reaches the containment
-  machinery).
-- Starting flag table so the DP1 ruling has something concrete to rule on
-  (review flagged the absence of any example): for `ls`,
-  `-l -a -A -h -H -L -d -F -p -R -r -S -t -1 -C --color --color=WHEN
-  --group-directories-first --time-style=STYLE` — display and ordering only,
-  each verified against the GNU and BSD `ls` man pages before landing; any flag
-  that writes (`--output` is not a thing `ls` has, which is the point of
-  verifying rather than assuming) is absent. Each other program in the list
-  needs the same per-flag verification before the list ships; the DP1 ruling
-  *is* this table.
+  **`less`/`more`/`most` and every pager or editor (`man`, `vi`, `nano`)** —
+  `less` runs `!cmd` and man/vi are editors in waiting; pass 2 confirmed none
+  appear in this user's agy grants, so excluding them costs nothing — and `git`
+  (see DP2).
+- **Measured against the real grants.** Pass 2 read this machine's
+  `~/.gemini/antigravity-cli/settings.json`: 223 `command(...)` rules. `git`
+  alone is ~40 — the plurality, i.e. exactly what DP2 excludes in v1 — and the
+  plan-list family (`ls`/`cat`/`head`/`tail`/`grep`/`rg`…) is ~25 glob pairs.
+  The one-off exact grants are dominated by quoting, pipes, and `$(...)`, all
+  of which OQ2 keeps unclassifiable; and `cd`, `uname`, `hostname`, `echo`,
+  `sort`, `uniq`, `cmp` are granted but absent from the list above. Two honest
+  consequences: v1 widens a minority of real-world prompts (the README must
+  say so, not oversell), and `sort`/`echo`/`uname`-class additions are cheap
+  follow-ups with their own flag rulings (`sort -o` writes; `echo` only when
+  the tokenizer's no-redirection rule already makes it safe). `cd` is a special
+  case — under `CommandLine` it exits with the child and changes nothing
+  lasting, but it is also pointless to widen separately from `Cwd`.
+- Flag policy per program: **allowlist of permitted flags with declared
+  arity**, not a denylist of dangerous ones. The asymmetry is the same one
+  `UNKEYED_FIELDS` documents in reverse: an unknown flag should make the
+  command unclassifiable (costs a prompt), because a new flag nobody classified
+  must not silently widen. **(DP1)** Short flags may bundle (`-la` iff `-l` and
+  `-a` are each allowed, expanded character by character, attached-value flags
+  like `-oFILE` recognized only when the table declares arity 1); long flags
+  match exactly (no getopt prefix matching); a flag that takes a value is only
+  allowed when its value is extracted and contained.
+- **The table is per-platform, and the host platform here is Darwin.** A GNU
+  `ls` table is not a BSD `ls` table (`--color` is not BSD `ls`; `-f` is a file
+  argument to GNU `date` and a format string to BSD `date`). The shipped tables
+  must track the union conservatively — a flag allowed only when it is safe on
+  *both* dialects — or the binary detects and selects; the former, and the DP1
+  ruling names the dialect per entry.
+- Starting flag table (pass-1 review demanded a concrete example; pass 2
+  corrected it): for `ls`, `-l -a -A -h -d -F -p -R -r -S -t -1 -C --color
+  --group-directories-first --time-style=STYLE` — display and ordering only.
+  **`-H` and `-L` are removed**: they follow symlinks to operands' targets,
+  which is precisely the escape the Cwd-relative canonicalize check adjudicates,
+  and allowing them quietly would let `ls -L link` dress up a read of wherever
+  `link` points as an `ls` the user already approved. Symlink-following flags
+  belong to no v1 program. Every entry must be verified against both the GNU
+  and BSD man pages before landing; each other program needs the same per-flag
+  verification before it ships — the DP1 ruling *is* this table.
 
 ### What the sticky key becomes
 
@@ -181,7 +241,13 @@ string. `sticky_scope` gains a classifier step, and it happens there — *inside
 can drift:
 
 1. If `tool_kind(tool_name)` is not `"execute"` or the args carry no
-   `CommandLine`, today's logic is untouched.
+   `CommandLine`, today's logic is untouched. (Do not classify on
+   `has_command_line` alone — pass 2: unnamed tools carrying a `CommandLine`
+   stay fingerprinted, and `has_unconstrained_reach` stays true for any
+   `CommandLine`; the ordering below means a successful classify must
+   *preempt* that branch, and only for `run_command` does it get the chance.
+   Classifying every `CommandLine`-bearing tool would silently widen tools we
+   have not audited.)
 2. Otherwise extract the `CommandLine` string and call `classify`. On `None`
    (unclassifiable), return `Some(args_fingerprint(args))` exactly as today —
    the fallback path is byte-identical to current behaviour.
@@ -191,10 +257,16 @@ can drift:
 fingerprinted fallback, and any future caller that constructs `always_key` by
 hand all keep producing fingerprints; a `safe:` string can only come from a
 successful classification. That is the structural argument that a command whose
-paths could not be extracted can never reach the widened key.
+paths could not be extracted can never reach the widened key — **but it only
+holds because extraction is total**: the program/flag/operand accounting rule
+above is what makes "classified" and "all paths extracted" the same event.
+`SafeCommand.program` should be `&'static str`, pointing into the static
+allowlist entry rather than slicing the model's input, so `AlwaysScope` can stay
+`Copy` and the `noun()` label provably cannot carry model-authored text even if
+the allowlist check is ever bypassed.
 
-`AlwaysScope` gains a `Program(String)` variant, and its derivation is fixed so
-label, key, and reason still come from one source. `AlwaysScope::of` today picks
+`AlwaysScope` gains a `Program(&'static str)` variant, and its derivation is
+fixed so label, key, and reason still come from one source. `AlwaysScope::of` today picks
 `Command` whenever `has_command_line(args)` holds, which would mislabel every
 classified command as "this exact command". Fix: `decide` computes the classifier
 outcome once (it already needs `scope`), and `AlwaysScope::of` takes it as input
@@ -214,21 +286,35 @@ consequence to call out in the README: for a classified command there is no way
 to say "this exact string only", which is a small narrowing of
 choice in exchange for one-and-done behaviour. **(DP4)**
 
-**Denies stay narrow — and here is the mechanism, which the first draft of this
-plan asserted without supplying.** `apply_outcome` stores allows and denies in
-the one `always` map under the same `always_key`, so widening the key for a
-classified command would widen a "Always reject" too: one rejection of a weird
-`ls` invocation would block every later `ls`, the opposite of what was promised.
-The fix is a derivation split at the single store site: a sticky **deny** is
-always keyed by `args_fingerprint`, never by `safe:<program>` — the reject
-records exactly the call the user rejected, while the allow records the
-classifier's widened key. One line of the split lands in `apply_outcome` where
-the decision kind is already known, and the label still says what it does
-today for the reject side ("Always reject this exact command this session") —
-the reject side keeps the `Command`-scope wording even on classified commands,
-which is honest because it is literally true. **(DP5: resolved this way; the
-reviewer independently recommended the same split or a split map, and the
-single-store-site split is the smaller change.)**
+**Denies stay narrow — and here is the full mechanism, which pass-1 asserted
+without supplying and pass-2 showed the first supply was still incomplete.**
+Three places change, not one, because store without lookup and labels splits
+half the invariant:
+
+1. **Store.** In `apply_outcome`, a sticky deny is keyed by
+   `args_fingerprint(args)` even when the tool classified; only a sticky allow
+   uses `safe:<program>`. The reject records exactly the call the user
+   rejected.
+2. **Lookup.** `decide` does a *dual* lookup: first the fingerprint key for a
+   remembered deny (a repeated exact rejected command never prompts), then the
+   widened `safe:` key for a remembered allow. A store-side split without this
+   lookup split leaves rejects that never match anything, and a deny that
+   never matches is a broken feature hiding behind the right key.
+3. **Labels and reasons.** `permission_options` and `apply_outcome`'s reason
+   strings get the mixed wording the two scopes actually mean: allow-always
+   says "`` `ls` `` commands", reject-always says "this exact command" — even
+   on the same prompt for a classified command. Pass 2 showed the single
+   `noun()`-driven `permission_options` would otherwise print "Always reject
+   `ls` commands" over a fingerprint-keyed store, reproducing the label/key
+   disagreement the first review made the third blocker. So the reject label
+   takes a `Command`-shaped noun while the allow label takes the `Program`
+   noun, both derived from the same decide-time `scope` + classifier outcome —
+   one derivation for the decision, two variants for the wording.
+
+The `debug_assert` extends on the **allow path only**: `Program` implies the
+stored key starts with `safe:`; the deny path is pinned to `args_fingerprint`
+by its own assert. **(DP5: resolved this way; both reviewers pushed here, and
+pass 2's table showed store-only was still leaky.)**
 
 **Key-format extensibility, for DP2's future:** `safe:<program>` leaves
 `safe:<program>:<subcommand>` free for a later `git status`-style scope; the two
@@ -247,23 +333,34 @@ because they see different things):
    `PATH_FIELDS`, so a bare `ls` with no arguments is judged by its working
    directory on every matching call — and it is what guards `ls` with no
    explicit path at all. It cannot see a path *inside* `CommandLine`: the
-   string `ls /etc/shadow` is one opaque value to it.
-2. A new check over the **classifier-extracted paths** from the current call's
-   `CommandLine`, run through the same `outside_workspace` /
-   sensitive-pattern machinery. This is the one that catches `ls /etc/shadow`:
-   the extraction that produced the widened key is run again on the current
-   string, and only if every extracted path is contained does the remembered
-   allow apply.
+   string `ls /etc/shadow` is one opaque value to it, and a substring-sensitiv-
+   ity match (`passwd`, `.env`) against the one string is coincidence, not a
+   control — do not lean on it.
+2. A new check, **an explicit second conjunct at the honor site** (pass 2 found
+   the first draft had only described the shape of one). In `decide`, where a
+   remembered `safe:<program>` allow otherwise passes check 1, the current
+   call's extracted paths are wrapped as a fresh `PATH_FIELDS`-keyed args value
+   — so they inherit both the `outside_workspace` shape tests and the
+   sensitive-pattern list for free — with every relative entry joined
+   **against `Cwd` before** judgment (pass 2's concrete counterexample:
+   `Cwd=workspace/sub`, `ls link`, where `link` is a symlink out of the
+   workspace — resolving `link` against the workspace root misses it, the
+   shell runs it from `Cwd` and hits it). Only if both checks pass does the
+   remembered allow apply; either failing falls through to the full prompt
+   path exactly as today.
 
 Because `sticky_scope` re-classifies on every call and only emits `safe:` when
 extraction succeeded, a call whose paths cannot be extracted can never reach
 the widened key at all — that is what makes the pair of checks sufficient: no
 matching key exists for a call the second check cannot judge. **(OQ1, resolved:
-`Cwd` stays out of the key. The review agreed: it is a path field, so check 1
-already judges it per call, which is the same instrument that protects
-tool-level keying today; `ls` with no arguments is judged by `Cwd` on every
-hit, so two working directories do not share one approval in the meaningful
-sense.)**
+`Cwd` stays out of the key, *against* pass-2's push to put it in.** Pass 2's
+counter-example was the relative-operand symlink case (`Cwd=<ws>/sub`, `ls
+link`, `link` → outside), which check 2 now closes by joining every relative
+extracted path against `Cwd` before judgment — with that fix, two contained
+`Cwd`s sharing one approval is exactly as sound as tool-level keying already
+is for `view_file`. The residual difference vs. keying on `Cwd` is one fewer
+prompt per new directory: that was the ergonomic point of the work. Keeping the
+record that pass 2 argued the other side and lost on the fix, not on silence.)
 
 ## Test plan
 
@@ -284,15 +381,42 @@ sense.)**
   `escapes_containment` on the payload); does *not* cover `rm x` (program not
   allowlisted); the fingerprint path is untouched for unclassifiable commands
   (`cat >x` still reprompts per exact string).
+- Pass-2 additions, each one the specific shape of the pass-2 blocker it pins:
+  - `ls =id` — unclassifiable even with `=` nominally in the charset (pass-2's
+    zsh equals-expansion read-outside).
+  - `ls --file=/etc/x` — unclassifiable under the arity/accounting rule
+    (extraction succeeds, no path ever reached check 2 in pass-2's exploit).
+  - `rg --pre id` — unclassifiable (the flag table excludes execute flags, not
+    just reach-expanding ones).
+  - `ls -L link` / `ls -H link` — unclassifiable (symlink-follow flags out,
+    per the revised table above).
+  - `ls --` / `ls -- -l` — unclassifiable (`--` is not in any flag table).
+  - `grep --col foo file` — unclassifiable (long-flag exact match only; the
+    pinned anti-getopt-stockholm test).
+  - Check 2 integration in `decide` at the honor site, not just a
+    unit test of the classifier: a full `run_command` decision where check 1
+    passes and check 2 fails, asserted against a real BridgeState so the
+    *lookup path* is proven present — the pass-2 note that "the honor site is
+    only check 1" is what this pins.
+
 - Deny-split: "Always reject `ls -z`" blocks only that exact invocation and a
   successor "Always allow `ls`" on a later call is neither pre-blocked nor
-  contaminated by it. This is the test the reviewer showed was load-bearing,
+  contaminated by it. This is the test both reviews showed was load-bearing,
   and it fails against any implementation that keys the deny by `safe:ls`.
 - Non-vacuity: stub the classifier to return `None` unconditionally and confirm
   every pre-existing sticky test passes unchanged — proving the fallback really
-  is today's behaviour with zero widening.
+  is today's behaviour with zero widening. **Pass 2 added the other half:**
+  run the same suite with the classifier affirming `ls` and confirm the two
+  existing sticky tests that must change do change — `sticky_answers_are_not_normalized`
+  (`ls` vs `ls ` — fingerprints differ under the old rule and now classify the
+  same) and `the_always_options_name_the_command_for_command_tools` (which
+  pins the old wording) — and that every *other* pre-existing test stays green.
 - Label/key coherence: extend the existing pin that label scope and key scope
-  agree (`debug_assert` and its tests) to the program variant.
+  agree (`debug_assert` and its tests) to the program variant, and add a
+  *mixed*-lineage test — a classified command's allow path labels "`` `ls`
+  commands" while its deny path labels "this exact command", with the
+  underlying stores keyed differently. Pass 2's complaint that `permission_options`
+  took one scope for both buttons is what this pins.
 - E2e (manual, Paseo, per `TODO.md`'s testing discipline): approve `ls` once,
   confirm a second `ls <other>` is silent, confirm `ls /etc` prompts, and
   confirm `ls; rm x` (if the model emits it) prompts.
@@ -306,7 +430,17 @@ sense.)**
 - `README.md`: "What 'Always' remembers" section grows the program-keyed case
   and its boundary (first invocation always prompts; paths re-checked per call).
 - `AGENTS.md`: the `sticky_scope`/`AlwaysScope` paragraph in Quirks describes
-  the current three scopes; it must describe four when this lands.
+  the current three scopes; it must describe four when this lands, and it says
+  "Rejects narrow the same way" of the fingerprint keyed `Always` — that becomes
+  false here (allows widen, denies stay narrow) and the asymmetry must be
+  stated. Quirks also notes the permission-bridge paragraphs; pass 2 confirmed
+  bridge tests reference the deny in `sticky_tests.rs`.
+- `pr_compliance_checklist.yaml`: pass 2 flagged that the "Permission bridge
+  fails closed" rule's `success_criteria` currently demands that a
+  command-line key be keyed by the arguments and that widening be treated as a
+  regression. This work widens deliberately, so the file must be updated in the
+  same PR (not after): classified commands may use the program key iff their
+  extracted paths are re-checked per call; everything else is unchanged.
 - The parser-hazard relationship: `TODO.md` notes this classifier shares the
   "Deliberately not taken: parsing what a command does" hazard and that "the
   parser is the same dangerous object and should be built once if built at all."
