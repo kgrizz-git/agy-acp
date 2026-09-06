@@ -112,4 +112,10 @@ jobs:
       - name: Run e2e tests
         env:
           GEMINI_API_KEY: ${{ secrets.E2E_GEMINI_API_KEY }}
-        run: cargo test e2e -- --ignored --nocapture
+        # Serialize (--test-threads=1). Each e2e test drives a real agy turn
+        # against the Gemini API, and cargo otherwise runs them in parallel, so
+        # four concurrent turns burst against a free-tier key whose Flash quota
+        # is only a handful of requests per minute. That burst intermittently
+        # aborts one turn with "Agent execution terminated due to error";
+        # running one at a time spreads the calls under the rate limit.
+        run: cargo test e2e -- --ignored --nocapture --test-threads=1

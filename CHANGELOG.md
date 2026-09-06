@@ -48,6 +48,12 @@ of its own yet, so everything below is unreleased.
 
 ### Maintenance
 
+- e2e tests now run serially (`--test-threads=1`). Each drives a real agy turn
+  against the Gemini API, and running the four in parallel burst against the
+  free-tier key's low per-minute Flash quota, intermittently aborting one turn
+  with "Agent execution terminated due to error". Serial keeps the calls under
+  the rate limit.
+
 - The e2e environment is now proven, not just configured. A run went through the
   full chain -- gate job, reviewer approval, pinned-archive verification, and all
   four e2e tests -- and passed on a same-repository PR. That closes the standing
