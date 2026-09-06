@@ -62,8 +62,10 @@ of its own yet, so everything below is unreleased.
   on tool execution" without that carve-out. And the `"other"` classification is
   now stated as the deliberate contract for the open-ended part of agy's tool
   surface: any tool the fork does not recognise (an MCP `mcp_<server>_<tool>`, a
-  subagent-driven call, anything new) is argument-keyed, never in an auto-allow
-  group, and always prompts. Both close their TODO entries; see
+  subagent-driven call, anything new) is argument-keyed and in no auto-allow
+  group, so it cannot be auto-allowed and prompts unless an exact-argument
+  "Always allow" for that identical call is already remembered. Both close their
+  TODO entries; see
   plans/workspace-hook-trust-boundary.md and dev-docs/agy-tool-surface.md.
 
 - The e2e workflow could not run agy. Three things, all surfaced on the gate's

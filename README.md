@@ -166,8 +166,11 @@ one URL you approved and not the next one.
 A tool this fork does not recognise falls through to the same narrow treatment,
 by design. An MCP server tool (`mcp_<server>_<tool>`), a subagent-driven call, or
 anything new `agy` starts emitting is classed as **other**: it never earns the
-broad per-tool key, is remembered only by its exact arguments, and is in no
-auto-allow group, so it always prompts. `agy`'s native headless surface is a
+broad per-tool key and is in no auto-allow group, so it cannot be allowed without
+asking. It prompts unless you have already granted **Always allow this exact
+command** for that identical call — an "other" answer is remembered only by its
+exact arguments, so a repeat of the same call is covered but any different
+argument asks again. `agy`'s native headless surface is a
 fixed set, but MCP servers and the `/browser` subagent can extend it at runtime;
 treating everything outside the known read/edit/search tools as **other** is the
 contract that keeps those open-ended additions prompting rather than silently
