@@ -111,6 +111,8 @@ boundary.
 
 #### One-and-done approval for safe commands (backlog goal)
 
+Plan: plans/safe-command-classifier.md
+
 The ergonomic target the argument-keying deliberately does not reach: let a user
 approve `ls` or `cat` *once* and not be prompted for every later variant. Reads
 already have this — `view_file`, `list_dir`, `grep_search` are in
