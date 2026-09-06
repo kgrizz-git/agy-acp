@@ -48,6 +48,40 @@ of its own yet, so everything below is unreleased.
 
 ### Maintenance
 
+- The e2e workflow now asks for environment approval once, not twice. It had two
+  jobs referencing the `e2e` environment -- a `gate` job that read the secret to
+  check presence, then the test job -- and GitHub prompts for each protected-
+  environment job separately. Collapsed to one job: the fork-skip is the job
+  `if` (it needs only the event, no secret), and the secret-presence check is the
+  first step, with the real steps guarded on its output so a missing key still
+  reads as a green no-op rather than a failure.
+
+- e2e tests now run serially (`--test-threads=1`). Each drives a real agy turn
+  against the Gemini API, and running the four in parallel burst against the
+  free-tier key's low per-minute Flash quota, intermittently aborting one turn
+  with "Agent execution terminated due to error". Serial keeps the calls under
+  the rate limit.
+
+- The e2e environment is now proven, not just configured. A run went through the
+  full chain -- gate job, reviewer approval, pinned-archive verification, and all
+  four e2e tests -- and passed on a same-repository PR. That closes the standing
+  "configured but unproven" gap, since a mistake anywhere in that chain would have
+  read as *skipping*, indistinguishable from the missing-secret case it replaced.
+
+- README now describes the permission boundary as it actually is. Two
+  corrections. The bridge is the sole gate on the model's **tool calls**, but not
+  on a workspace's own `.agents/hooks.json` lifecycle-hook commands (`PreInvocation`,
+  `Stop`), which `agy` runs directly, outside the bridge -- so opening an untrusted
+  repository can run its hook commands unprompted; the README said "the only gate
+  on tool execution" without that carve-out. And the `"other"` classification is
+  now stated as the deliberate contract for the open-ended part of agy's tool
+  surface: any tool the fork does not recognise (an MCP `mcp_<server>_<tool>`, a
+  subagent-driven call, anything new) is argument-keyed and in no auto-allow
+  group, so it cannot be auto-allowed and prompts unless an exact-argument
+  "Always allow" for that identical call is already remembered. Both close their
+  TODO entries; see
+  plans/workspace-hook-trust-boundary.md and dev-docs/agy-tool-surface.md.
+
 - The e2e workflow could not run agy. Three things, all surfaced on the gate's
   first real runs (it had been "configured but unproven"). (1) The install step
   looked for a binary named `agy`, but the release `linux_x64` archive ships it
