@@ -193,19 +193,23 @@ Programs that read and cannot write or execute, with flags:
   `tar` (`--to-command`, checkpoint actions; `tar tf` is tempting and stays
   out), **`less`/`more`/`most` and every pager or editor (`man`, `vi`, `nano`)**
   — `less` runs `!cmd`, editors edit — and `git` (see DP2).
-- **Measured against the real grants.** This machine's
-  `~/.gemini/antigravity-cli/settings.json` holds 223 `command(...)` rules.
-  `git` alone is ~40 — the plurality, i.e. exactly what DP2 excludes in v1 —
-  and the plan-list family (`ls`/`cat`/`head`/`tail`/`grep`/`rg`…) is ~25 glob
-  pairs. The one-off exact grants are dominated by quoting, pipes, and `$(...)`,
-  all of which OQ2 keeps unclassifiable; and `cd`, `uname`, `hostname`, `echo`,
-  `sort`, `uniq`, `cmp` are granted but absent from the list above. Two honest
-  consequences: v1 widens a minority of real-world prompts (the README must say
-  so, not oversell), and `sort`/`echo`/`uname`-class additions are cheap
-  follow-ups with their own flag rulings (`sort -o` writes; `echo` is safe only
-  because the charset already rules out redirection). `cd` is a special case —
-  under `CommandLine` it exits with the child and changes nothing lasting, and
-  it is pointless to widen separately from `Cwd`.
+- **Measured against real traffic and grants.** Full numbers, methodology, and
+  the reproducibility recipe live in
+  `dev-docs/investigations/safe-command-coverage.md` (2026-09-07). The
+  headlines: v1 as scoped makes **10–12% of tool calls** one-and-done (11.7%
+  of 844 sampled `run_command` calls, 12.1% of the 223 `command(...)` grants
+  in this machine's `~/.gemini/antigravity-cli/settings.json`); `git` is the
+  plurality of traffic (~27% of `run_command`, i.e. exactly what DP2 excludes
+  in v1); and within the covered family the prompt reduction is large — 13
+  first-time prompts would have silenced 86 of 99 calls (86.9% silent), with
+  `cat` and `ls` buying most of it. Honest consequences the README must carry:
+  v1 widens a minority of real-world prompts, `git` is the v2 lever (~+13
+  points) and deliberately not in v1, quoting would add ~5 points for real
+  tokenizer risk (OQ2 says no), and `cd` is a special case — it exits with the
+  child and changes nothing lasting. One measured edge case to document
+  rather than fix: `ls -la ~/.paseo` classifies through the charset but its
+  `~` path is refused by containment, so tilde paths never widen even under a
+  program approval — one README line, not a bug.
 - Flag policy per program: **allowlist of permitted flags with declared
   arity**, not a denylist of dangerous ones. The asymmetry is the same one
   `UNKEYED_FIELDS` documents in reverse: an unknown flag should make the
