@@ -52,6 +52,7 @@ fn test_e2e_agy_acp_full_round_trip() {
         .stderr(Stdio::piped())
         .spawn()
         .expect("failed to spawn agy-acp");
+    forward_stderr(&mut child);
 
     let mut stdin = child.stdin.take().unwrap();
     let stdout = child.stdout.take().unwrap();
@@ -152,9 +153,26 @@ fn spawn_agy_acp() -> Option<(
         .stderr(Stdio::piped())
         .spawn()
         .expect("failed to spawn agy-acp");
+    forward_stderr(&mut child);
     let stdin = child.stdin.take().unwrap();
     let stdout = child.stdout.take().unwrap();
     Some((stdin, BufReader::new(stdout), child))
+}
+
+/// Echoes the child's stderr to ours, locking the adapter's `[agy-acp] agy
+/// stderr: ...` lines into the test log. Without this the pipe is never read:
+/// the provider's actual error (a 429, an auth failure) sits in the buffer
+/// while the assertion sees only the JSON `agy failed:` wrapper, and a
+/// rate-limit flake is indistinguishable from a regression in CI.
+fn forward_stderr(child: &mut std::process::Child) {
+    use std::io::{BufRead, BufReader};
+    if let Some(err) = child.stderr.take() {
+        std::thread::spawn(move || {
+            for line in BufReader::new(err).lines().map_while(Result::ok) {
+                eprintln!("[agy-acp stderr] {line}");
+            }
+        });
+    }
 }
 
 fn send_recv(
