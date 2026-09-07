@@ -8,7 +8,7 @@ Every technical claim below was verified against the code it names; citations ar
 
 ## Objective
 
-Let a user approve a *class* of provably-safe read-only shell commands once —
+Let a user approve a *class* of read-only shell commands once —
 "Always allow `ls`" — instead of being reprompted for every new argument string,
 which is what today's exact-fingerprint keying does to `run_command`. Reads
 through path tools (`view_file`, `list_dir`, `grep_search`) already have this:
@@ -95,7 +95,7 @@ Relevant today, from `src/permission.rs` and `src/permission/sticky_rules.rs`:
 New module, `src/permission/safe_command.rs`, with one entry point:
 
 ```rust
-/// `Some` only when the raw command line is provably a single invocation of an
+/// `Some` only when the raw command line is a single invocation of an
 /// allowlisted read-only program, with no shell interpretation in play.
 fn classify(command_line: &str) -> Option<SafeCommand> { ... }
 
@@ -111,11 +111,17 @@ which contain any of those reject strings, so all would classify as safe. A list
 of known-bad constructs can never be complete against a shell the classifier
 does not model, so it works the other way:
 
-- Split the command line on ASCII whitespace only (`char::is_ascii_whitespace`,
-  so tab and CR split just like space; a non-ASCII or NUL byte is outside the
-  charset and fails the whole command). A token is valid only if every character
-  comes from a small allowlisted set — alphanumerics plus `_ - . / + , : @ %`,
-  with `=` and `~` admitted only under the two rules below. Anything else (`*`,
+- Split the command line on **space and tab only**. Not
+  `char::is_ascii_whitespace`: that predicate includes `\n`, and in zsh a
+  newline is a command separator — `ls\nrm target` would split into tokens that
+  look like `ls` plus operands while zsh executes two commands. The escape is
+  exactly the character-allowlist logic applied to the *separator*: an
+  allowed-whitespace character that is an operator is a separator that erases
+  an operator. Any `\n`, `\r`, `\v`, `\f`, NUL, or non-ASCII byte unclassifies
+  the whole command before splitting even happens. A token is valid only if
+  every character comes from a small allowlisted set — alphanumerics plus
+  `_ - . / + , : @ %`, with `=` and `~` admitted only under the two rules
+  below. Anything else (`*`,
   `?`, `$`, backquote, quotes, backslash, `(`, `)`, `<`, `>`, `|`, `;`, `&`,
   `{`, `}` — and therefore every glob, expansion, redirection, chain, and
   zsh-ism without having to name them) makes the whole command unclassifiable.
@@ -140,8 +146,20 @@ does not model, so it works the other way:
   unambiguous prefixes (`grep --col` → `--color`/`--context` ambiguity); the
   classifier must not. An abbreviated long flag is an unknown flag, hence
   unclassifiable, and `grep --col` is a pinned test.
-- Exactly one command results → one token list, no separators possible by
-  construction.
+- Exactly one command results → one token list, no separators possible: `\n`
+  and the other operator-whitespace are refused before splitting, and every
+  separator character that *is* an operator (`; | & < >` and friends) is
+  outside the charset entirely.
+- **The rest of `args` is also fingerprinted, silently.** The classifier only
+  justifies widening the key for `CommandLine`; it must not inherit the same
+  breadth for adjacent fields. When a command classifies, the sticky key is
+  `safe:<program>` only if every other key in `args` is on an explicit,
+  audited list (`Cwd`, `WaitMsBeforeAsync`, and the `UNKEYED_FIELDS`
+  presentational fields, today); any other field — present or future,
+  `Env`, `Shell`, `Stdin`, anything a model or a later agy version adds —
+  makes the call fall back to the full `args_fingerprint` as today. The
+  measured `run_command` shape (`dev-docs/agy-tool-surface.md`) is the
+  allowlist's content, and is evidence, not a contract.
 - The program token is a bare name on the program allowlist: no `/` in it (so
   `./ls`, `/bin/ls`, `~/bin/ls` are out), no wrapper prefix (`sudo`, `env`,
   `time`, `nice`, `command`, `builtin`, `exec`), no environment-assignment
@@ -165,13 +183,25 @@ does not model, so it works the other way:
   field, resolved against the command's `Cwd`* — not joined to the workspace
   root. The reason is in the containment section.
 
-**PATH resolution is out of the boundary, and the plan must say so.** The
-allowlist constrains the *string* the model typed; `ls` still resolves through
-whatever `PATH` the agy process inherits, so "always allow `ls`" means "always
-allow whatever `ls` resolves to on this machine". A user whose PATH is hostile
-has larger problems, and the full fingerprint keying in place today has exactly
-the same exposure. Recorded as an inherent limitation, in the README when this
-lands, not as a hole this plan closes.
+**Executable identity is the sharpest remaining threat-model decision, and it
+changes what the feature may claim.** The allowlist constrains the *string* the
+model typed; `ls` still resolves through whatever `PATH` the agy process
+inherits, so "always allow `ls`" means "always allow whatever `ls` resolves to
+on this machine" — and a shadowed GNU `stat` on a Homebrew PATH would read the
+synthesized Darwin flag tables with genuinely different flag semantics (e.g.
+`stat -f` = filesystem mode on GNU vs format string on BSD). Probing `PATH`
+once at adapter startup does not answer this, because that environment can
+change between the probe and any later invocation; the only real fixes are to
+spawn `agy` with a constrained environment (rename-the-program work the adapter
+cannot do today) or to constrain the claim. So: **v1 drops the phrase
+"provably safe."** The README and the prompt both describe the mechanism as
+"commands the bridge judges simple and read-only, subject to the machine's
+PATH", and PATH resolution stays out of the boundary, documented, with the
+default unchanged from today (fingerprint keying makes no stronger promise
+either — today it is just more obviously scoped). The threat-model question —
+is PATH mutation in scope — is promoted to a v1 decision (DP6), not an
+implementation checklist item, because the answer changes the wording of the
+promise not just the shape of a list.
 
 ### The allowlist — **(DP1)**
 
@@ -196,9 +226,12 @@ Programs that read and cannot write or execute, with flags:
 - **Measured against real traffic and grants.** Full numbers, methodology, and
   the reproducibility recipe live in
   `dev-docs/investigations/safe-command-coverage.md` (2026-09-07). The
-  headlines: v1 as scoped makes **10–12% of tool calls** one-and-done (11.7%
-  of 844 sampled `run_command` calls, 12.1% of the 223 `command(...)` grants
-  in this machine's `~/.gemini/antigravity-cli/settings.json`); `git` is the
+  headlines: v1 as scoped makes **~10% of all tool calls** one-and-done (99
+  classifiable of 782 `run_command` calls among 988 tool-call steps across the
+  10 most recent conversation DBs; 12.1% of the 223 `command(...)` grants in
+  this machine's `~/.gemini/antigravity-cli/settings.json`). The earlier headline
+  "844 sampled `run_command` calls, 11.7%" mixed the 782 tool-call count with
+  the 844 regex-extraction count — the investigation doc now reconciles both — `git` is the
   plurality of traffic (~27% of `run_command`, i.e. exactly what DP2 excludes
   in v1); and within the covered family the prompt reduction is large — 13
   first-time prompts would have silenced 86 of 99 calls (86.9% silent), with
@@ -309,6 +342,13 @@ The `debug_assert` extends on the allow path only: `Program` implies the stored
 key starts with `safe:`; on the deny path a separate assert pins the key to
 `args_fingerprint`. **(DP5)**
 
+**Deny precedence is lexical and stated, not emerged.** The fingerprint
+lookup runs first, so a sticky deny of one exact string still wins over a later
+sticky allow of the same program — "Always allow `ls` commands this session"
+is accurate except for calls the user has rejected, and that precedence is
+the intended one. The mixed-lineage test asserts the precedence, not just
+that the two stores don't contaminate each other.
+
 **Key-format extensibility, for DP2's future:** `safe:<program>` leaves
 `safe:<program>:<subcommand>` free for a later `git status`-style scope; the
 two can never collide because one always and one never contains a further `:`,
@@ -337,8 +377,17 @@ are two and not one because they see different things:
    shell, running from `Cwd`, hits it. Only if both checks pass does the
    remembered allow apply; either failing falls through to the full prompt
    path exactly as today. An empty extraction is only acceptable when the
-   program declares that a no-operand call reads `Cwd` (which check 1 covers);
+Program declares that a no-operand call reads `Cwd` (which check 1 covers);
    otherwise it is unclassifiable, never vacuously contained.
+3. **TOCTOU is the stated boundary, not a discovered one.** Both checks judge a
+   path at authorize time; the program opens it later. A workspace symlink that
+   points inside at check time can be swapped to `/etc` before `cat link` runs,
+   and nothing here prevents it. That same gap exists for the path tools the
+   containment checks already guard — it is a property of the bridge's
+   containment model, not of this widening. The v1 README will say so and will
+   not describe the classifier as proof against a hostile process racing the
+   workspace; recording it here is the distinction between an honest limitation
+   and a discovered one.
 
 Because `sticky_scope` re-classifies on every call and only emits `safe:` when
 extraction succeeded, a call whose paths cannot be extracted can never reach
@@ -360,7 +409,10 @@ approval is exactly as sound as tool-level keying already is for `view_file`.)
   construction, tested explicitly so the property is pinned rather than
   inferred: `ls <<< x` (here-string), `ls =(id)` (process substitution),
   `ls ${=foo}` (word-splitting expansion), `ls *.zwc/*.old` (globs), a bare `*`
-  argument, and Unicode/non-ASCII tokens.
+  argument, and Unicode/non-ASCII tokens. **And the separator the earlier draft
+  missed: `ls\nrm target`, `ls\rrm`, and `ls\x0brm` are unclassifiable** — a
+  newline is a zsh command separator, not whitespace, and was found by the
+  final adversarial review.
 - Adversarial flags, one per rule above: `ls =id` (zsh equals expansion),
   `ls --file=/etc/x` (arity/accounting), `rg --pre id` (execute flags are not
   "reach"), `ls -L link` / `ls -H link` (symlink-following flags out),
@@ -372,7 +424,12 @@ approval is exactly as sound as tool-level keying already is for `view_file`.)
   passes and check 2 fails, not a unit test of the classifier alone); does
   *not* cover `rm x` (program not allowlisted); the fingerprint path is
   untouched for unclassifiable commands (`cat >x` still reprompts per exact
-  string).
+  string). **Plus: an `ls` whose payload carries any key outside the audited
+  `run_command` allowlist — say a future `Env` or `Shell` field — falls back to
+  the full fingerprint even though the command string classified**; this pins
+  that classification only justifies the `safe:` key when the rest of the
+  payload has no say the classifier didn't hear.
+
 - Deny-split: "Always reject `ls -z`" blocks only that exact invocation, and a
   later "Always allow `ls`" is neither pre-blocked nor contaminated by it.
   This fails against any implementation that keys the deny by `safe:ls` —
@@ -442,7 +499,16 @@ approval is exactly as sound as tool-level keying already is for `view_file`.)
   `allow_always` per prompt); the exact-string-only option disappears from the
   UI for those commands.
 - **DP5 — Denies stay narrow.** Resolved by the three-part mechanism above:
-  fingerprint-keyed store for denies, dual lookup, matched labels.
+  fingerprint-keyed store for denies, dual lookup, matched labels. Deny
+  precedence over a later program allow is lexical and asserted in the
+  mixed-lineage test — a sticky deny of one exact string still wins over the
+  widened allow for that string.
+- **DP6 — Executable identity / PATH shadowing.** Resolved as a wording and
+  threat-model decision, not as engineering: v1 drops every "provably safe"
+  phrasing. The classifier judges the command *string*; what `ls` resolves to
+  on the machine's `PATH` is outside the boundary and stated as such in the
+  README. A constrained spawn environment for agy is the real fix and is
+  follow-up work, not silently deferred.
 - **OQ1 — `Cwd` in the key?** Resolved: no. Check 2 joins relative extracted
   paths against `Cwd`, which closes the symlink-from-subdirectory case; two
   contained `Cwd`s sharing one approval is then no weaker than tool-level

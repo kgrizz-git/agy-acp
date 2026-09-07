@@ -35,8 +35,14 @@ exact-match; operands are paths unless the program entry says otherwise).
 | flag | arity | value-is-path? |
 |------|-------|----------------|
 | `-l -a -A -h -d -F -p -R -r -S -t -1 -C -i -n -v -P` | 0 | — |
-| `--color` | 1 | no |
+| `--color` | 1 | no — **attached `=` form only**; see below |
 | `--group-directories-first` | 0 | — |
+
+`--color` is an optional-value flag on both dialects (bare `--color` means
+`auto`), and optional values break the fixed-arity grammar: declared arity 1
+would swallow a following operand as its "value" (`ls --color src/` becomes
+`--color=src/`) and skip path-checking it. So the flag is admitted only in the
+attached `--color=WHEN` spelling; bare `--color` is unclassifiable.
 
 Notable exclusions: `-H -L` (symlink-following), `-G` (asymmetric — Darwin "color
 auto" vs GNU `--no-group`), `--time-style` (GNU-only; Darwin uses `-D format`).
@@ -89,12 +95,25 @@ unresolved, low traffic), `-s` (GNU-only).
 |------|-------|----------------|
 | `-b -i -I -N -n -0 -h -k` | 0 | — |
 | `--mime-type` `--mime-encoding` `--extension` `--exclude-quiet` | 0 | — |
-| `-f` | 1 | yes (operand-list file) |
-| `-m` | 1 | yes (alternate magic file) |
+
+**`-f` and `-m` are OUT** — revised during the final code review after
+synthesis. `-f LIST` makes `file` read a *list of files to process* out of
+`LIST`, so the paths it goes on to read are not in the command line at all;
+the classifier's extracted-paths check judges the list file and misses
+everything it names. `-m` takes a colon-separated magic-file list, and `:` is
+in the tokenizer's admitted charset, so `file -m inside.magic:/etc/magic x`
+tokenizes fine while the shell-less `file` still reaches outside the
+workspace. Both source contexts agreed the mechanism existed (indirection, not
+a typo); the synthesized table that included them as arity-1 path flags is
+retracted — that was a synthesis error against a source memo that had excluded
+them. Rule for the future: a flag whose value is a path *to a list of other
+paths* is not a path argument, it is an authority extension, and those are
+out by class, not by table row.
 
 Notable exclusions: `-L` (Darwin default dereferences), `-p` (utimes "pretend
 never read"), `-s` (raw block/char devices), `-z`/`-Z` (decompression path
 unverified on Darwin), `-C` (writes `magic.mgc`), `-S`/`--no-sandbox`.
+
 
 ### stat
 
@@ -158,9 +177,16 @@ classifier entry so the tokenizer does not path-check them.
 | `-f` | 1 | yes (pattern file) |
 | `-m` | 1 | no |
 | `-A -B -C` | 1 | no |
-| `--colour` `--color` | 0 or 1 | no |
-| `--label` `--line-buffered` `--null` | 0 or 1 | no |
+| `--label` | 1 | no |
+| `--line-buffered` `--null` | 0 | — |
 | `--exclude` `--exclude-dir` `--include` `--include-dir` | 1 | no |
+
+`--color`/`--colour` are OUT for grep in v1: GNU grep takes an *optional*
+attached value (`--color=WHEN`), and an optional-value flag defeats the
+fixed-arity grammar — a parser that treats it as arity 0 lets `--color
+/workspace/path` read the next token as a bare operand without logging it, and
+one that treats it as arity 1 rejects the bare form users actually type.
+Cosmetic-color is not worth teaching the grammar a new arity class.
 
 Confirmed on both dialects: grep has no execution flags. Excluded: `-r`/`-R`
 (GNU `-r` follows symlinks during recursion; BSD `-O`/`-S` do too).

@@ -41,15 +41,24 @@ specifically; 12.1% of the grants in `settings.json` — three views agreeing).
 
 ## What's in `run_command` in practice
 
-| Shape | Count | % of 782 | v1 classifiable |
+| Shape | Count | Indicative share | v1 classifiable |
 |-------|------:|---------:|---|
-| pipe (`\|`) | 239 | 30.6% | no — charset |
-| `git`/`gh` | 213 | 27.2% | no — DP2 exclusion |
-| plan-family, clean | 99 | 12.7% | **yes** |
-| quoted arguments | 90 | 11.5% | no — OQ2 exclusion |
-| other programs (`paseo`, `ruff`, `python`, `npm`, …) | 137 | 17.5% | no — not allowlisted |
-| redirect (`>`) | 34 | 4.3% | no — charset |
-| chain (`&&`, `;`) | 32 | 4.1% | no — charset |
+| pipe (`\|`) | 239 | ~31% | no — charset |
+| `git`/`gh` | 213 | ~27% | no — DP2 exclusion |
+| plan-family, clean | 99 | ~13% | **yes** |
+| quoted arguments | 90 | ~12% | no — OQ2 exclusion |
+| other programs (`paseo`, `ruff`, `python`, `npm`, …) | 137 | ~18% | no — not allowlisted |
+| redirect (`>`) | 34 | ~4% | no — charset |
+| chain (`&&`, `;`) | 32 | ~4% | no — charset |
+
+Methodological honesty the table needs: the category counts come from the
+regex extraction over step payloads (844 `CommandLine` occurrences), which can
+match model-authored text quoting a command, and the categories overlap
+(piped commands can also be quoted). They are not disjoint rows summing to 782;
+the share column is indicative, using 782 as denominator only to give rough
+scale. The precise claims this doc makes are the ones that could be recomputed
+anyway: 782 `run_command` steps of 988 tool-call steps, 99 clean plan-family
+commands, and the prompt-reduction table below.
 
 Composition of the 99 classifiable calls: `cat` 61, `ls` 26 (`-la`/` -l`
 bundled short flags, relative operand paths), `wc` 10 (`-l`), `head` 2 (`-n
