@@ -20,6 +20,9 @@ The few things worth picking up next. Each is a pointer; the detail lives below.
   two sources of truth for the same findings.
 - [Rename the binary and crate](#rename-the-binary-and-crate) — cheaper now than
   after anyone else installs it.
+- [E2e daily-quota rotation and turn reduction](#e2e-daily-quota-rotation-and-turn-reduction)
+  — rotate flash models and fold a redundant test so the free-tier 20/day ceiling
+  stops failing the gate.
 
 ## Active
 
@@ -373,6 +376,20 @@ idea from `paseo-agy-acp`.
 confirm `agy` backend errors reach the user — the stream's `result` event
 carries `status` and `error`, and the adapter now reads both — and consider a
 configurable `agy` binary path.
+
+#### E2e daily-quota rotation and turn reduction
+
+Plan: plans/e2e-quota-rotation.md
+
+The e2e gate fails on a hard per-project-per-model **daily** free-tier ceiling
+(20 `generate_content_free_tier_requests`, `quotaId:
+GenerateRequestsPerDayPerProjectPerModel-FreeTier`), not the per-minute burst the
+`--test-threads=1` serialization addressed. Rotation across flash models and
+folding `multi_turn`'s continuity assertion into `session_load` cuts the 5 model
+turns per run to 3 spread across separate daily buckets. Two facts must be
+pinned before the number is trusted: the request-per-turn ratio (a turn issues
+several `generate_content` calls), and whether a shared project/day aggregate
+sits above the per-model floor.
 
 ### Fork maintenance
 
