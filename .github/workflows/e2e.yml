@@ -125,3 +125,29 @@ jobs:
         # aborts one turn with "Agent execution terminated due to error";
         # running one at a time spreads the calls under the rate limit.
         run: cargo test e2e -- --ignored --nocapture --test-threads=1
+      - name: Capture agy logs on failure
+        if: failure() && steps.key.outputs.has_key == 'true'
+        # agy's stream error for a provider failure is the opaque "Agent
+        # execution terminated due to error" -- the message does not distinguish
+        # a 429 from an auth problem from a crash. agy writes the real detail
+        # (quota_manager, HTTP status) to its own per-invocation log under
+        # ~/.gemini/antigravity-cli/log/, not to stderr. Print the newest one so
+        # the failure is self-describing in the log, and upload the whole set.
+        run: |
+          LOGDIR="$HOME/.gemini/antigravity-cli/log"
+          if [ -d "$LOGDIR" ]; then
+            newest=$(ls -t "$LOGDIR"/cli-*.log | head -1)
+            echo "=== newest agy log: $newest ==="
+            tail -200 "$newest"
+            tar -czf "$RUNNER_TEMP/agy-logs.tar.gz" -C "$HOME/.gemini/antigravity-cli" log
+            echo "agy_logs=$RUNNER_TEMP/agy-logs.tar.gz" >> "$GITHUB_ENV"
+          else
+            echo "no agy log directory at $LOGDIR"
+          fi
+      - name: Upload agy logs
+        if: failure() && steps.key.outputs.has_key == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: agy-logs-${{ github.run_id }}
+          path: ${{ env.agy_logs }}
+          if-no-files-found: ignore
