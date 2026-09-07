@@ -81,30 +81,51 @@ jobs:
         if: steps.key.outputs.has_key == 'true'
         # Pin a model the free-tier key can run. agy's default is a Gemini Pro
         # model that a free GEMINI_API_KEY cannot call, which aborts every turn
-        # with "Agent execution terminated due to error". The e2e sessions never
-        # select a model, so the adapter passes no --model and agy falls back to
-        # this settings default. Every Gemini Flash tier runs on a free key, so
-        # pin one. Rather than hardcode a version (the catalog drifts -- 3.5 was
-        # dropped, 3.8 is now default), pick the newest `*-flash-low` from the
-        # live `agy models` list so a rename needs no manual bump. The field is
-        # keyed by display label, not slug (slug only works via --model), so we
-        # take column 2. Fall back to a known-good label if the query comes back
-        # empty.
+        # with "Agent execution terminated due to error".
+        #
+        # Model-issuing tests call session/set_model with a slug from
+        # E2E_MODEL_ROSTER, rotated by E2E_MODEL_OFFSET (github.run_number), so
+        # consecutive runs spread GenerateRequestsPerDayPerProjectPerModel-
+        # FreeTier across distinct flash-low buckets. settings.json remains the
+        # floor for any test that does not pick a model (empty roster,
+        # error_paths). That field is keyed by display label, not slug (slug
+        # only works via --model / set_model), so the fallback still takes
+        # column 2. The roster carries column 1.
+        #
+        # Rather than hardcode a version (the catalog drifts -- 3.5 was
+        # dropped, 3.8 is now default), collect every `gemini-<ver>-flash-low`
+        # from the live `agy models` list. Constrain the match to the Gemini
+        # family so a future non-Gemini or otherwise non-free row can never be
+        # auto-selected. Fall back to a known-good label if the query is empty.
         env:
           GEMINI_API_KEY: ${{ secrets.E2E_GEMINI_API_KEY }}
         run: |
           mkdir -p "$HOME/.gemini/antigravity-cli"
           SETTINGS="$HOME/.gemini/antigravity-cli/settings.json"
+          MODELS_TSV=$(agy models 2>/dev/null || true)
           # Constrain the match to the Gemini family (`gemini-<ver>-flash-low`),
           # not any slug ending `-flash-low`, so a future non-Gemini or otherwise
           # non-free row can never be auto-selected.
-          MODEL_LABEL=$(agy models 2>/dev/null \
-            | awk -F'\t' '$1 ~ /^gemini-[0-9.]+-flash-low$/ {print $2; exit}')
+          ROSTER=$(printf '%s\n' "$MODELS_TSV" | awk -F'\t' \
+            '$1 ~ /^gemini-[0-9.]+-flash-low$/ { s = (s ? s "," $1 : $1) } END { print s }')
+          MODEL_LABEL=$(printf '%s\n' "$MODELS_TSV" | awk -F'\t' \
+            '$1 ~ /^gemini-[0-9.]+-flash-low$/ { print $2; exit }')
           if [ -z "$MODEL_LABEL" ]; then
             echo "warning: no gemini flash-low in 'agy models'; using fallback" >&2
             MODEL_LABEL="Gemini 3.6 Flash (Low)"
           fi
-          echo "pinning e2e model: $MODEL_LABEL"
+          if [ -z "$ROSTER" ]; then
+            echo "warning: e2e model roster empty; tests will use settings.json default" >&2
+          else
+            n=$(printf '%s\n' "$ROSTER" | awk -F, '{ print NF }')
+            if [ "$n" -eq 1 ]; then
+              echo "warning: e2e model roster has one slug ($ROSTER); rotation is a no-op" >&2
+            fi
+          fi
+          echo "pinning e2e fallback model: $MODEL_LABEL"
+          echo "e2e model roster: ${ROSTER:-<empty>}"
+          echo "E2E_MODEL_ROSTER=$ROSTER" >> "$GITHUB_ENV"
+          echo "E2E_MODEL_OFFSET=${{ github.run_number }}" >> "$GITHUB_ENV"
           # jq (guaranteed on the runner) builds the JSON with correct escaping.
           # Fail loudly rather than leave a truncated/empty settings.json, which
           # would silently drop agy back to its unrunnable default model.
@@ -118,12 +139,16 @@ jobs:
         if: steps.key.outputs.has_key == 'true'
         env:
           GEMINI_API_KEY: ${{ secrets.E2E_GEMINI_API_KEY }}
-        # Serialize (--test-threads=1). Each e2e test drives a real agy turn
-        # against the Gemini API, and cargo otherwise runs them in parallel, so
-        # four concurrent turns burst against a free-tier key whose Flash quota
-        # is only a handful of requests per minute. That burst intermittently
-        # aborts one turn with "Agent execution terminated due to error";
-        # running one at a time spreads the calls under the rate limit.
+          E2E_MODEL_ROSTER: ${{ env.E2E_MODEL_ROSTER }}
+          E2E_MODEL_OFFSET: ${{ env.E2E_MODEL_OFFSET }}
+        # Serialize (--test-threads=1). Each model-issuing e2e test drives a
+        # real agy turn against the Gemini API, and cargo otherwise runs them
+        # in parallel, so concurrent turns burst against a free-tier key whose
+        # Flash quota is only a handful of requests per minute. That burst
+        # intermittently aborts one turn with "Agent execution terminated due
+        # to error"; running one at a time spreads the calls under the rate
+        # limit. The daily per-model ceiling is a different constraint, handled
+        # by rotating E2E_MODEL_ROSTER rather than by serialization.
         run: cargo test e2e -- --ignored --nocapture --test-threads=1
       - name: Capture agy logs on failure
         if: failure() && steps.key.outputs.has_key == 'true'

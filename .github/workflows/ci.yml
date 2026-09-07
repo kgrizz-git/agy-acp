@@ -32,7 +32,9 @@ jobs:
         run: cargo build --verbose
       - name: Test (unit)
         run: cargo test --verbose
-      # --ignored runs the ignored I/O tier; --skip e2e excludes the four e2e tests (test_e2e_*) that need agy + GEMINI_API_KEY — update if that naming convention changes.
+      # --ignored runs the ignored I/O tier; --skip e2e excludes the e2e tests
+      # (test_e2e_*) that need agy + GEMINI_API_KEY — update if that naming
+      # convention changes.
       - name: Test (ignored I/O, excluding e2e)
         run: cargo test --verbose -- --ignored --skip e2e
 
