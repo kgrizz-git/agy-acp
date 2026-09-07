@@ -30,7 +30,13 @@ Two facts matter for the design:
 
 - **Per model.** `quotaDimensions` names `model:gemini-3.6-flash`, and
   `quotaId` says `PerProjectPerModel-FreeTier`. Distinct flash models (`3.6`,
-  `3.7`, `3.8`) are separate buckets of 20/day each.
+  `3.7`, `3.8`) are separate buckets of 20/day each. **Caveat:** the quota that
+  fired names the bare `gemini-3.6-flash` slug, but the workflow's awk regex
+  (`.github/workflows/e2e.yml:101-102`) selects `gemini-*-flash-low`, the
+  reduced-reasoning variant. Whether `-flash` and `-flash-low` share one quota
+  bucket or are counted separately is unverified — Google could meter by base
+  model or by exact slug. The OQ1 probe should include a same-base different-
+  reasoning-effort pair to settle this.
 - **Per day, not per minute.** `.github/workflows/e2e.yml:121-126` explains that
   `--test-threads=1` was added for the *per-minute* free-tier Flash quota
   ("a handful of requests per minute"). That is a real but different constraint;
@@ -77,27 +83,60 @@ assertion removed — the merged test is strictly stronger than the old
 ### DP2 — rotate models, do not just pin one
 
 Even at 3 turns/run, one model's 20/day is ~6 runs/day before the ceiling. Spread
-the three turns across the three flash models so one run costs each model a
-single turn, and the suite survives ~20 runs/day. Rotation is a mitigation, not
-a cure — it multiplies headroom by the number of flash models, which is small.
+the turns across flash models to widen headroom. Rotation is a mitigation, not
+a cure — it multiplies headroom by the number of available flash models.
+
+**Turn distribution.** With two model-issuing tests and three turns total (1
+from `full_round_trip`, 2 from `session_load`), per-test model assignment gives
+one model 1 hit and another 2 hits in any single run. That imbalance is fine per
+run; what matters is spreading the 2-turn load across runs so the same model
+does not always absorb the heavier test. Rotate the starting offset by
+`run_number % roster.len()`: each test picks
+`roster[(offset + test_index) % roster.len()]`.
+
+Example with 3 models (A, B, C):
+
+| Run | `full_round_trip` (1 turn) | `session_load` (2 turns) |
+|---|---|---|
+| 0 | A | B |
+| 1 | B | C |
+| 2 | C | A |
+
+After 3 runs: A 3, B 3, C 2 — nearly even. Deterministic from the run number,
+so a failure is reproducible from the CI run id.
+
+**Edge cases by roster size:**
+
+- **0 (empty):** `% 0` panics. If the awk query returns no matching slugs,
+  tests must skip `set_model` and fall through to the `settings.json` default —
+  the same path they take today. The roster env var being empty or unset is the
+  signal.
+- **1:** Both tests get the same model. Rotation is a no-op. Nothing breaks,
+  but there is no quota relief — the suite is back to one bucket, same as today.
+  Worth a CI warning so a catalog change that drops the roster to 1 is visible.
+- **2+:** Rotation works. With 2 models, tests always get different models per
+  run and the 2-turn load alternates between them; headroom is 2×. With 3+, the
+  example above applies.
 
 Mechanism, using an existing code path rather than new infra:
 
 - The configure step already queries the live model list
   (`.github/workflows/e2e.yml:101-102`). Extend it to collect the **slug ids**
   (column 1, the only value valid as `--model`/`set_model`), not just the single
-  newest display label, and expose them as an ordered list the tests read.
+  newest display label, and expose them as an ordered list plus the run offset
+  (`E2E_MODEL_ROSTER`, `E2E_MODEL_OFFSET=${{ github.run_number }}`).
 - Each model-issuing test selects a distinct model before its first prompt via
   `session/set_model` (accepted per `AGENTS.md` "Both `session/set_model` and
   `session/setConfigOption` are accepted"), so the adapter passes `--model <id>`.
-- Assignment is deterministic: `full_round_trip` takes id 0 and `session_load`
-  takes id 1 (or the tests round-robin an env-provided list by test index),
-  so a given model is never hit twice in one run and the workload is stable.
+  If the roster is empty, the test does not call `set_model`.
 
 The existing `settings.json` fallback stays as the model-selection floor for
-anything that does not pick a model explicitly; the roster query above must keep
-its Gemini-family guard (`.github/workflows/e2e.yml:98-99`, `gemini-<ver>-flash`)
-so a future non-free row is never selected.
+anything that does not pick a model explicitly. Note: `settings.json` is keyed
+by display label (column 2 of `agy models`), while `--model` accepts the slug
+(column 1). The configure step currently writes the label; it must continue to
+do so for the fallback path, while the roster env var carries slugs. The roster
+query must keep its Gemini-family guard (`.github/workflows/e2e.yml:98-99`,
+`gemini-<ver>-flash-low`) so a future non-free row is never selected.
 
 ### DP3 — discover the request-per-turn ratio before committing to a number
 
@@ -106,7 +145,7 @@ so a future non-free row is never selected.
 bucket. The plan must not assume 1:1. The log capture added for the diagnosis is
 also the instrument: one debug run that counts `generate_content_free_tier_requests`
 credits per turn gives the true per-run cost, which determines whether rotation
-across three models is sufficient or whether more trimming (OQ2) is required.
+across the available models is sufficient or whether more trimming (OQ2) is required.
 
 ## Risks and open questions
 
@@ -120,12 +159,28 @@ second model's `429` names the same `quotaId` (per-model) or a wider
 `...PerProject` bucket. If an aggregate exists, rotation degrades toward DP1
 alone and the honest fix is a non-free key or fewer runs.
 
+The same probe should include a same-base different-reasoning-effort pair
+(`gemini-3.6-flash` vs `gemini-3.6-flash-low`) to determine whether the quota
+meters by base model or by exact slug. If they share a bucket, rotation across
+reasoning-effort variants buys nothing and the headroom multiplier is the number
+of *base* model versions, not the number of slug variants.
+
 ### OQ2 — keep `multi_turn`, or accept the folded coverage?
 
 DP1 removes a two-turn test. The residual is narrow — uninterrupted (no-load)
 binding — but it is a decision to record, not a footnote. If the probe in OQ1
 shows an aggregate quota, reconsider keeping `multi_turn` and instead dropping
 part of `session_load`, so the 3-turn budget is spent on the strongest tests.
+
+### OQ3 — diagnosability under rotation
+
+With all tests pinned to one model, a failure is unambiguous. Under rotation,
+a failure may be model-specific — one model misunderstands a prompt while
+another does not. The existing log capture (agy logs on failure) includes the
+model slug in the agy invocation, so the information is available. Tests
+should also log their assigned model at the start (`eprintln!("[e2e] model:
+{slug}")`) so a failure's model assignment is visible in the test output without
+digging into agy logs.
 
 ### Note — pin drift, not part of this work
 
