@@ -44,8 +44,10 @@ precision: 12% would become 11% or 13% under structured parsing, which changes
 nothing the plan does with it. A follow-up pass that parses the steps table
 structurally is the upgrade path if the numbers ever need to be load-bearing.
 
-**v1 makes 10–12% of all tool calls one-and-done** (12.7% of `run_command`
-specifically; 12.1% of the grants in `settings.json` — three views agreeing).
+**v1 makes ~10% of all tool calls one-and-done** (12.7% of `run_command`
+specifically — `run_command` is the narrower slice the 99 classifiable calls all
+fall under, 99 of 782 — and 12.1% of the grants in `settings.json`; three views
+agreeing on the same numerator, different denominators).
 
 ## What's in `run_command` in practice
 

@@ -153,9 +153,9 @@ does not model, so it works the other way:
 - **The rest of `args` is also fingerprinted, silently.** The classifier only
   justifies widening the key for `CommandLine`; it must not inherit the same
   breadth for adjacent fields. When a command classifies, the sticky key is
-  `safe:<program>` only if every other key in `args` is on an explicit,
-  audited list (`Cwd`, `WaitMsBeforeAsync`, and the `UNKEYED_FIELDS`
-  presentational fields, today); any other field — present or future,
+  `safe:<program>` only if every other key in `args` is `Cwd` or one of the
+  `UNKEYED_FIELDS` presentational fields (which already include
+  `WaitMsBeforeAsync`), today; any other field — present or future,
   `Env`, `Shell`, `Stdin`, anything a model or a later agy version adds —
   makes the call fall back to the full `args_fingerprint` as today. The
   measured `run_command` shape (`dev-docs/agy-tool-surface.md`) is the
@@ -212,8 +212,11 @@ promise not just the shape of a list.
 Programs that read and cannot write or execute, with flags:
 
 - Straightforward members: `ls`, `cat`, `head`, `tail`, `wc`, `file`, `stat`,
-  `pwd`, `du`, `df`, `date`, `which`. Candidates needing the per-flag review
-  before they join rather than after: `realpath`, `basename`, `dirname`.
+  `pwd`, `du`, `df`, `date`, `which`, `basename`, `dirname`. Of the original
+  shortlist, `realpath` is out outright (symlink resolution *is* the program —
+  defeatable by design; see `dev-docs/research/dp1-flag-tables.md`), as are
+  `sort` (`-o` writes) and `echo`/`uname`/`hostname`/`cmp`/`uniq` (out of v1
+  scope).
 - `grep`/`rg`-style tools: read-only, but "their flags change reach, not
   safety" is wrong as a blanket claim: `rg --pre CMD` executes a preprocessor
   on every match. They join only with a flag table that excludes the execution
@@ -366,14 +369,16 @@ are two and not one because they see different things:
 1. The existing `escapes_containment(&args)` over the raw payload. This already
    catches the shapes it always could — `Cwd` is in `PATH_FIELDS`, so a bare
    `ls` with no arguments is judged by its working directory on every matching
-   call. It cannot see a path *inside* `CommandLine`: `ls /etc/shadow` is one
-   opaque string to it.
+call. It cannot *extract a path field* from inside `CommandLine`:
+    `ls /etc/shadow` is one opaque string to it.
 2. A new check, an explicit **second conjunct at the honor site** in `decide`
    (where today only check 1 runs, `src/permission.rs:509-516`): when a
    widened-key candidate survives check 1, the current call's extracted paths
    are wrapped as a fresh `PATH_FIELDS`-keyed args value — so they inherit the
-   `outside_workspace` shape tests (including symlink resolution, which
-   `path_field_args` already does per `src/permission/path_rules.rs:111-125`)
+`outside_workspace` shape tests, including symlink resolution — which
+    `is_inside`/`resolve` already do (`src/permission/path_rules.rs:111-140`), not
+    `path_field_args`, which only *collects* strings under `PATH_FIELDS`
+    (`src/permission/path_rules.rs:161-169`)
    and the sensitive-pattern list for free — with every relative entry joined
    **against `Cwd` before** judgment. The join is load-bearing: with
    `Cwd=<workspace>/sub` and `ls link` where `link` is a symlink out of the
