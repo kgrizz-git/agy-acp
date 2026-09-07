@@ -381,8 +381,10 @@ are two and not one because they see different things:
    shell, running from `Cwd`, hits it. Only if both checks pass does the
    remembered allow apply; either failing falls through to the full prompt
    path exactly as today. An empty extraction is only acceptable when the
-Program declares that a no-operand call reads `Cwd` (which check 1 covers);
-   otherwise it is unclassifiable, never vacuously contained.
+   program declares that a no-operand call reads `Cwd` (which check 1 covers)
+   — for `ls`; for `cat`/`head`/`tail`/`wc` a zero-operand call reads stdin,
+   which the bridge does not see, so those are unclassifiable with no operands
+   just as with a bare `-`. Empty is never vacuously contained.
 3. **TOCTOU is the stated boundary, not a discovered one.** Both checks judge a
    path at authorize time; the program opens it later. A workspace symlink that
    points inside at check time can be swapped to `/etc` before `cat link` runs,
@@ -413,8 +415,10 @@ approval is exactly as sound as tool-level keying already is for `view_file`.)
   construction, tested explicitly so the property is pinned rather than
   inferred: `ls <<< x` (here-string), `ls =(id)` (process substitution),
   `ls ${=foo}` (word-splitting expansion), `ls *.zwc/*.old` (globs), a bare `*`
-  argument, a bare `-` operand (`cat -` is stdin, not a path — pinned), and
-  Unicode/non-ASCII tokens. **And the separator the earlier draft
+  argument, a bare `-` operand (`cat -` is stdin, not a path — pinned), a
+  **zero-operand** `cat`/`head`/`tail`/`wc` call (stdin read, same hole —
+  `ls` alone is fine because it reads `Cwd`, which is containment-covered) —
+  and Unicode/non-ASCII tokens. **And the separator the earlier draft
   missed: `ls\nrm target`, `ls\rrm`, and `ls\x0brm` are unclassifiable** — a
   newline is a zsh command separator, not whitespace, and was found by the
   final adversarial review.
@@ -429,7 +433,9 @@ approval is exactly as sound as tool-level keying already is for `view_file`.)
   passes and check 2 fails, not a unit test of the classifier alone); does
   *not* cover `rm x` (program not allowlisted); the fingerprint path is
   untouched for unclassifiable commands (`cat >x` still reprompts per exact
-  string). **Plus: an `ls` whose payload carries any key outside the audited
+  string). A bare `ls` whose `Cwd` is outside the workspace still prompts
+  (`Cwd` is a `PATH_FIELDS` entry, so check 1 judges it per call even with no
+  operands — the key omits `Cwd` precisely because the check does the scoping). **Plus: an `ls` whose payload carries any key outside the audited
   `run_command` allowlist — say a future `Env` or `Shell` field — falls back to
   the full fingerprint even though the command string classified**; this pins
   that classification only justifies the `safe:` key when the rest of the

@@ -135,17 +135,18 @@ jobs:
         # the failure is self-describing in the log, and upload the whole set.
         run: |
           LOGDIR="$HOME/.gemini/antigravity-cli/log"
-          if [ -d "$LOGDIR" ]; then
-            newest=$(ls -t "$LOGDIR"/cli-*.log | head -1)
+          newest=$(find "$LOGDIR" -name 'cli-*.log' -type f -print0 2>/dev/null \
+            | xargs -0 ls -t 2>/dev/null | head -1)
+          if [ -n "$newest" ] && [ -f "$newest" ]; then
             echo "=== newest agy log: $newest ==="
             tail -200 "$newest"
             tar -czf "$RUNNER_TEMP/agy-logs.tar.gz" -C "$HOME/.gemini/antigravity-cli" log
             echo "agy_logs=$RUNNER_TEMP/agy-logs.tar.gz" >> "$GITHUB_ENV"
           else
-            echo "no agy log directory at $LOGDIR"
+            echo "no agy cli-*.log found under $LOGDIR; nothing to upload"
           fi
       - name: Upload agy logs
-        if: failure() && steps.key.outputs.has_key == 'true'
+        if: failure() && steps.key.outputs.has_key == 'true' && env.agy_logs != ''
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: agy-logs-${{ github.run_id }}
