@@ -84,13 +84,16 @@ jobs:
         # with "Agent execution terminated due to error".
         #
         # Model-issuing tests call session/set_model with a slug from
-        # E2E_MODEL_ROSTER, rotated by E2E_MODEL_OFFSET (github.run_number), so
-        # consecutive runs spread GenerateRequestsPerDayPerProjectPerModel-
-        # FreeTier across distinct flash-low buckets. settings.json remains the
-        # floor for any test that does not pick a model (empty roster,
-        # error_paths). That field is keyed by display label, not slug (slug
-        # only works via --model / set_model), so the fallback still takes
-        # column 2. The roster carries column 1.
+        # E2E_MODEL_ROSTER, rotated by E2E_MODEL_OFFSET (github.run_number).
+        # This is an experimental mitigation for the observed
+        # GenerateRequestsPerDayPerProjectPerModel-FreeTier limit: DP3/OQ1 in
+        # plans/e2e-quota-rotation.md still need to establish the request/turn
+        # ratio, whether reasoning variants share a bucket, and whether a
+        # project-wide daily aggregate limits the benefit. settings.json
+        # remains the floor for any test that does not pick a model (empty
+        # roster, error_paths). That field is keyed by display label, not slug
+        # (slug only works via --model / set_model), so the fallback still
+        # takes column 2. The roster carries column 1.
         #
         # Rather than hardcode a version (the catalog drifts -- 3.5 was
         # dropped, 3.8 is now default), collect every `gemini-<ver>-flash-low`
@@ -161,7 +164,7 @@ jobs:
         run: |
           LOGDIR="$HOME/.gemini/antigravity-cli/log"
           newest=$(find "$LOGDIR" -name 'cli-*.log' -type f -print0 2>/dev/null \
-            | xargs -0 ls -t 2>/dev/null | head -1)
+            | xargs -0 -r ls -t 2>/dev/null | head -1)
           if [ -n "$newest" ] && [ -f "$newest" ]; then
             echo "=== newest agy log: $newest ==="
             tail -200 "$newest"

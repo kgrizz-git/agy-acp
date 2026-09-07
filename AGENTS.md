@@ -121,10 +121,13 @@ would be `0.2.0`.
    - Auth via `GEMINI_API_KEY` env var or macOS Keychain (`~/.gemini/antigravity-cli/settings.json`)
    - `cargo build --release` must have been run first
    - In CI, `E2E_MODEL_ROSTER` (comma-separated `gemini-*-flash-low` slugs) and
-     `E2E_MODEL_OFFSET` (`github.run_number`) assign a distinct model per
-     model-issuing test via `session/set_model`, so consecutive runs spread the
-     free-tier daily per-model quota. Unset locally, tests fall through to the
-     `settings.json` default. `error_paths` does not call the model.
+     `E2E_MODEL_OFFSET` (`github.run_number`) rotate model-issuing tests via
+     `session/set_model`; with at least two roster entries, those tests use
+     different models in a run. This is an experimental mitigation for the
+     observed daily per-model quota: the request-per-turn ratio and any
+     project-wide daily aggregate remain under investigation. Unset locally,
+     tests fall through to the `settings.json` default. `error_paths` does not
+     call the model.
 
 CI (`ci.yml`) enforces `cargo build`, unit tests, the ignored I/O tier
 (`cargo test -- --ignored --skip e2e`), clippy (`-W clippy::all -D clippy::all`;

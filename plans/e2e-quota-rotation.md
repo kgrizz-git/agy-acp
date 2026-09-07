@@ -32,38 +32,40 @@ Two facts matter for the design:
   `quotaId` says `PerProjectPerModel-FreeTier`. Distinct flash models (`3.6`,
   `3.7`, `3.8`) are separate buckets of 20/day each. **Caveat:** the quota that
   fired names the bare `gemini-3.6-flash` slug, but the workflow's awk regex
-  (`.github/workflows/e2e.yml:101-102`) selects `gemini-*-flash-low`, the
+  (`.github/workflows/e2e.yml:112-115`) selects `gemini-*-flash-low`, the
   reduced-reasoning variant. Whether `-flash` and `-flash-low` share one quota
   bucket or are counted separately is unverified — Google could meter by base
   model or by exact slug. The OQ1 probe should include a same-base different-
   reasoning-effort pair to settle this.
-- **Per day, not per minute.** `.github/workflows/e2e.yml:121-126` explains that
+- **Per day, not per minute.** `.github/workflows/e2e.yml:147-154` explains that
   `--test-threads=1` was added for the *per-minute* free-tier Flash quota
   ("a handful of requests per minute"). That is a real but different constraint;
   this daily ceiling is what failed. Nothing serial or retried changes it.
 
-The four e2e tests (`src/e2e_tests.rs`) issue real agy turns against the model:
+Before this branch's implementation, the four e2e tests on `main` issued real
+agy turns against the model:
 
 | test | turns | calls the model? |
 |---|---|---|
-| `test_e2e_agy_acp_full_round_trip` (`:27`) | 1 | yes |
-| `test_e2e_error_paths` (`:407`) | 0 | no — unknown-session and unknown-method errors are answered locally |
-| `test_e2e_multi_turn` (`:286`) | 2 | yes |
-| `test_e2e_session_load` (`:338`) | 2 | yes |
+| `test_e2e_agy_acp_full_round_trip` (`main:src/e2e_tests.rs:27`) | 1 | yes |
+| `test_e2e_error_paths` (`main:src/e2e_tests.rs:407`) | 0 | no — unknown-session and unknown-method errors are answered locally |
+| `test_e2e_multi_turn` (`main:src/e2e_tests.rs:286`) | 2 | yes |
+| `test_e2e_session_load` (`main:src/e2e_tests.rs:338`) | 2 | yes |
 
 So a clean run is **5 model turns**, against a 20/day bucket. Three PRs in one
 day (~15 turns) approached the ceiling; the run that failed crossed it. Because
-all five turns currently land on the *one* model the configure step pins
-(`.github/workflows/e2e.yml:80-113`), a single busy day exhausts the bucket.
+all five turns landed on the *one* model the old configure step pinned
+(`main:.github/workflows/e2e.yml:80-113`), a single busy day exhausted the bucket.
 
 ## Decisions
 
 ### DP1 — reduce to three model turns by folding `multi_turn` into `session_load`
 
 The two-turn tests overlap in exactly the assertion that costs each an extra
-turn. `session_load`'s second prompt (`src/e2e_tests.rs:387`) already proves
+turn. The old `session_load` second prompt (`main:src/e2e_tests.rs:387`) already proved
 conversation continuity through the same `--conversation` binding that
-`multi_turn` exists to test (`:317-330`); `session_load` just does not assert
+`multi_turn` existed to test (`main:src/e2e_tests.rs:317-330`); `session_load`
+just did not assert
 that the model *remembers* the earlier turn. Folding the memory assertion in:
 
 - Keep `session_load` at its two turns, but make turn 1 plant a token (as
@@ -102,7 +104,7 @@ Example with 3 models (A, B, C):
 | 1 | B | C |
 | 2 | C | A |
 
-After 3 runs: A 3, B 3, C 2 — nearly even. Deterministic from the run number,
+After 3 runs: A 3, B 3, C 3 — even. Deterministic from the run number,
 so a failure is reproducible from the CI run id.
 
 **Edge cases by roster size:**
@@ -120,23 +122,25 @@ so a failure is reproducible from the CI run id.
 
 Mechanism, using an existing code path rather than new infra:
 
-- The configure step already queries the live model list
-  (`.github/workflows/e2e.yml:101-102`). Extend it to collect the **slug ids**
+- The configure step queries the live model list
+  (`.github/workflows/e2e.yml:104-115`) and collects the **slug ids**
   (column 1, the only value valid as `--model`/`set_model`), not just the single
-  newest display label, and expose them as an ordered list plus the run offset
+  newest display label, exposing them as an ordered list plus the run offset
   (`E2E_MODEL_ROSTER`, `E2E_MODEL_OFFSET=${{ github.run_number }}`).
-- Each model-issuing test selects a distinct model before its first prompt via
+- Each model-issuing test selects a model before its first prompt via
   `session/set_model` (accepted per `AGENTS.md` "Both `session/set_model` and
   `session/setConfigOption` are accepted"), so the adapter passes `--model <id>`.
-  If the roster is empty, the test does not call `set_model`.
+  With at least two roster entries the tests select distinct models in a run.
+  If the roster is empty, a test does not call `set_model`.
 
 The existing `settings.json` fallback stays as the model-selection floor for
 anything that does not pick a model explicitly. Note: `settings.json` is keyed
 by display label (column 2 of `agy models`), while `--model` accepts the slug
 (column 1). The configure step currently writes the label; it must continue to
 do so for the fallback path, while the roster env var carries slugs. The roster
-query must keep its Gemini-family guard (`.github/workflows/e2e.yml:98-99`,
-`gemini-<ver>-flash-low`) so a future non-free row is never selected.
+query must keep its Gemini-family guard
+(`.github/workflows/e2e.yml:112-115`, `gemini-<ver>-flash-low`) so a future
+non-free row is never selected.
 
 ### DP3 — discover the request-per-turn ratio before committing to a number
 
@@ -191,13 +195,21 @@ one; surface it in a comment only if the pin gets touched for another reason.
 
 ## What lands with this plan
 
+Implemented experimentally in this PR:
+
 1. `src/e2e_tests.rs`: fold `multi_turn`'s memory assertion into
    `session_load`, delete `test_e2e_multi_turn`; add per-test model selection via
    `session/set_model` reading an env-provided roster.
 2. `.github/workflows/e2e.yml`: extend the configure step to emit the ordered
    flash slug-id roster; keep the `settings.json` fallback.
-3. A debug run (DP3) recording requests-per-turn, and the OQ1 probe, before the
-   final turn/model assignment is considered settled.
+
+Still required before this plan is complete:
+
+3. A debug run (DP3) recording requests-per-turn, and the OQ1 probe. Until
+   those establish the actual bucket boundaries and any aggregate ceiling, the
+   workflow and `AGENTS.md` label rotation as experimental, this plan remains
+   in `plans/`, and the TODO entry remains active. The probes may require
+   changing or removing the provisional assignment.
 
 ## TODO discipline
 
