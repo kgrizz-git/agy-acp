@@ -225,14 +225,17 @@ Programs that read and cannot write or execute, with flags:
   track the union conservatively — a flag allowed only when it is safe on
   *both* dialects — and the DP1 ruling names the dialect per entry.
 - Starting flag table, for `ls`: `-l -a -A -h -d -F -p -R -r -S -t -1 -C
-  --color --group-directories-first --time-style=STYLE` — display and ordering
-  only. **Symlink-following flags (`-H`, `-L`) are excluded**, because they
-  follow operands to their targets in the exact case the Cwd-relative
-  canonicalize check adjudicates: `ls -L link` would dress a read of wherever
-  `link` points up as an `ls` the user already approved. Symlink-following flags
-  belong to no v1 program. Every entry is verified against both the GNU and BSD
-  man pages before landing; each other program needs the same per-flag
-  verification before it ships — the DP1 ruling *is* this table.
+  -i -n -v -P --color --group-directories-first` — display and ordering only.
+  **Symlink-following flags (`-H`, `-L`) are excluded**, because they follow
+  operands to their targets in the exact case the Cwd-relative canonicalize
+  check adjudicates: `ls -L link` would dress a read of wherever `link` points
+  up as an `ls` the user already approved. Symlink-following flags belong to no
+  v1 program. The full per-program ruling for every program below — including
+  the Darwin-verified tables, the excluded flags with reasons, and the
+  implementation-time open items — is `dev-docs/research/dp1-flag-tables.md`,
+  synthesized from two independent research memos (`dp1-flag-tables-stepfun.md`,
+  `dp1-flag-tables-glm5.md` in the same directory) and spot-verified against
+  the local man pages on this machine.
 
 ### What the sticky key becomes
 
@@ -421,11 +424,11 @@ approval is exactly as sound as tool-level keying already is for `view_file`.)
 
 ## Decision points and open questions
 
-- **DP1 — Allowlist membership and flag policy.** Resolved in shape: per-program
-  flag *allowlist* with declared arity (unknown flag → unclassifiable), and the
-  starting program list with the `ls` table above. Still open at implementation
-  time: per-program verification against both GNU and BSD man pages, and the
-  `grep`/`rg` ruling once their exec flags are enumerated.
+- **DP1 — Allowlist membership and flag policy.** Resolved: per-program flag
+  allowlist with declared arity (unknown flag → unclassifiable), tables in
+  `dev-docs/research/dp1-flag-tables.md` (synthesis of two independent memos,
+  spot-verified against local man pages). The unresolved list at the end of
+  that file is the implementation checklist.
 - **DP2 — `git`.** `git status`/`log`/`diff`/`show` are read-only and the most
   common commands a coding agent runs (~40 of 223 grants on this machine), but
   `git` is one binary with dozens of subcommands and several write. Exclude in
