@@ -120,13 +120,15 @@ unverified on Darwin), `-C` (writes `magic.mgc`), `-S`/`--no-sandbox`.
 | flag | arity | value-is-path? |
 |------|-------|----------------|
 | `-l -r -s -x -F -n -q -h` | 0 | — |
-| `-f` | 1 | no (format string) |
 | `-t` | 1 | no (time format) |
 
-Notable exclusion: `-L` (dereference). Cross-dialect trap documented: GNU `stat
--f` means `--file-system` — same argv, different semantics. The Darwin table is
-correct for this host; a Homebrew-shadowed GNU `stat` would break it (see
-unresolved #2).
+`-f` is **OUT**. On Darwin it is the arity-1 format string, but the plan's DP6
+already concedes PATH shadowing, and on a GNU shadow `-f` becomes arity 0
+(`--file-system`); the Darwin parser would then swallow the next operand as the
+"format" and skip containment on it. No value form is safe on both dialects,
+so the flag drops.
+
+Notable exclusion: `-L` (dereference).
 
 ### pwd
 
@@ -146,18 +148,24 @@ Notable exclusions: `-H -L` (symlink), GNU-only `--files0-from`/`-X`.
 | flag | arity | value-is-path? |
 |------|-------|----------------|
 | `-a -c -h -H -k -m -g -b -P -i -I -l -n` | 0 | — |
-| `-T` | 1 | no (filesystem type filter on Darwin) |
 
-Notable exclusions: `-t` under any per-dialect table that can't distinguish GNU
-from BSD (cross-dialect asymmetry).
+`-T` is **OUT**: on Darwin it is `-T type` (arity 1, filesystem filter); on
+coreutils it is arity 0 ("print filesystem type"). No form has the same arity
+and meaning on both, so the flag can't live in one table.
+
 
 ### date
 
 | flag | arity | value-is-path? |
 |------|-------|----------------|
 | `-u -R -j -n` | 0 | — |
-| `-I` | 0 or 1 | no |
+| `-I` | 1, attached-only (`-IFMT`) | no |
 | `-z -v` | 1 | no |
+
+`-I[FMT]` is Darwin's ISO-8601 shorthand (verified against the local man
+page). The value is optional when attached and there is no separate-token form;
+a bare `-I` followed by a space and an operand is unclassifiable in v1.
+
 
 `+format` operand allowed (not a path). Bare `date` without `-j` is
 unclassifiable — on BSD an unflagged two-field operand can attempt to set the
@@ -224,9 +232,10 @@ e.g. Darwin `echo` has only `-n`, no `-e`/`-E`).
    `/usr/bin`. The tables assume Darwin userland at resolve time. Mitigation is
    the plan's per-platform note; verify at implementation time what `PATH` the
    spawned agy actually inherits.
-2. **`stat -f` under GNU shadowing**: same argv means format on Darwin and
-   `--file-system` on GNU; if Homebrew `stat` wins, the table's `-f` line is
-   wrong. Test in implementation against the real spawn environment.
+2. **Resolved in the table — `stat -f` excluded entirely.** Darwin's arity-1
+   format-string `-f` collides with GNU's arity-0 `--file-system` under PATH
+   shadowing; no single table row is safe on both, so it is out. `df -T` is out
+   for the same structural reason (arity mismatch across dialects).
 3. **`tail -r`** (Darwin reverse order): safe-looking, glm excluded, stepfun
    silent. Omitted; add only on evidence.
 4. **`tail -f/-F`**: re-include only if "blocking read" is an acceptable

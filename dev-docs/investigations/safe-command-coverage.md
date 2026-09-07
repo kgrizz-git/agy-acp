@@ -31,10 +31,18 @@ agent (opencode/mimo-v2.5-free) on 2026-09-07:
 |--------|------:|-------|
 | Total steps (10 sessions) | 1,070 | — |
 | Tool-call steps | 988 | 100% |
-| `run_command` | 782 | 79.1% of tool calls |
-| Plan-family classifiable (`ls`/`cat`/`head`/`wc` and kin, v1 rules) | 99 | **10.0% of all tool calls** |
+| `run_command` (regex-derived; see method note below) | 782 | 79.1% of tool calls |
+| Plan-family classifiable (`ls`/`cat`/`head`/`wc` and kin, v1 rules; regex-derived) | 99 | **10.0% of all tool calls** |
 | Already tool-level keyed today (view_file, replace_file_content, grep_search, list_dir) | ≥170 | ≥17.2% |
 | Everything else (git, pipes, chains, redirects, quoted args, other programs, schedule) | ≥719 | ≥72.8% |
+
+**Every number in that table except the step counts is a keyword/regex estimate.**
+The DBs are protobuf-blobs in a column, not structured tool-call records — a
+`782` or `99` count comes from finding `"CommandLine":"` in decoded text, which
+can also match a model *quoting* a command in prose. Flags are about scale, not
+precision: 12% would become 11% or 13% under structured parsing, which changes
+nothing the plan does with it. A follow-up pass that parses the steps table
+structurally is the upgrade path if the numbers ever need to be load-bearing.
 
 **v1 makes 10–12% of all tool calls one-and-done** (12.7% of `run_command`
 specifically; 12.1% of the grants in `settings.json` — three views agreeing).

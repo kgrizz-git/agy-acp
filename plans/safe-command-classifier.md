@@ -169,7 +169,11 @@ does not model, so it works the other way:
   **with a declared arity**: 0 (bare switch), or 1 with its value extracted as a
   candidate path, in all spellings (`--flag=value` attached, `--flag value`
   two-token, `-oFILE` attached, `-o FILE` two-token) — or an operand. Every
-  operand is extracted as a candidate path. **A token the tokenizer cannot
+  operand is extracted as a candidate path. **A token equal to `-` alone is
+  never classified**: to `cat`, `head`, `tail`, `wc`, and friends it means
+  stdin, and the bridge does not know what stdin of a spawned command holds —
+  opaque to containment. `-` is flagged out as unclassifiable, and the test
+  suite pins it. **A token the tokenizer cannot
   account for under one of those heads makes the whole command unclassifiable.**
   Without this, `ls --file=/etc/x` classifies while no path ever reaches the
   containment check: unknown flag, unknown arity, or an unextracted value is
@@ -409,7 +413,8 @@ approval is exactly as sound as tool-level keying already is for `view_file`.)
   construction, tested explicitly so the property is pinned rather than
   inferred: `ls <<< x` (here-string), `ls =(id)` (process substitution),
   `ls ${=foo}` (word-splitting expansion), `ls *.zwc/*.old` (globs), a bare `*`
-  argument, and Unicode/non-ASCII tokens. **And the separator the earlier draft
+  argument, a bare `-` operand (`cat -` is stdin, not a path — pinned), and
+  Unicode/non-ASCII tokens. **And the separator the earlier draft
   missed: `ls\nrm target`, `ls\rrm`, and `ls\x0brm` are unclassifiable** — a
   newline is a zsh command separator, not whitespace, and was found by the
   final adversarial review.
