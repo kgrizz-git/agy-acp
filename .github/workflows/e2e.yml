@@ -96,17 +96,44 @@ jobs:
         # takes column 2. The roster carries column 1.
         #
         # Rather than hardcode a version (the catalog drifts -- 3.5 was
-        # dropped, 3.8 is now default), collect every `gemini-flash-<ver>-low`
+        # dropped, 3.8 is now default), collect every `gemini-<ver>-flash-low`
         # from the live `agy models` list. Constrain the match to the Gemini
-        # family so a future non-Gemini or otherwise non-free row can never be
-        # auto-selected. Fall back to a known-good label if the query is empty.
+        # Flash family so a future non-Gemini, Pro (e.g. gemini-3.1-pro-low),
+        # or otherwise non-free row can never be auto-selected. Fall back to
+        # a known-good label if the query is empty.
         env:
           GEMINI_API_KEY: ${{ secrets.E2E_GEMINI_API_KEY }}
         run: |
           mkdir -p "$HOME/.gemini/antigravity-cli"
           SETTINGS="$HOME/.gemini/antigravity-cli/settings.json"
-          MODELS_TSV=$(agy models 2>/dev/null || true)
-          # Constrain the match to the Gemini Flash family (`gemini-flash-<ver>-low`),
+          FALLBACK_LABEL="Gemini 3.6 Flash (Low)"
+          # Write the fallback settings.json FIRST: `agy models` skips
+          # fetchAvailableModels ("Auth mode is unspecified") and prints an
+          # empty list when no cli settings exist yet (verified 2026-09-08,
+          # agy 1.1.26/1.1.27: bare GEMINI_API_KEY + no settings.json →
+          # empty; same key + this file → full list). jq (guaranteed on the
+          # runner) builds the JSON with correct escaping. Fail loudly rather
+          # than leave a truncated/empty settings.json, which would silently
+          # drop agy back to its unrunnable default model.
+          jq -n --arg m "$FALLBACK_LABEL" \
+            '{modelProvider: "gemini", model: $m}' >"$SETTINGS"
+          test -s "$SETTINGS"
+          # Keep stderr: it is what distinguishes "command failed" from "no
+          # slug matched the regex". (The "Fetching available models..."
+          # banner always lands there too — expected noise, not an error.)
+          # The `|| true` is load-bearing under `bash -e`: `agy models`
+          # exits 1 when sign-in is required, and without it the step would
+          # die here with no message.
+          AGY_MODELS_STDERR=$(mktemp)
+          MODELS_TSV=$(agy models 2>"$AGY_MODELS_STDERR" || true)
+          MODEL_LINES=$(printf '%s\n' "$MODELS_TSV" | grep -c . || true)
+          echo "agy models returned $MODEL_LINES non-empty line(s) on stdout"
+          if [ -s "$AGY_MODELS_STDERR" ]; then
+            echo "--- agy models stderr ---"
+            cat "$AGY_MODELS_STDERR"
+          fi
+          rm -f "$AGY_MODELS_STDERR"
+          # Constrain the match to the Gemini Flash family (`gemini-<ver>-flash-low`),
           # not any slug ending `-low`, so a future non-Gemini or otherwise
           # non-free row can never be auto-selected. Sort once so the roster
           # order (and hence the run_number rotation) is stable even if agy
@@ -114,34 +141,43 @@ jobs:
           # line starts with the id, and a version sort keeps 3.10 after 3.9.
           MODELS_SORTED=$(printf '%s\n' "$MODELS_TSV" | sort -V)
           ROSTER=$(printf '%s\n' "$MODELS_SORTED" | awk -F'\t' \
-            '$1 ~ /^gemini-flash-[0-9.]+-low$/ { s = (s ? s "," $1 : $1) } END { print s }')
+            '$1 ~ /^gemini-[0-9.]+-flash-low$/ { s = (s ? s "," $1 : $1) } END { print s }')
+          # Newest first: older versions get dropped (3.5 was), so the live
+          # label prefers the highest version over the hardcoded fallback.
           MODEL_LABEL=$(printf '%s\n' "$MODELS_SORTED" | awk -F'\t' \
-            '$1 ~ /^gemini-flash-[0-9.]+-low$/ { print $2; exit }')
+            '$1 ~ /^gemini-[0-9.]+-flash-low$/ { label = $2 } END { print label }')
           if [ -z "$ROSTER" ]; then
-            echo "error: e2e model roster empty; cannot proceed without model slugs" >&2
-            exit 1
-          fi
-          # Defensive only: a non-empty roster means the regex matched at least
-          # one row, so an empty label is a malformed (label-less) TSV row, not
-          # catalog drift — drift exits above.
-          if [ -z "$MODEL_LABEL" ]; then
-            echo "warning: matched model row had no display label; using fallback" >&2
-            MODEL_LABEL="Gemini 3.6 Flash (Low)"
-          fi
-          n=$(printf '%s\n' "$ROSTER" | awk -F, '{ print NF }')
-          if [ "$n" -eq 1 ]; then
-            echo "warning: e2e model roster has one slug ($ROSTER); rotation is a no-op" >&2
+            # Warn and continue on the settings.json default written above:
+            # the roster query can still come back empty (auth drift, catalog
+            # rename), and failing hard would red every run while teaching
+            # nothing. Rotation engages whenever the list is non-empty; these
+            # warnings make a dormant rotation visible instead of silent.
+            echo "warning: e2e model roster empty; tests will use settings.json default" >&2
+            MODEL_LABEL="$FALLBACK_LABEL"
+          else
+            n=$(printf '%s\n' "$ROSTER" | awk -F, '{ print NF }')
+            if [ "$n" -eq 1 ]; then
+              echo "warning: e2e model roster has one slug ($ROSTER); rotation is a no-op" >&2
+            fi
+            if [ -z "$MODEL_LABEL" ]; then
+              # Defensive only: a non-empty roster means the regex matched at
+              # least one row, so an empty label is a malformed (label-less)
+              # TSV row, not catalog drift.
+              echo "warning: matched model row had no display label; using fallback" >&2
+              MODEL_LABEL="$FALLBACK_LABEL"
+            else
+              # The query just proved this label exists, so prefer it over the
+              # hardcoded fallback, which rots as the catalog drifts.
+              echo "refreshing e2e fallback model to live label: $MODEL_LABEL"
+              jq -n --arg m "$MODEL_LABEL" \
+                '{modelProvider: "gemini", model: $m}' >"$SETTINGS"
+              test -s "$SETTINGS"
+            fi
           fi
           echo "pinning e2e fallback model: $MODEL_LABEL"
-          echo "e2e model roster: $ROSTER"
+          echo "e2e model roster: ${ROSTER:-<empty>}"
           echo "E2E_MODEL_ROSTER=$ROSTER" >> "$GITHUB_ENV"
           echo "E2E_MODEL_OFFSET=${{ github.run_number }}" >> "$GITHUB_ENV"
-          # jq (guaranteed on the runner) builds the JSON with correct escaping.
-          # Fail loudly rather than leave a truncated/empty settings.json, which
-          # would silently drop agy back to its unrunnable default model.
-          jq -n --arg m "$MODEL_LABEL" \
-            '{modelProvider: "gemini", model: $m}' >"$SETTINGS"
-          test -s "$SETTINGS"
       - name: Build (release)
         if: steps.key.outputs.has_key == 'true'
         run: cargo build --release --verbose

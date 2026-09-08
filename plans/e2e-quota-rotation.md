@@ -32,12 +32,12 @@ Two facts matter for the design:
   `quotaId` says `PerProjectPerModel-FreeTier`. Distinct flash models (`3.6`,
   `3.7`, `3.8`) are separate buckets of 20/day each. **Caveat:** the quota that
   fired names the bare `gemini-3.6-flash` slug, but the workflow's awk regex
-  (`.github/workflows/e2e.yml:112-115`) selects `gemini-*-flash-low`, the
+  (`.github/workflows/e2e.yml:143-148`) selects `gemini-*-flash-low`, the
   reduced-reasoning variant. Whether `-flash` and `-flash-low` share one quota
   bucket or are counted separately is unverified — Google could meter by base
   model or by exact slug. The OQ1 probe should include a same-base different-
   reasoning-effort pair to settle this.
-- **Per day, not per minute.** `.github/workflows/e2e.yml:147-154` explains that
+- **Per day, not per minute.** `.github/workflows/e2e.yml:190-197` explains that
   `--test-threads=1` was added for the *per-minute* free-tier Flash quota
   ("a handful of requests per minute"). That is a real but different constraint;
   this daily ceiling is what failed. Nothing serial or retried changes it.
@@ -122,11 +122,20 @@ so a failure is reproducible from the CI run id.
 
 Mechanism, using an existing code path rather than new infra:
 
-- The configure step queries the live model list
-  (`.github/workflows/e2e.yml:104-115`) and collects the **slug ids**
-  (column 1, the only value valid as `--model`/`set_model`), not just the single
-  newest display label, exposing them as an ordered list plus the run offset
-  (`E2E_MODEL_ROSTER`, `E2E_MODEL_OFFSET=${{ github.run_number }}`).
+- The configure step writes the fallback `settings.json` first and then
+  queries the live model list (`.github/workflows/e2e.yml:106-148`). The
+  order matters: `agy models` skips fetchAvailableModels ("Auth mode is
+  unspecified") and prints an empty list when no cli settings exist yet, so
+  querying before writing always yields an empty roster under a bare
+  `GEMINI_API_KEY` (spike 2026-09-08, agy 1.1.26/1.1.27). With the file
+  present the same key lists the full catalog, which keeps the
+  `gemini-<ver>-flash-*` slug order (3.6/3.7/3.8 × high/medium/low plus
+  `gemini-3.1-pro-*`, 11 rows) — there was no `gemini-flash-<ver>-low`
+  rename. The step collects the **slug ids** (column 1, the only value valid
+  as `--model`/`set_model`), not just the single newest display label,
+  exposing them as an ordered list plus the run offset (`E2E_MODEL_ROSTER`,
+  `E2E_MODEL_OFFSET=${{ github.run_number }}`). An empty roster warns and
+  falls through to the fallback instead of failing the run.
 - Each model-issuing test selects a model before its first prompt via
   `session/set_model` (accepted per `AGENTS.md` "Both `session/set_model` and
   `session/setConfigOption` are accepted"), so the adapter passes `--model <id>`.
@@ -139,7 +148,7 @@ by display label (column 2 of `agy models`), while `--model` accepts the slug
 (column 1). The configure step currently writes the label; it must continue to
 do so for the fallback path, while the roster env var carries slugs. The roster
 query must keep its Gemini-family guard
-(`.github/workflows/e2e.yml:112-117`, `gemini-flash-<ver>-low`) so a future
+(`.github/workflows/e2e.yml:143-148`, `gemini-<ver>-flash-low`) so a future
 non-free row is never selected.
 
 ### DP3 — discover the request-per-turn ratio before committing to a number
