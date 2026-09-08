@@ -30,7 +30,7 @@ The few things worth picking up next. Each is a pointer; the detail lives below.
 
 Mostly done on 2026-08-30, against the binary built from `11e2b48` and installed
 to `~/.local/bin/agy-acp`. Driven through Paseo 0.6.1 as a real `agy` agent
-(`gemini-3.7-flash-low`) in a scratch workspace.
+(`gemini-flash-3.7-low`) in a scratch workspace.
 
 Confirmed end to end, by checking the filesystem rather than trusting the
 transcript: the permission bridge, `run_command` (`rm` deleted its file),
