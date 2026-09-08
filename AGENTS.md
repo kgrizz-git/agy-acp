@@ -127,7 +127,9 @@ would be `0.2.0`.
      observed daily per-model quota: the request/turn ratio and any
      project-wide daily aggregate remain under investigation. Unset locally,
      tests fall through to the `settings.json` default. `error_paths` does not
-     call the model.
+     call the model. A failed turn sleeps 60s and retries once — per-minute
+     429s carry ~37s retryDelay, so transient failures clear; daily 429s fail
+     again fast, with a hint pointing at the agy log.
    - Local runs: `scripts/e2e-local.sh [filter] [args...]` sources the token
      from `.env.e2e.local` (gitignored) and runs everything under a throwaway
      `HOME`, so the real `~/.gemini` state (OAuth login, settings, session

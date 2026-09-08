@@ -93,9 +93,8 @@ fn pick_model_from_trims_and_drops_empty_tokens() {
 #[test]
 #[ignore]
 fn test_e2e_agy_acp_full_round_trip() {
-    use std::io::{BufRead, BufReader, Write};
+    use std::io::BufReader;
     use std::process::{Command, Stdio};
-    use std::time::Duration;
 
     if !prepare_auth() {
         return;
@@ -145,45 +144,24 @@ fn test_e2e_agy_acp_full_round_trip() {
 
     maybe_set_model(&mut stdin, &mut reader, session_id, 0, 3);
 
-    let prompt_msg = format!(
-        r#"{{"jsonrpc":"2.0","id":4,"method":"session/prompt","params":{{"sessionId":"{}","prompt":[{{"type":"text","text":"Reply with exactly one word: PONG"}}]}}}}"#,
-        session_id
+    let (notification_text, resp) = send_prompt_wait(
+        &mut stdin,
+        &mut reader,
+        4,
+        session_id,
+        "Reply with exactly one word: PONG",
     );
-    writeln!(stdin, "{}", prompt_msg).unwrap();
-    stdin.flush().unwrap();
-
-    let deadline = std::time::Instant::now() + Duration::from_secs(120);
-    let mut got_notification = false;
-    let mut response_text = String::new();
-    loop {
-        if std::time::Instant::now() > deadline {
-            panic!("Timed out waiting for agy-acp response");
-        }
-        let mut line = String::new();
-        reader.read_line(&mut line).unwrap();
-        if line.is_empty() {
-            std::thread::sleep(Duration::from_millis(100));
-            continue;
-        }
-        let msg: Value = serde_json::from_str(line.trim()).unwrap();
-        if msg.get("method") == Some(&json!("session/update")) {
-            got_notification = true;
-            // Accumulate: the answer arrives as deltas, and the last one is often
-            // just a newline. Overwriting made the assertion below depend on how
-            // the model happened to chunk its reply.
-            response_text.push_str(agent_text(&msg));
-        }
-        if msg.get("id") == Some(&json!(4)) {
-            assert!(msg["error"].is_null(), "Got error: {}", msg["error"]);
-            assert_eq!(msg["result"]["stopReason"], "end_turn");
-            break;
-        }
-    }
+    assert!(resp["error"].is_null(), "Got error: {}", resp["error"]);
+    assert_eq!(resp["result"]["stopReason"], "end_turn");
 
     drop(stdin);
     let _ = child.wait();
 
-    assert!(got_notification, "Expected session/update notification");
+    assert!(
+        notification_text.is_some(),
+        "Expected session/update notification"
+    );
+    let response_text = notification_text.unwrap_or_default();
     let lower = response_text.to_lowercase();
     assert!(
         lower.contains("pong"),
@@ -341,6 +319,30 @@ fn send_recv_id(
     }
 }
 
+/// Attempts for one model turn: the first try plus one retry.
+const TURN_ATTEMPTS: u32 = 2;
+const _: () = assert!(TURN_ATTEMPTS >= 1);
+
+/// Delay before resending a failed turn. Captured per-minute 429s carry
+/// `retryDelay ~37s`, so 60s clears the 5/min bucket; daily-quota 429s fail
+/// again just as fast, since 429s return in seconds.
+const TURN_RETRY_DELAY_SECS: u64 = 60;
+
+/// Decide whether a failed turn is worth resending. Sleeps before returning
+/// true. Always logs, so a retried turn is visible in the test output; on the
+/// final failure, points at the agy log, which names the quotaId behind a 429.
+fn await_turn_retry(err: &Value, attempts_left: u32) -> bool {
+    use std::time::Duration;
+    if attempts_left == 0 {
+        eprintln!("[e2e] turn failed after retry; not retrying: {err}");
+        eprintln!("[e2e] hint: a 429 names its quotaId in the agy log (CI: agy-logs artifact)");
+        return false;
+    }
+    eprintln!("[e2e] turn error, retrying once after {TURN_RETRY_DELAY_SECS}s: {err}");
+    std::thread::sleep(Duration::from_secs(TURN_RETRY_DELAY_SECS));
+    true
+}
+
 fn send_prompt_wait(
     stdin: &mut std::process::ChildStdin,
     reader: &mut std::io::BufReader<std::process::ChildStdout>,
@@ -351,35 +353,49 @@ fn send_prompt_wait(
     use std::io::{BufRead, Write};
     use std::time::Duration;
 
-    let msg = format!(
-        r#"{{"jsonrpc":"2.0","id":{},"method":"session/prompt","params":{{"sessionId":"{}","prompt":[{{"type":"text","text":"{}"}}]}}}}"#,
-        id, session_id, text
-    );
-    writeln!(stdin, "{}", msg).unwrap();
-    stdin.flush().unwrap();
-
-    let deadline = std::time::Instant::now() + Duration::from_secs(120);
-    // Accumulated, not overwritten -- see the round-trip test above.
-    let mut notification_text: Option<String> = None;
+    let mut attempts_left = TURN_ATTEMPTS - 1;
     loop {
-        if std::time::Instant::now() > deadline {
-            panic!("Timed out");
+        let msg = format!(
+            r#"{{"jsonrpc":"2.0","id":{},"method":"session/prompt","params":{{"sessionId":"{}","prompt":[{{"type":"text","text":"{}"}}]}}}}"#,
+            id, session_id, text
+        );
+        // Resend under the same id on retry: the error response was already
+        // consumed, so nothing is ambiguous on the wire.
+        writeln!(stdin, "{}", msg).unwrap();
+        stdin.flush().unwrap();
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(120);
+        // Accumulated, not overwritten: the answer arrives as deltas, and the
+        // last one is often just a newline. Overwriting would make assertions
+        // depend on how the model happened to chunk its reply.
+        let mut notification_text: Option<String> = None;
+        let resp = loop {
+            if std::time::Instant::now() > deadline {
+                panic!("Timed out");
+            }
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            if line.is_empty() {
+                std::thread::sleep(Duration::from_millis(100));
+                continue;
+            }
+            let msg: Value = serde_json::from_str(line.trim()).unwrap();
+            if msg.get("method") == Some(&json!("session/update")) {
+                notification_text
+                    .get_or_insert_with(String::new)
+                    .push_str(agent_text(&msg));
+            }
+            if msg.get("id") == Some(&json!(id)) {
+                break msg;
+            }
+        };
+        if resp["error"].is_null() {
+            return (notification_text, resp);
         }
-        let mut line = String::new();
-        reader.read_line(&mut line).unwrap();
-        if line.is_empty() {
-            std::thread::sleep(Duration::from_millis(100));
-            continue;
+        if !await_turn_retry(&resp["error"], attempts_left) {
+            return (notification_text, resp);
         }
-        let msg: Value = serde_json::from_str(line.trim()).unwrap();
-        if msg.get("method") == Some(&json!("session/update")) {
-            notification_text
-                .get_or_insert_with(String::new)
-                .push_str(agent_text(&msg));
-        }
-        if msg.get("id") == Some(&json!(id)) {
-            return (notification_text, msg);
-        }
+        attempts_left -= 1;
     }
 }
 
