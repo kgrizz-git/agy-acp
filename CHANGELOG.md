@@ -135,6 +135,11 @@ of its own yet, so everything below is unreleased.
   HOME from a `.env.e2e.local` token. See
   plans/completed/e2e-quota-rotation.md. (PR #19)
 
+- E2e turns retry once after a 60s sleep. Per-minute 429s carry a ~37s
+  retryDelay, so the transient class usually clears on the second attempt;
+  daily-quota 429s fail again just as fast, with a hint pointing at the agy log.
+  (PR #19)
+
 ### Fixed
 
 - `AGY_ACP_AUTO_ALLOW=none` no longer discards `AGY_ACP_SENSITIVE_PATTERNS`. The
