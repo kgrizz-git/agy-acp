@@ -331,6 +331,14 @@ const TURN_RETRY_DELAY_SECS: u64 = 60;
 /// Decide whether a failed turn is worth resending. Sleeps before returning
 /// true. Always logs, so a retried turn is visible in the test output; on the
 /// final failure, points at the agy log, which names the quotaId behind a 429.
+///
+/// The retry is deliberately blind to the error text: a failed turn surfaces
+/// as `agy failed: <opaque agy stderr>`, which often omits the provider status
+/// entirely, so matching "429"/"503" would miss transient phrasings while
+/// coupling us to agy stderr wording. Refusals are not errors here
+/// (`stopReason: "refusal"`), and malformed/session/auth failures cannot occur
+/// past the harness gates — so the only cost of a needless retry is one 60s
+/// sleep on an already-failed run.
 fn await_turn_retry(err: &Value, attempts_left: u32) -> bool {
     use std::time::Duration;
     if attempts_left == 0 {
