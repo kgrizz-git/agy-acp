@@ -124,9 +124,9 @@ would be `0.2.0`.
      `E2E_MODEL_OFFSET` (`github.run_number`) rotate model-issuing tests via
      `session/set_model`; with at least two roster entries, those tests use
      different models in a run. This mitigates the observed daily per-model
-     quota (confirmed 2026-09-08: 1 request per no-tool turn, base-model
-     metering, no project aggregate — see plans/completed/e2e-quota-rotation.md): the request/turn ratio and any
-     project-wide daily aggregate remain under investigation. Unset locally,
+     quota (probes 2026-09-08: 1 request per no-tool turn, base-model metering,
+     no wider ceiling observed at ~30 project requests — see
+     plans/completed/e2e-quota-rotation.md). Unset locally,
      tests fall through to the `settings.json` default. `error_paths` does not
      call the model. A failed turn sleeps 60s and retries once — per-minute
      429s carry ~37s retryDelay, so transient failures clear; daily 429s fail
