@@ -19,7 +19,7 @@ The captured agy log (run 34150352103) shows the real error stderr never
 carried, so it was invisible until `forward_stderr` and the `Capture agy logs`
 step landed:
 
-```
+```text
 Error 429: You exceeded your current quota
 quotaId: GenerateRequestsPerDayPerProjectPerModel-FreeTier
 quotaMetric: generativelanguage.googleapis.com/generate_content_free_tier_requests
