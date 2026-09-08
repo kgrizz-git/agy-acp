@@ -96,7 +96,7 @@ jobs:
         # takes column 2. The roster carries column 1.
         #
         # Rather than hardcode a version (the catalog drifts -- 3.5 was
-        # dropped, 3.8 is now default), collect every `gemini-<ver>-flash-low`
+        # dropped, 3.8 is now default), collect every `gemini-flash-<ver>-low`
         # from the live `agy models` list. Constrain the match to the Gemini
         # family so a future non-Gemini or otherwise non-free row can never be
         # auto-selected. Fall back to a known-good label if the query is empty.
@@ -106,13 +106,13 @@ jobs:
           mkdir -p "$HOME/.gemini/antigravity-cli"
           SETTINGS="$HOME/.gemini/antigravity-cli/settings.json"
           MODELS_TSV=$(agy models 2>/dev/null || true)
-          # Constrain the match to the Gemini family (`gemini-<ver>-flash-low`),
-          # not any slug ending `-flash-low`, so a future non-Gemini or otherwise
+          # Constrain the match to the Gemini Flash family (`gemini-flash-<ver>-low`),
+          # not any slug ending `-low`, so a future non-Gemini or otherwise
           # non-free row can never be auto-selected.
           ROSTER=$(printf '%s\n' "$MODELS_TSV" | awk -F'\t' \
-            '$1 ~ /^gemini-[0-9.]+-flash-low$/ { s = (s ? s "," $1 : $1) } END { print s }')
+            '$1 ~ /^gemini-flash-[0-9.]+-low$/ { s = (s ? s "," $1 : $1) } END { print s }')
           MODEL_LABEL=$(printf '%s\n' "$MODELS_TSV" | awk -F'\t' \
-            '$1 ~ /^gemini-[0-9.]+-flash-low$/ { print $2; exit }')
+            '$1 ~ /^gemini-flash-[0-9.]+-low$/ { print $2; exit }')
           if [ -z "$MODEL_LABEL" ]; then
             echo "warning: no gemini flash-low in 'agy models'; using fallback" >&2
             MODEL_LABEL="Gemini 3.6 Flash (Low)"
