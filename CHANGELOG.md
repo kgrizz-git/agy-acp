@@ -128,6 +128,7 @@ of its own yet, so everything below is unreleased.
 - E2e turns retry once after a 60s sleep. Per-minute 429s carry a ~37s
   retryDelay, so the transient class usually clears on the second attempt;
   daily-quota 429s fail again just as fast, with a hint pointing at the agy log.
+  (PR #20)
 
 ### Fixed
 
