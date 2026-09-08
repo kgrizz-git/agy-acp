@@ -1,6 +1,11 @@
 //! End-to-end tests driving the built binary against a real agy.
 //!
 //! `e2e` must stay in these test paths: CI selects this tier by substring.
+//! Model-issuing tests pick a slug from `E2E_MODEL_ROSTER` via
+//! `session/set_model` so consecutive runs spread the free-tier daily
+//! per-model quota; an empty roster falls through to the `settings.json`
+//! default. `session_load` also asserts conversation memory, so there is
+//! no separate multi-turn test.
 
 use serde_json::{json, Value};
 
@@ -20,6 +25,69 @@ fn prepare_auth() -> bool {
     }
     eprintln!("SKIP: No GEMINI_API_KEY and no local auth found");
     false
+}
+
+/// Parse a comma-separated slug roster and pick this test's model.
+///
+/// `offset` rotates the starting point so consecutive CI runs spread the
+/// two-turn `session_load` load across buckets: assignment is
+/// `roster[(offset + test_index) % len]`. An empty roster is `None` — the
+/// caller must skip `session/set_model` and let agy use the settings.json
+/// default. A single-entry roster is a no-op rotation (both tests get the
+/// same model).
+fn pick_model_from(roster: &str, offset: usize, test_index: usize) -> Option<String> {
+    let roster: Vec<&str> = roster
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    if roster.is_empty() {
+        return None;
+    }
+    Some(roster[(offset + test_index) % roster.len()].to_string())
+}
+
+/// CI sets `E2E_MODEL_ROSTER` (flash-low slugs) and `E2E_MODEL_OFFSET`
+/// (`github.run_number`). Unset or empty roster → `None`.
+fn pick_model(test_index: usize) -> Option<String> {
+    let roster = std::env::var("E2E_MODEL_ROSTER").unwrap_or_default();
+    let offset = std::env::var("E2E_MODEL_OFFSET")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    pick_model_from(&roster, offset, test_index)
+}
+
+#[test]
+fn pick_model_from_empty_or_whitespace_is_none() {
+    assert_eq!(pick_model_from("", 0, 0), None);
+    assert_eq!(pick_model_from("  , , ", 7, 1), None);
+}
+
+#[test]
+fn pick_model_from_rotates_by_offset_and_index() {
+    let roster = "a,b,c";
+    // Run 0: full_round_trip -> a, session_load -> b
+    assert_eq!(pick_model_from(roster, 0, 0).as_deref(), Some("a"));
+    assert_eq!(pick_model_from(roster, 0, 1).as_deref(), Some("b"));
+    // Run 1: b, c
+    assert_eq!(pick_model_from(roster, 1, 0).as_deref(), Some("b"));
+    assert_eq!(pick_model_from(roster, 1, 1).as_deref(), Some("c"));
+    // Run 2: c, a — the 2-turn load wraps onto a
+    assert_eq!(pick_model_from(roster, 2, 0).as_deref(), Some("c"));
+    assert_eq!(pick_model_from(roster, 2, 1).as_deref(), Some("a"));
+}
+
+#[test]
+fn pick_model_from_single_entry_is_a_noop() {
+    assert_eq!(pick_model_from("only", 0, 0).as_deref(), Some("only"));
+    assert_eq!(pick_model_from("only", 0, 1).as_deref(), Some("only"));
+    assert_eq!(pick_model_from("only", 9, 1).as_deref(), Some("only"));
+}
+
+#[test]
+fn pick_model_from_trims_and_drops_empty_tokens() {
+    assert_eq!(pick_model_from(" a, ,b ", 0, 1).as_deref(), Some("b"));
 }
 
 #[test]
@@ -52,32 +120,33 @@ fn test_e2e_agy_acp_full_round_trip() {
         .stderr(Stdio::piped())
         .spawn()
         .expect("failed to spawn agy-acp");
+    forward_stderr(&mut child);
 
     let mut stdin = child.stdin.take().unwrap();
     let stdout = child.stdout.take().unwrap();
     let mut reader = BufReader::new(stdout);
 
-    let mut send_and_recv = |msg: &str| -> String {
-        writeln!(stdin, "{}", msg).unwrap();
-        stdin.flush().unwrap();
-        let mut line = String::new();
-        reader.read_line(&mut line).unwrap();
-        line
-    };
-
-    let resp = send_and_recv(
+    let resp = send_recv(
+        &mut stdin,
+        &mut reader,
         r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"clientName":"e2e","clientVersion":"0.1"}}"#,
     );
     let init: Value = serde_json::from_str(&resp).unwrap();
     assert_eq!(init["result"]["protocolVersion"], 1);
 
-    let resp = send_and_recv(r#"{"jsonrpc":"2.0","id":2,"method":"session/new","params":{}}"#);
+    let resp = send_recv(
+        &mut stdin,
+        &mut reader,
+        r#"{"jsonrpc":"2.0","id":2,"method":"session/new","params":{}}"#,
+    );
     let session: Value = serde_json::from_str(&resp).unwrap();
     let session_id = session["result"]["sessionId"].as_str().unwrap();
     assert!(!session_id.is_empty());
 
+    maybe_set_model(&mut stdin, &mut reader, session_id, 0, 3);
+
     let prompt_msg = format!(
-        r#"{{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{{"sessionId":"{}","prompt":[{{"type":"text","text":"Reply with exactly one word: PONG"}}]}}}}"#,
+        r#"{{"jsonrpc":"2.0","id":4,"method":"session/prompt","params":{{"sessionId":"{}","prompt":[{{"type":"text","text":"Reply with exactly one word: PONG"}}]}}}}"#,
         session_id
     );
     writeln!(stdin, "{}", prompt_msg).unwrap();
@@ -104,7 +173,7 @@ fn test_e2e_agy_acp_full_round_trip() {
             // the model happened to chunk its reply.
             response_text.push_str(agent_text(&msg));
         }
-        if msg.get("id") == Some(&json!(3)) {
+        if msg.get("id") == Some(&json!(4)) {
             assert!(msg["error"].is_null(), "Got error: {}", msg["error"]);
             assert_eq!(msg["result"]["stopReason"], "end_turn");
             break;
@@ -152,9 +221,26 @@ fn spawn_agy_acp() -> Option<(
         .stderr(Stdio::piped())
         .spawn()
         .expect("failed to spawn agy-acp");
+    forward_stderr(&mut child);
     let stdin = child.stdin.take().unwrap();
     let stdout = child.stdout.take().unwrap();
     Some((stdin, BufReader::new(stdout), child))
+}
+
+/// Echoes the child's stderr to ours, locking the adapter's `[agy-acp] agy
+/// stderr: ...` lines into the test log. Without this the pipe is never read:
+/// the provider's actual error (a 429, an auth failure) sits in the buffer
+/// while the assertion sees only the JSON `agy failed:` wrapper, and a
+/// rate-limit flake is indistinguishable from a regression in CI.
+fn forward_stderr(child: &mut std::process::Child) {
+    use std::io::{BufRead, BufReader};
+    if let Some(err) = child.stderr.take() {
+        std::thread::spawn(move || {
+            for line in BufReader::new(err).lines().map_while(Result::ok) {
+                eprintln!("[agy-acp stderr] {line}");
+            }
+        });
+    }
 }
 
 fn send_recv(
@@ -168,6 +254,40 @@ fn send_recv(
     let mut line = String::new();
     reader.read_line(&mut line).unwrap();
     line
+}
+
+fn set_model_rpc(rpc_id: u64, session_id: &str, slug: &str) -> String {
+    format!(
+        r#"{{"jsonrpc":"2.0","id":{},"method":"session/set_model","params":{{"sessionId":"{}","modelId":"{}"}}}}"#,
+        rpc_id, session_id, slug
+    )
+}
+
+/// Apply this test's roster assignment via `session/set_model`, or log that
+/// we are falling through to settings.json. Panics if set_model fails so a
+/// bad slug cannot silently run against the default and look like rotation.
+fn maybe_set_model(
+    stdin: &mut std::process::ChildStdin,
+    reader: &mut std::io::BufReader<std::process::ChildStdout>,
+    session_id: &str,
+    test_index: usize,
+    rpc_id: u64,
+) {
+    match pick_model(test_index) {
+        Some(slug) => {
+            eprintln!("[e2e] model: {slug}");
+            let resp = send_recv(stdin, reader, &set_model_rpc(rpc_id, session_id, &slug));
+            let val: Value = serde_json::from_str(&resp).unwrap();
+            assert!(
+                val["error"].is_null(),
+                "session/set_model error for {slug}: {}",
+                val["error"]
+            );
+        }
+        None => {
+            eprintln!("[e2e] model: (settings.json default; no E2E_MODEL_ROSTER)");
+        }
+    }
 }
 
 /// The agent's answer text from a `session/update`, and nothing else.
@@ -265,59 +385,10 @@ fn send_prompt_wait(
 
 #[test]
 #[ignore]
-fn test_e2e_multi_turn() {
-    let Some((mut stdin, mut reader, mut child)) = spawn_agy_acp() else {
-        return;
-    };
-
-    send_recv(
-        &mut stdin,
-        &mut reader,
-        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"clientName":"e2e","clientVersion":"0.1"}}"#,
-    );
-
-    let resp = send_recv(
-        &mut stdin,
-        &mut reader,
-        r#"{"jsonrpc":"2.0","id":2,"method":"session/new","params":{}}"#,
-    );
-    let session_id = serde_json::from_str::<Value>(&resp).unwrap()["result"]["sessionId"]
-        .as_str()
-        .unwrap()
-        .to_string();
-
-    let (text1, resp1) = send_prompt_wait(
-        &mut stdin,
-        &mut reader,
-        3,
-        &session_id,
-        "Remember this word: BANANA. Reply OK.",
-    );
-    assert!(resp1["error"].is_null(), "Turn 1 error: {}", resp1["error"]);
-    assert!(text1.is_some());
-
-    let (text2, resp2) = send_prompt_wait(
-        &mut stdin,
-        &mut reader,
-        4,
-        &session_id,
-        "What word did I ask you to remember? Reply with just that word.",
-    );
-    assert!(resp2["error"].is_null(), "Turn 2 error: {}", resp2["error"]);
-    let reply = text2.unwrap_or_default().to_lowercase();
-    assert!(
-        reply.contains("banana"),
-        "Expected 'BANANA' in multi-turn reply, got: '{}'",
-        reply
-    );
-
-    drop(stdin);
-    let _ = child.wait();
-}
-
-#[test]
-#[ignore]
 fn test_e2e_session_load() {
+    // Two turns: plant a token, `session/load`, then ask for it. That is
+    // replay *and* live continuity (`--conversation`), which used to be a
+    // separate `multi_turn` test.
     let Some((mut stdin, mut reader, mut child)) = spawn_agy_acp() else {
         return;
     };
@@ -336,13 +407,15 @@ fn test_e2e_session_load() {
         .as_str()
         .unwrap()
         .to_string();
+
+    maybe_set_model(&mut stdin, &mut reader, &session_id, 1, 3);
 
     let (_text, resp1) = send_prompt_wait(
         &mut stdin,
         &mut reader,
-        3,
+        4,
         &session_id,
-        "Reply with exactly: FIRST_TURN",
+        "Remember this word: BANANA. Reply OK.",
     );
     assert!(
         resp1["error"].is_null(),
@@ -354,9 +427,9 @@ fn test_e2e_session_load() {
     let loaded = send_recv_id(
         &mut stdin,
         &mut reader,
-        4,
+        5,
         &format!(
-            r#"{{"jsonrpc":"2.0","id":4,"method":"session/load","params":{{"sessionId":"{}"}}}}"#,
+            r#"{{"jsonrpc":"2.0","id":5,"method":"session/load","params":{{"sessionId":"{}"}}}}"#,
             session_id
         ),
     );
@@ -369,9 +442,9 @@ fn test_e2e_session_load() {
     let (text2, resp2) = send_prompt_wait(
         &mut stdin,
         &mut reader,
-        5,
+        6,
         &session_id,
-        "Reply with exactly one word: SECOND",
+        "What word did I ask you to remember? Reply with just that word.",
     );
     assert!(
         resp2["error"].is_null(),
@@ -379,6 +452,12 @@ fn test_e2e_session_load() {
         resp2["error"]
     );
     assert!(text2.is_some(), "Expected response on continued session");
+    let reply = text2.unwrap_or_default().to_lowercase();
+    assert!(
+        reply.contains("banana"),
+        "Expected 'banana' in session_load reply, got: '{}'",
+        reply
+    );
 
     drop(stdin);
     let _ = child.wait();

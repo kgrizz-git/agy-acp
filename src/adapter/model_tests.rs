@@ -263,10 +263,12 @@ fn test_session_models_json_default() {
 }
 
 /// What `agy models` actually prints on stdout: `id<TAB>label`, no header —
-/// the "Fetching available models..." banner goes to stderr.
+/// the "Fetching available models..." banner goes to stderr. Slugs keep the
+/// `gemini-<ver>-flash-*` order (verified live 2026-09-08, agy 1.1.27).
 const AGY_MODELS_STDOUT: &str = "\
 gemini-3.7-flash-high\tGemini 3.7 Flash (High)
 gemini-3.7-flash-low\tGemini 3.7 Flash (Low)
+gemini-3.8-flash-low\tGemini 3.8 Flash (Low)
 gemini-3.1-pro-high\tGemini 3.1 Pro (High)
 claude-sonnet-4-6\tClaude Sonnet 4.6 (Thinking)
 ";
@@ -287,11 +289,13 @@ fn test_models() -> Vec<AgyModel> {
 #[test]
 fn test_parse_models_output_splits_id_from_label() {
     let models = Adapter::parse_models_output(AGY_MODELS_STDOUT);
-    assert_eq!(models.len(), 4);
+    assert_eq!(models.len(), 5);
     assert_eq!(models[0].id, "gemini-3.7-flash-high");
     assert_eq!(models[0].label, "Gemini 3.7 Flash (High)");
-    assert_eq!(models[3].id, "claude-sonnet-4-6");
-    assert_eq!(models[3].label, "Claude Sonnet 4.6 (Thinking)");
+    assert_eq!(models[2].id, "gemini-3.8-flash-low");
+    assert_eq!(models[2].label, "Gemini 3.8 Flash (Low)");
+    assert_eq!(models[4].id, "claude-sonnet-4-6");
+    assert_eq!(models[4].label, "Claude Sonnet 4.6 (Thinking)");
     for model in &models {
         assert!(
             !model.id.contains('\t') && !model.id.contains(' '),

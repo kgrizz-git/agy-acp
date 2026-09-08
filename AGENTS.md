@@ -120,6 +120,23 @@ would be `0.2.0`.
    - `agy` in `PATH` (install from `google-antigravity/antigravity-cli` releases)
    - Auth via `GEMINI_API_KEY` env var or macOS Keychain (`~/.gemini/antigravity-cli/settings.json`)
    - `cargo build --release` must have been run first
+   - In CI, `E2E_MODEL_ROSTER` (comma-separated `gemini-*-flash-low` slugs) and
+     `E2E_MODEL_OFFSET` (`github.run_number`) rotate model-issuing tests via
+     `session/set_model`; with at least two roster entries, those tests use
+     different models in a run. This is an experimental mitigation for the
+     observed daily per-model quota: the request/turn ratio and any
+     project-wide daily aggregate remain under investigation. Unset locally,
+     tests fall through to the `settings.json` default. `error_paths` does not
+     call the model.
+   - Local runs: `scripts/e2e-local.sh [filter] [args...]` sources the token
+     from `.env.e2e.local` (gitignored) and runs everything under a throwaway
+     `HOME`, so the real `~/.gemini` state (OAuth login, settings, session
+     history) is never touched; `RUSTUP_HOME`/`CARGO_HOME` are pinned before
+     the switch so the toolchain keeps resolving. `E2E_HOME` reuses a sandbox
+     across runs. Caveat: the macOS keychain is global, so agy may still see
+     an OAuth token there. `agy models` needs `settings.json` present to list
+     under a bare key (it prints nothing without it) — the script and the CI
+     configure step both write it first for that reason.
 
 CI (`ci.yml`) enforces `cargo build`, unit tests, the ignored I/O tier
 (`cargo test -- --ignored --skip e2e`), clippy (`-W clippy::all -D clippy::all`;
