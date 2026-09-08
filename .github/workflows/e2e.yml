@@ -125,6 +125,7 @@ jobs:
           # exits 1 when sign-in is required, and without it the step would
           # die here with no message.
           AGY_MODELS_STDERR=$(mktemp)
+          trap 'rm -f "$AGY_MODELS_STDERR"' EXIT
           MODELS_TSV=$(agy models 2>"$AGY_MODELS_STDERR" || true)
           MODEL_LINES=$(printf '%s\n' "$MODELS_TSV" | grep -c . || true)
           echo "agy models returned $MODEL_LINES non-empty line(s) on stdout"
@@ -133,6 +134,7 @@ jobs:
             cat "$AGY_MODELS_STDERR"
           fi
           rm -f "$AGY_MODELS_STDERR"
+          trap - EXIT
           # Constrain the match to the Gemini Flash family (`gemini-<ver>-flash-low`),
           # not any slug ending `-low`, so a future non-Gemini or otherwise
           # non-free row can never be auto-selected. Sort once so the roster
