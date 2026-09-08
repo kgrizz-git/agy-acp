@@ -123,11 +123,14 @@ would be `0.2.0`.
    - In CI, `E2E_MODEL_ROSTER` (comma-separated `gemini-*-flash-low` slugs) and
      `E2E_MODEL_OFFSET` (`github.run_number`) rotate model-issuing tests via
      `session/set_model`; with at least two roster entries, those tests use
-     different models in a run. This is an experimental mitigation for the
-     observed daily per-model quota: the request/turn ratio and any
-     project-wide daily aggregate remain under investigation. Unset locally,
+     different models in a run. This mitigates the observed daily per-model
+     quota (probes 2026-09-08: 1 request per no-tool turn, base-model metering,
+     no wider ceiling observed at ~30 project requests — see
+     plans/completed/e2e-quota-rotation.md). Unset locally,
      tests fall through to the `settings.json` default. `error_paths` does not
-     call the model.
+     call the model. A failed turn sleeps 60s and retries once — per-minute
+     429s carry ~37s retryDelay, so transient failures clear; daily 429s fail
+     again fast, with a hint pointing at the agy log.
    - Local runs: `scripts/e2e-local.sh [filter] [args...]` sources the token
      from `.env.e2e.local` (gitignored) and runs everything under a throwaway
      `HOME`, so the real `~/.gemini` state (OAuth login, settings, session

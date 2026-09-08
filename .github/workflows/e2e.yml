@@ -85,11 +85,10 @@ jobs:
         #
         # Model-issuing tests call session/set_model with a slug from
         # E2E_MODEL_ROSTER, rotated by E2E_MODEL_OFFSET (github.run_number).
-        # This is an experimental mitigation for the observed
-        # GenerateRequestsPerDayPerProjectPerModel-FreeTier limit: DP3/OQ1 in
-        # plans/e2e-quota-rotation.md still need to establish the request/turn
-        # ratio, whether reasoning variants share a bucket, and whether a
-        # project-wide daily aggregate limits the benefit. settings.json
+        # This mitigates the observed GenerateRequestsPerDayPerProjectPerModel-
+        # FreeTier limit (confirmed 2026-09-08: 1 request per no-tool turn,
+        # base-model metering, no project aggregate — see
+        # plans/completed/e2e-quota-rotation.md). settings.json
         # remains the floor for any test that does not pick a model (empty
         # roster, error_paths). That field is keyed by display label, not slug
         # (slug only works via --model / set_model), so the fallback still

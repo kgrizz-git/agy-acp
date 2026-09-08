@@ -20,9 +20,6 @@ The few things worth picking up next. Each is a pointer; the detail lives below.
   two sources of truth for the same findings.
 - [Rename the binary and crate](#rename-the-binary-and-crate) — cheaper now than
   after anyone else installs it.
-- [E2e daily-quota rotation and turn reduction](#e2e-daily-quota-rotation-and-turn-reduction)
-  — verify whether the experimental flash-model rotation actually expands
-  free-tier daily headroom, and measure requests per turn.
 
 ## Active
 
@@ -376,20 +373,6 @@ idea from `paseo-agy-acp`.
 confirm `agy` backend errors reach the user — the stream's `result` event
 carries `status` and `error`, and the adapter now reads both — and consider a
 configurable `agy` binary path.
-
-#### E2e daily-quota rotation and turn reduction
-
-Plan: plans/e2e-quota-rotation.md
-
-The e2e gate fails on a hard per-project-per-model **daily** free-tier ceiling
-(20 `generate_content_free_tier_requests`, `quotaId:
-GenerateRequestsPerDayPerProjectPerModel-FreeTier`), not the per-minute burst the
-`--test-threads=1` serialization addressed. Folding `multi_turn`'s continuity
-assertion into `session_load` cuts the 5 model turns per run to 3. Experimental
-rotation assigns those tests across flash-model slugs, but two facts must be
-pinned before claiming that expands headroom: the request-per-turn ratio (a turn
-issues several `generate_content` calls), and whether reasoning variants share a
-bucket or a project/day aggregate sits above the per-model floor.
 
 ### Fork maintenance
 
