@@ -125,6 +125,16 @@ of its own yet, so everything below is unreleased.
   `git config blame.ignoreRevsFile .git-blame-ignore-revs` once to keep blame
   readable locally, as GitHub already does.
 
+- E2e model rotation is confirmed, not experimental. The configure step writes
+  the fallback `settings.json` first — `agy models` prints nothing without it
+  under a bare key — then collects the flash-low slugs into `E2E_MODEL_ROSTER`
+  for the tests to spread turns across via `session/set_model`. Probes measured
+  1 request per no-tool turn, base-model metering (effort variants share one
+  bucket), and no project-wide aggregate: ~20 runs/day across the three live
+  base versions. `scripts/e2e-local.sh` runs the tier locally under a throwaway
+  HOME from a `.env.e2e.local` token. See
+  plans/completed/e2e-quota-rotation.md.
+
 ### Fixed
 
 - `AGY_ACP_AUTO_ALLOW=none` no longer discards `AGY_ACP_SENSITIVE_PATTERNS`. The

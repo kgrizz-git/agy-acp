@@ -123,8 +123,9 @@ would be `0.2.0`.
    - In CI, `E2E_MODEL_ROSTER` (comma-separated `gemini-*-flash-low` slugs) and
      `E2E_MODEL_OFFSET` (`github.run_number`) rotate model-issuing tests via
      `session/set_model`; with at least two roster entries, those tests use
-     different models in a run. This is an experimental mitigation for the
-     observed daily per-model quota: the request/turn ratio and any
+     different models in a run. This mitigates the observed daily per-model
+     quota (confirmed 2026-09-08: 1 request per no-tool turn, base-model
+     metering, no project aggregate — see plans/completed/e2e-quota-rotation.md): the request/turn ratio and any
      project-wide daily aggregate remain under investigation. Unset locally,
      tests fall through to the `settings.json` default. `error_paths` does not
      call the model.

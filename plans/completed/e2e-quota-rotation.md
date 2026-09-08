@@ -160,6 +160,18 @@ also the instrument: one debug run that counts `generate_content_free_tier_reque
 credits per turn gives the true per-run cost, which determines whether rotation
 across the available models is sufficient or whether more trimming (OQ2) is required.
 
+**Result (probe 2026-09-08, `scripts/e2e-local.sh`, pristine
+`gemini-3.8-flash-low` bucket): exactly 1 request per turn.** 19 single-turn
+`full_round_trip` runs succeeded; the 20th failed with
+`quotaId:GenerateRequestsPerDayPerProjectPerModel-FreeTier, limit: 20,
+quotaValue: 20` — 19 × r ≤ 20 < 20 × r admits only r = 1 with a fresh bucket.
+Scope: turns without tool calls, which is the whole e2e suite, so a clean run
+costs exactly 3 requests. Side finding: the per-minute Flash quota is 5
+(`GenerateRequestsPerMinutePerProjectPerModel-FreeTier, quotaValue: 5`,
+`retryDelay: 37s`) — an unpaced burn loop trips it after ~7 back-to-back turns,
+which is further evidence for `--test-threads=1` and for ≥60s pacing in any
+future burn probe.
+
 ## Risks and open questions
 
 ### OQ1 — is there a *shared* daily aggregate above the per-model limit?
@@ -177,6 +189,17 @@ The same probe should include a same-base different-reasoning-effort pair
 meters by base model or by exact slug. If they share a bucket, rotation across
 reasoning-effort variants buys nothing and the headroom multiplier is the number
 of *base* model versions, not the number of slug variants.
+
+**Result (same probe): metering is by base model — variants share a bucket.**
+The daily 429 above named `model: gemini-3.8-flash` (bare) while the turns ran
+on the `gemini-3.8-flash-low` slug, so `-low`/`-medium`/`-high` are one bucket
+of 20. The headroom multiplier is the number of live base versions (3.6, 3.7,
+3.8 → 3×, i.e. ~20 e2e runs/day at 3 requests spread ~1 per model per run),
+not the 9 slug variants. On the aggregate half: a turn on pristine
+`gemini-3.7-flash-low` succeeded minutes after the 3.8 bucket hit 20/20, with
+~30 project requests on the day and no wider `...PerProject` quotaId in any
+captured 429 — no evidence of a project-wide daily ceiling above the per-model
+buckets, consistent with community reports, which name only per-model quotaIds.
 
 ### OQ2 — keep `multi_turn`, or accept the folded coverage?
 
@@ -204,7 +227,7 @@ one; surface it in a comment only if the pin gets touched for another reason.
 
 ## What lands with this plan
 
-Implemented experimentally in this PR:
+Implemented in this PR (rotation confirmed by the DP3/OQ1 probes above):
 
 1. `src/e2e_tests.rs`: fold `multi_turn`'s memory assertion into
    `session_load`, delete `test_e2e_multi_turn`; add per-test model selection via
@@ -214,14 +237,14 @@ Implemented experimentally in this PR:
 
 Still required before this plan is complete:
 
-3. A debug run (DP3) recording requests-per-turn, and the OQ1 probe. Until
-   those establish the actual bucket boundaries and any aggregate ceiling, the
-   workflow and `AGENTS.md` label rotation as experimental, this plan remains
-   in `plans/`, and the TODO entry remains active. The probes may require
-   changing or removing the provisional assignment.
+3. ~~A debug run (DP3) recording requests-per-turn, and the OQ1 probe.~~ Done
+   2026-09-08 (see DP3/OQ1 results above): 1 request per no-tool turn,
+   base-model metering, no aggregate evidence. Rotation buys the full 3×
+   across the live base versions. The landing change deleted the TODO entry,
+   moved this plan to `plans/completed/`, and added the CHANGELOG entry.
 
 ## TODO discipline
 
-Links `TODO.md` → this plan (`Plan: plans/e2e-quota-rotation.md`). The TODO
+Links `TODO.md` → this plan (`Plan: plans/completed/e2e-quota-rotation.md`). The TODO
 entry and its Next Up pointer stay until the landing change deletes them
 together with the CHANGELOG entry, per `AGENTS.md`.
