@@ -139,7 +139,7 @@ by display label (column 2 of `agy models`), while `--model` accepts the slug
 (column 1). The configure step currently writes the label; it must continue to
 do so for the fallback path, while the roster env var carries slugs. The roster
 query must keep its Gemini-family guard
-(`.github/workflows/e2e.yml:112-115`, `gemini-flash-<ver>-low`) so a future
+(`.github/workflows/e2e.yml:112-117`, `gemini-flash-<ver>-low`) so a future
 non-free row is never selected.
 
 ### DP3 — discover the request-per-turn ratio before committing to a number

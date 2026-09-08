@@ -108,26 +108,32 @@ jobs:
           MODELS_TSV=$(agy models 2>/dev/null || true)
           # Constrain the match to the Gemini Flash family (`gemini-flash-<ver>-low`),
           # not any slug ending `-low`, so a future non-Gemini or otherwise
-          # non-free row can never be auto-selected.
-          ROSTER=$(printf '%s\n' "$MODELS_TSV" | awk -F'\t' \
-            '$1 ~ /^gemini-flash-[0-9.]+-low$/ { s = (s ? s "," $1 : $1) } END { print s }' \
-            | sort -V)
-          MODEL_LABEL=$(printf '%s\n' "$MODELS_TSV" | awk -F'\t' \
+          # non-free row can never be auto-selected. Sort once so the roster
+          # order (and hence the run_number rotation) is stable even if agy
+          # reorders its list: sorting whole lines sorts by slug, since each
+          # line starts with the id, and a version sort keeps 3.10 after 3.9.
+          MODELS_SORTED=$(printf '%s\n' "$MODELS_TSV" | sort -V)
+          ROSTER=$(printf '%s\n' "$MODELS_SORTED" | awk -F'\t' \
+            '$1 ~ /^gemini-flash-[0-9.]+-low$/ { s = (s ? s "," $1 : $1) } END { print s }')
+          MODEL_LABEL=$(printf '%s\n' "$MODELS_SORTED" | awk -F'\t' \
             '$1 ~ /^gemini-flash-[0-9.]+-low$/ { print $2; exit }')
-          if [ -z "$MODEL_LABEL" ]; then
-            echo "warning: no gemini flash-low in 'agy models'; using fallback" >&2
-            MODEL_LABEL="Gemini 3.6 Flash (Low)"
-          fi
           if [ -z "$ROSTER" ]; then
             echo "error: e2e model roster empty; cannot proceed without model slugs" >&2
             exit 1
+          fi
+          # Defensive only: a non-empty roster means the regex matched at least
+          # one row, so an empty label is a malformed (label-less) TSV row, not
+          # catalog drift — drift exits above.
+          if [ -z "$MODEL_LABEL" ]; then
+            echo "warning: matched model row had no display label; using fallback" >&2
+            MODEL_LABEL="Gemini 3.6 Flash (Low)"
           fi
           n=$(printf '%s\n' "$ROSTER" | awk -F, '{ print NF }')
           if [ "$n" -eq 1 ]; then
             echo "warning: e2e model roster has one slug ($ROSTER); rotation is a no-op" >&2
           fi
           echo "pinning e2e fallback model: $MODEL_LABEL"
-          echo "e2e model roster: ${ROSTER:-<empty>}"
+          echo "e2e model roster: $ROSTER"
           echo "E2E_MODEL_ROSTER=$ROSTER" >> "$GITHUB_ENV"
           echo "E2E_MODEL_OFFSET=${{ github.run_number }}" >> "$GITHUB_ENV"
           # jq (guaranteed on the runner) builds the JSON with correct escaping.
