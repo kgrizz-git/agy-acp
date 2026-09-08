@@ -9,6 +9,8 @@
 
 use serde_json::Value;
 
+use super::safe_command::classify;
+
 /// Model-authored display and pacing fields, observed to differ between two
 /// otherwise identical calls to agy 1.1.22. They cannot change what a command is
 /// or where it runs, so they are excluded from the sticky key; leaving them in

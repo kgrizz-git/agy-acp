@@ -23,6 +23,8 @@ use uuid::Uuid;
 
 mod path_rules;
 use path_rules::{outside_workspace, string_args};
+mod safe_command;
+use safe_command::{classify_call, SafeCommand};
 
 /// Env var carrying the bridge socket path into the `agy` subprocess (and from
 /// there into the hook command).
