@@ -133,7 +133,7 @@ of its own yet, so everything below is unreleased.
   bucket), and no project-wide aggregate: ~20 runs/day across the three live
   base versions. `scripts/e2e-local.sh` runs the tier locally under a throwaway
   HOME from a `.env.e2e.local` token. See
-  plans/completed/e2e-quota-rotation.md.
+  plans/completed/e2e-quota-rotation.md. (PR #19)
 
 ### Fixed
 
