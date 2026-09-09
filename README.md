@@ -213,7 +213,8 @@ contract that keeps those open-ended additions prompting rather than silently
 allowed.
 
 "Exact" means exact. Whitespace-insensitive classification applies only to a
-program-scoped allow: `ls`, `ls ` and `ls  -l` may share the `safe:ls` approval.
+program-scoped allow: `ls`, `ls␠` and `ls  -l` may share the `safe:ls` approval,
+where `␠` represents one space.
 Every remembered reject remains keyed by the exact `CommandLine`, so `ls -l`
 and `ls  -l` are different rejects. Anything that does not classify — `ls; rm
 x`, `cat >x`, `ls -z` — also compares its arguments as-is, with no tokenizing
