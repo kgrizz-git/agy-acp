@@ -9,6 +9,8 @@
 
 use serde_json::Value;
 
+use super::safe_command::classify;
+
 /// Model-authored display and pacing fields, observed to differ between two
 /// otherwise identical calls to agy 1.1.22. They cannot change what a command is
 /// or where it runs, so they are excluded from the sticky key; leaving them in
@@ -82,10 +84,37 @@ pub(super) fn args_fingerprint(args: &Value) -> String {
 /// is nested rather than a top-level `args.get`, since a nested or renamed field
 /// would otherwise inherit the path tool's weaker key.
 pub(super) fn sticky_scope(tool_name: &str, args: &Value) -> Option<String> {
+    // A classified `run_command` earns the program key — but only for the
+    // measured argument shape. The classifier justifies widening `CommandLine`
+    // alone; any other field present (a future `Env`, `Shell`, `Stdin`) is a
+    // say the classifier never heard, so the call falls through to the full
+    // fingerprint exactly as today.
+    if tool_kind(tool_name) == "execute" {
+        if let Some(cmd) = args.get("CommandLine").and_then(Value::as_str) {
+            if let Some(safe_cmd) = classify(cmd) {
+                if inert_extra_args(args) {
+                    return Some(format!("safe:{}", safe_cmd.program.name));
+                }
+            }
+        }
+    }
     if !KEYED_BY_TOOL_KINDS.contains(&tool_kind(tool_name)) || has_unconstrained_reach(args) {
         return Some(args_fingerprint(args));
     }
     None
+}
+
+/// True when every argument key besides `CommandLine` is one the classifier's
+/// widening already accounts for: `Cwd`, whose containment is re-checked per
+/// call, or a presentational field the fingerprint itself ignores.
+fn inert_extra_args(args: &Value) -> bool {
+    match args {
+        Value::Object(map) => map.keys().all(|key| {
+            let key = key.as_str();
+            key == "CommandLine" || key == "Cwd" || UNKEYED_FIELDS.contains(&key)
+        }),
+        _ => false,
+    }
 }
 
 /// Tool kinds whose remembered answers may be keyed by tool name alone, because

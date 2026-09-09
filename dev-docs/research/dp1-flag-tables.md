@@ -120,13 +120,19 @@ unverified on Darwin), `-C` (writes `magic.mgc`), `-S`/`--no-sandbox`.
 | flag | arity | value-is-path? |
 |------|-------|----------------|
 | `-l -r -s -x -F -n -q -h` | 0 | — |
-| `-t` | 1 | no (time format) |
+| `-t` | 0 | — (Darwin's optional time format is conservatively treated as an operand path) |
 
 `-f` is **OUT**. On Darwin it is the arity-1 format string, but the plan's DP6
 already concedes PATH shadowing, and on a GNU shadow `-f` becomes arity 0
 (`--file-system`); the Darwin parser would then swallow the next operand as the
 "format" and skip containment on it. No value form is safe on both dialects,
 so the flag drops.
+
+`-t` has the opposite arity mismatch: GNU treats it as a bare `--terse` switch,
+while Darwin takes a time format. It is parsed as arity 0, so a GNU filesystem
+operand is always extracted. On Darwin, that format is conservatively checked
+as a candidate path along with the real operands; a spurious check can prompt,
+but can never make an unreviewed path eligible for a program-wide approval.
 
 Notable exclusion: `-L` (dereference).
 

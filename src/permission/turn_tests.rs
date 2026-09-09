@@ -286,6 +286,7 @@ async fn a_decision_applied_after_its_turn_ended_does_not_refuse_the_next_one() 
             &json!({ "outcome": { "outcome": "selected", "optionId": "reject_once" } }),
             key.clone(),
             "run_command",
+            &json!({}),
             AlwaysScope::Command,
             asking_turn,
         )
@@ -304,6 +305,7 @@ async fn a_decision_applied_after_its_turn_ended_does_not_refuse_the_next_one() 
             &json!({ "outcome": { "outcome": "selected", "optionId": "reject_once" } }),
             key,
             "run_command",
+            &json!({}),
             AlwaysScope::Command,
             current_turn,
         )
@@ -500,6 +502,7 @@ async fn an_answer_applied_between_turns_does_not_stick_either() {
             &json!({ "outcome": { "outcome": "selected", "optionId": "allow_always" } }),
             key.clone(),
             "run_command",
+            &json!({}),
             AlwaysScope::Command,
             asking_turn,
         )
@@ -515,6 +518,7 @@ async fn an_answer_applied_between_turns_does_not_stick_either() {
             &json!({ "outcome": { "outcome": "selected", "optionId": "reject_once" } }),
             key,
             "run_command",
+            &json!({}),
             AlwaysScope::Command,
             asking_turn,
         )
@@ -547,6 +551,7 @@ async fn an_always_applied_after_its_turn_ended_does_not_stick() {
             &json!({ "outcome": { "outcome": "selected", "optionId": "allow_always" } }),
             key.clone(),
             "run_command",
+            &json!({}),
             AlwaysScope::Command,
             asking_turn,
         )

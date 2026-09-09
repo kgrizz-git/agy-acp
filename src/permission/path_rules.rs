@@ -37,20 +37,22 @@ pub(super) fn outside_workspace(args: &Value, roots: &[PathBuf]) -> Option<Strin
         return Some(escaped.clone());
     }
 
+    // `~` is home-relative and therefore never inside the workspace.
+    let home_relative = string_args(args).into_iter().find(|s| s.starts_with('~'));
+    if home_relative.is_some() {
+        return home_relative;
+    }
+
     // A field that names a path names one whatever its value looks like, so a
-    // plain relative value is judged too: `link/secret.txt` carries no `/`, `~`
-    // or `..` and can still leave the workspace through a symlink.
+    // plain relative value is judged too: `link/secret.txt` carries no `/` or
+    // `..` and can still leave the workspace through a symlink. This follows
+    // the home-relative check: `~` must not be reinterpreted as a directory
+    // named `~` under the workspace.
     if let Some(escaped) = path_field_args(args)
         .into_iter()
         .find(|path| !roots.iter().any(|root| is_inside_from(path, root)))
     {
         return Some(escaped);
-    }
-
-    // `~` is home-relative and therefore never inside the workspace.
-    let home_relative = string_args(args).into_iter().find(|s| s.starts_with('~'));
-    if home_relative.is_some() {
-        return home_relative;
     }
 
     // A `..` component can escape, and does so through symlinks as well as
@@ -264,6 +266,22 @@ mod tests {
             outside_workspace(&json!({ "NotAPath": "link/secret.png" }), &roots),
             None,
             "the same string under a non-path key is not judged"
+        );
+    }
+
+    #[test]
+    fn home_relative_path_fields_are_outside_before_relative_path_checks() {
+        let roots = vec![PathBuf::from("/work")];
+        assert_eq!(
+            outside_workspace(&json!({ "Paths": ["~/.ssh/id_rsa"] }), &roots).as_deref(),
+            Some("~/.ssh/id_rsa"),
+            "a home-relative Paths entry is never a workspace-relative path"
+        );
+        // A tilde can resolve outside the workspace in any string field. Treat
+        // it as a path conservatively even when this particular query is not.
+        assert_eq!(
+            outside_workspace(&json!({ "Query": "~/pattern" }), &roots).as_deref(),
+            Some("~/pattern"),
         );
     }
 

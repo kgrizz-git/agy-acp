@@ -264,12 +264,13 @@ async fn the_always_options_name_the_command_for_command_tools() {
             .unwrap()
             .to_string()
     };
-    // The answer covers this command, so the label has to say so. It does not
-    // repeat the command text: the prompt's title is already ``Run `ls` ``,
-    // shown directly above these buttons.
+    // The answer covers every `ls` invocation, so the allow label has to say
+    // so — while the reject label stays narrow, because denies are keyed by
+    // exact arguments. It does not repeat the command text: the prompt's
+    // title is already ``Run `ls` ``, shown directly above these buttons.
     assert_eq!(
         named("allow_always"),
-        "Always allow this exact command this session"
+        "Always allow `ls` commands this session"
     );
     assert_eq!(
         named("reject_always"),
@@ -415,15 +416,56 @@ fn the_always_scope_decides_the_wording() {
         AlwaysScope::of(Some(&"{}".to_string()), &json!({ "Url": "https://x.test" })),
         AlwaysScope::Call
     );
-    // Only `Tool` names the tool; the other two must supply a noun.
+    // The program wording is taken only when the key widened with the
+    // classifier: `decide` pairs `Program` with a `safe:` key and falls back
+    // to `of` otherwise, so a classified command with unaudited extra fields
+    // keeps the exact label its fingerprint key actually stores.
+    let classified = classify_call("run_command", &json!({ "CommandLine": "ls" })).unwrap();
+    assert_eq!(
+        AlwaysScope::Program(classified.program).noun(),
+        Some("`ls` commands")
+    );
+    // Only `Tool` names the tool; the others must supply a noun.
     assert_eq!(AlwaysScope::Tool.noun(), None);
     assert!(AlwaysScope::Command.noun().is_some());
     assert!(AlwaysScope::Call.noun().is_some());
     assert_ne!(AlwaysScope::Command.noun(), AlwaysScope::Call.noun());
 }
 
-/// Path tools keep the tool-level wording, because they keep the tool-level
-/// key -- containment and the sensitive-path list still constrain them.
+#[test]
+fn an_incoherent_safe_scope_falls_back_to_the_fingerprint_key() {
+    let args = json!({ "CommandLine": "ls" });
+    let missing_classification = ResolvedCall::of(
+        "session",
+        "run_command",
+        &args,
+        Some("safe:ls".to_string()),
+        None,
+    );
+
+    assert_eq!(
+        missing_classification.allow_key,
+        missing_classification.fingerprint_key
+    );
+    assert_eq!(missing_classification.allow_scope, AlwaysScope::Command);
+
+    let mismatched_program = ResolvedCall::of(
+        "session",
+        "run_command",
+        &args,
+        Some("safe:cat".to_string()),
+        classify_call("run_command", &args),
+    );
+    assert_eq!(
+        mismatched_program.allow_key,
+        mismatched_program.fingerprint_key
+    );
+    assert_eq!(mismatched_program.allow_scope, AlwaysScope::Command);
+}
+
+/// Path tools keep the tool-level wording on the allow side, because allows
+/// keep the tool-level key. Denies narrow to the exact call for every tool:
+/// the reject button is worded for what its fingerprint-keyed store covers.
 #[tokio::test]
 async fn the_always_options_name_the_tool_for_path_tools() {
     let workspace = std::env::temp_dir().join("agy-acp-option-label-path-test");
@@ -454,12 +496,45 @@ async fn the_always_options_name_the_tool_for_path_tools() {
     assert_eq!(named("allow_always"), "Always allow view_file this session");
     assert_eq!(
         named("reject_always"),
-        "Always reject view_file this session"
+        "Always reject this exact call this session"
     );
     for kind in ["allow_once", "allow_always", "reject_once", "reject_always"] {
         assert!(options.iter().any(|o| o["kind"] == kind), "missing {kind}");
     }
 
+    bridge
+        .resolve_response(
+            &request["id"],
+            Some(json!({ "outcome": { "outcome": "selected", "optionId": "reject_always" } })),
+        )
+        .await;
+    assert_eq!(asking.await.unwrap().0, Decision::Deny);
+
+    // The deny covers exactly the rejected call: the same arguments are
+    // denied without asking, while a different file prompts anew.
+    let (decision, _) = expect_auto_decision(
+        &bridge,
+        json!({
+            "conversationId": "conv-1",
+            "toolCall": { "name": "view_file", "args": { "TargetFile": target.display().to_string() } },
+        }),
+    )
+    .await;
+    assert_eq!(decision, Decision::Deny);
+
+    let other = workspace.join("b.txt").display().to_string();
+    let asking = {
+        let bridge = bridge.clone();
+        tokio::spawn(async move {
+            bridge
+                .decide(&json!({
+                    "conversationId": "conv-1",
+                    "toolCall": { "name": "view_file", "args": { "TargetFile": other } },
+                }))
+                .await
+        })
+    };
+    let request = expect_permission_request(&mut rx).await;
     bridge
         .resolve_response(
             &request["id"],
@@ -513,37 +588,28 @@ fn different_arguments_never_share_a_fingerprint() {
     );
 }
 
-/// D2: exact byte equality, no normalization. Each normalization step merges
-/// commands that are not identical, and tool-level keying is the degenerate
-/// case of normalizing everything away -- which is how the original bug arose.
-/// A future ergonomic tweak has to argue with this assertion.
+/// D2: exact byte equality, no normalization — except the whitespace the
+/// classifier deliberately erases. `ls` vs `ls ` classify identically (empty
+/// tokens are skipped), so one approval covers both; anything that changes
+/// the token list still prompts. The ergonomic tweak argued with this
+/// assertion and won only this far.
 #[tokio::test]
 async fn sticky_answers_are_not_normalized() {
     let workspace = std::env::temp_dir().join("agy-acp-no-normalization-test");
     std::fs::create_dir_all(&workspace).unwrap();
-    let (bridge, mut rx) =
+    let (bridge, _rx) =
         bridge_with_run_command_always_allowed(&workspace.display().to_string()).await;
 
-    // "ls " is not "ls".
-    let asking = {
-        let bridge = bridge.clone();
-        tokio::spawn(async move {
-            bridge
-                .decide(&json!({
-                    "conversationId": "conv-1",
-                    "toolCall": { "name": "run_command", "args": { "CommandLine": "ls " } },
-                }))
-                .await
-        })
-    };
-    let request = expect_permission_request(&mut rx).await;
-    bridge
-        .resolve_response(
-            &request["id"],
-            Some(json!({ "outcome": { "outcome": "selected", "optionId": "reject_once" } })),
-        )
-        .await;
-    assert_eq!(asking.await.unwrap().0, Decision::Deny);
+    // "ls " is "ls": trailing whitespace splits to nothing.
+    let (decision, _) = expect_auto_decision(
+        &bridge,
+        json!({
+            "conversationId": "conv-1",
+            "toolCall": { "name": "run_command", "args": { "CommandLine": "ls " } },
+        }),
+    )
+    .await;
+    assert_eq!(decision, Decision::Allow);
 }
 
 /// D3: the two detectors are a union. All four cases, not two -- asserting
@@ -637,9 +703,13 @@ fn the_unkeyed_fields_list_does_not_grow_by_accident() {
 }
 
 /// D1: the fingerprint covers the whole argument object, not just
-/// `CommandLine`. Without this, someone "simplifies" it back to the command
-/// string and no test objects -- and the same command in a different
-/// directory is not the same command.
+/// `CommandLine` — for commands the classifier cannot widen. A classified
+/// command shares one program key across working directories instead: two
+/// contained `Cwd`s under one approval is no weaker than tool-level keying,
+/// because the working directory is re-checked per call, not per key.
+/// Without this, someone "simplifies" the key back to the command string and
+/// no test objects -- and a `Cwd` outside the workspace must still prompt,
+/// which is what the key deliberately does *not* carry.
 #[tokio::test]
 async fn a_differing_cwd_is_a_different_command() {
     let workspace = std::env::temp_dir().join("agy-acp-cwd-key-test");
@@ -647,9 +717,7 @@ async fn a_differing_cwd_is_a_different_command() {
     let (bridge, mut rx) = test_bridge(&workspace.display().to_string(), &[]).await;
 
     // Both directories are inside the workspace, so containment is satisfied
-    // for either and the key is the only thing that can differ. With paths
-    // outside it, this test would pass on the containment re-check instead
-    // and prove nothing about the key.
+    // for either: the second call shares the program approval silently.
     let one = workspace.join("one").display().to_string();
     let two = workspace.join("two").display().to_string();
     std::fs::create_dir_all(&one).unwrap();
@@ -679,16 +747,36 @@ async fn a_differing_cwd_is_a_different_command() {
         .await;
     assert_eq!(first.await.unwrap().0, Decision::Allow);
 
+    let (decision, _) = expect_auto_decision(
+        &bridge,
+        json!({
+            "conversationId": "conv-1",
+            "toolCall": {
+                "name": "run_command",
+                "args": { "CommandLine": "ls", "Cwd": two },
+            },
+        }),
+    )
+    .await;
+    assert_eq!(decision, Decision::Allow);
+
+    // Outside the workspace the same program still prompts: `Cwd` is checked
+    // per call precisely because the key omits it.
+    let outside = std::env::temp_dir()
+        .join("agy-acp-cwd-key-outside")
+        .display()
+        .to_string();
+    std::fs::create_dir_all(&outside).unwrap();
     let asking = {
         let bridge = bridge.clone();
-        let two = two.clone();
+        let outside = outside.clone();
         tokio::spawn(async move {
             bridge
                 .decide(&json!({
                     "conversationId": "conv-1",
                     "toolCall": {
                         "name": "run_command",
-                        "args": { "CommandLine": "ls", "Cwd": two },
+                        "args": { "CommandLine": "ls", "Cwd": outside },
                     },
                 }))
                 .await
@@ -896,7 +984,7 @@ async fn always_allow_still_applies_per_tool_for_path_tools() {
 }
 
 #[tokio::test]
-async fn always_allow_is_remembered_per_command_for_command_tools() {
+async fn always_allow_is_remembered_per_program_for_command_tools() {
     let workspace = std::env::temp_dir().join("agy-acp-always-per-command-test");
     std::fs::create_dir_all(&workspace).unwrap();
     let (bridge, mut rx) =
@@ -978,6 +1066,113 @@ async fn a_path_inside_a_command_string_is_caught_by_the_command_key() {
                     "toolCall": {
                         "name": "run_command",
                         "args": { "CommandLine": "cat /etc/shadow" },
+                    },
+                }))
+                .await
+        })
+    };
+    let request = expect_permission_request(&mut rx).await;
+    bridge
+        .resolve_response(
+            &request["id"],
+            Some(json!({ "outcome": { "outcome": "selected", "optionId": "reject_once" } })),
+        )
+        .await;
+    assert_eq!(asking.await.unwrap().0, Decision::Deny);
+}
+
+/// A program approval covers the next matching invocation with no prompt.
+#[tokio::test]
+async fn always_allow_ls_covers_ls_src_silently() {
+    let workspace = std::env::temp_dir().join("agy-acp-program-allow-test");
+    let src = workspace.join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    let (bridge, mut rx) = test_bridge(&workspace.display().to_string(), &[]).await;
+    let cwd = workspace.display().to_string();
+
+    let first = {
+        let bridge = bridge.clone();
+        let cwd = cwd.clone();
+        tokio::spawn(async move {
+            bridge
+                .decide(&json!({
+                    "conversationId": "conv-1",
+                    "toolCall": {
+                        "name": "run_command",
+                        "args": { "CommandLine": "ls", "Cwd": cwd },
+                    },
+                }))
+                .await
+        })
+    };
+    let request = expect_permission_request(&mut rx).await;
+    bridge
+        .resolve_response(
+            &request["id"],
+            Some(json!({ "outcome": { "outcome": "selected", "optionId": "allow_always" } })),
+        )
+        .await;
+    assert_eq!(first.await.unwrap().0, Decision::Allow);
+
+    let (decision, reason) = expect_auto_decision(
+        &bridge,
+        json!({
+            "conversationId": "conv-1",
+            "toolCall": {
+                "name": "run_command",
+                "args": { "CommandLine": "ls src", "Cwd": cwd },
+            },
+        }),
+    )
+    .await;
+    assert_eq!(decision, Decision::Allow);
+    assert_eq!(reason, "Always allowed `ls` commands in this session.");
+}
+
+/// The honor-site check is real: `ls /etc` passes check 1 (its `Cwd` is
+/// inside) and must still prompt, because check 2 judges the extracted path.
+/// A test of the classifier alone could not catch a missing second conjunct.
+#[tokio::test]
+async fn always_allow_ls_does_not_cover_ls_etc() {
+    let workspace = std::env::temp_dir().join("agy-acp-program-etc-test");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let (bridge, mut rx) = test_bridge(&workspace.display().to_string(), &[]).await;
+    let cwd = workspace.display().to_string();
+
+    let first = {
+        let bridge = bridge.clone();
+        let cwd = cwd.clone();
+        tokio::spawn(async move {
+            bridge
+                .decide(&json!({
+                    "conversationId": "conv-1",
+                    "toolCall": {
+                        "name": "run_command",
+                        "args": { "CommandLine": "ls", "Cwd": cwd },
+                    },
+                }))
+                .await
+        })
+    };
+    let request = expect_permission_request(&mut rx).await;
+    bridge
+        .resolve_response(
+            &request["id"],
+            Some(json!({ "outcome": { "outcome": "selected", "optionId": "allow_always" } })),
+        )
+        .await;
+    assert_eq!(first.await.unwrap().0, Decision::Allow);
+
+    let asking = {
+        let bridge = bridge.clone();
+        let cwd = cwd.clone();
+        tokio::spawn(async move {
+            bridge
+                .decide(&json!({
+                    "conversationId": "conv-1",
+                    "toolCall": {
+                        "name": "run_command",
+                        "args": { "CommandLine": "ls /etc", "Cwd": cwd },
                     },
                 }))
                 .await

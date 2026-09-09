@@ -29,16 +29,18 @@ completion. When a piece of work gets a plan (kept under `plans/`):
   is being planned and implemented**. Do not delete them early.
 - **Link** the plan from the TODO entry (a one-line `Plan: plans/<name>.md`
   pointer) so the entry and the plan cross-reference.
-- **Delete** the entry in the **last commit of the pull request**, together with
-  the plan move and the CHANGELOG entry — not after the merge. A cleanup that
-  happens after landing has no owner: the branch is gone, the reviewer has moved
-  on, and what is left is a TODO entry for work that shipped and a plan sitting
-  in `plans/` claiming to be in flight. Putting it in the PR also lets a reviewer
-  see the claim that the work is done in the same diff as the work.
+- **Delete** the entry with the plan move and CHANGELOG entry in the same pull
+  request — not after the merge. A cleanup that happens after landing has no
+  owner: the branch is gone, the reviewer has moved on, and what is left is a
+  TODO entry for work that shipped and a plan sitting in `plans/` claiming to be
+  in flight. Putting it in the PR lets a reviewer see the claim that the work is
+  done in the same diff as the work.
 - This applies symmetrically: if an entry is removed before its work ships, the
-  work becomes untracked. Premature deletion is still the bug to avoid — the last
-  commit before merge is the earliest safe point, not an invitation to delete
-  during planning.
+  work becomes untracked. Premature deletion is still the bug to avoid.
+- Preserve reviewable history: make follow-up fixes as ordinary commits. Do not
+  squash, amend, rebase, or force-push a pull-request branch unless the user has
+  explicitly asked for that rewrite. A close-out commit need not remain the
+  branch tip if later review work is required.
 
 **Code does not cite plans.** A comment in `src/` never points at
 `plans/<name>.md`. Plans move (`plans/` → `plans/completed/`), so the path rots;
@@ -66,9 +68,10 @@ Plans live in three buckets:
 Filenames keep their topic (`permission-command-keying.md`), not a status
 prefix; the directory carries the status. In-flight plans are linked from
 `TODO.md` as `Plan: plans/<name>.md`. Move the plan to
-`plans/completed/<name>.md` in the pull request's last commit, alongside
-deleting the TODO entry and adding the CHANGELOG line — a plan still sitting in
-`plans/` after its work merged reads as in-flight to everyone who comes next.
+`plans/completed/<name>.md` in the same pull request as the TODO deletion and
+CHANGELOG line. A plan still sitting in `plans/` after its work merged reads as
+in-flight to everyone who comes next; later review commits do not require
+rewriting the close-out commit.
 
 **CHANGELOG** entries are bullets only — one short clause per observable change.
 Categories under each version, in order: **Added**, **Changed**, **Fixed**,
@@ -123,14 +126,16 @@ would be `0.2.0`.
    - In CI, `E2E_MODEL_ROSTER` (comma-separated `gemini-*-flash-low` slugs) and
      `E2E_MODEL_OFFSET` (`github.run_number`) rotate model-issuing tests via
      `session/set_model`; with at least two roster entries, those tests use
-     different models in a run. This mitigates the observed daily per-model
-     quota (probes 2026-09-08: 1 request per no-tool turn, base-model metering,
-     no wider ceiling observed at ~30 project requests — see
-     plans/completed/e2e-quota-rotation.md). Unset locally,
+     different models in a run and a failed turn advances to the next entry
+     before each retry. This mitigates the observed daily per-model quota and
+     transient per-model capacity failures (probes 2026-09-08: 1 request per
+     no-tool turn, base-model metering, no wider ceiling observed at ~30 project
+     requests — see plans/completed/e2e-quota-rotation.md). Unset locally,
      tests fall through to the `settings.json` default. `error_paths` does not
-     call the model. A failed turn sleeps 60s and retries once — per-minute
-     429s carry ~37s retryDelay, so transient failures clear; daily 429s fail
-     again fast, with a hint pointing at the agy log.
+     call the model. A failed turn retries twice, after 30s then 60s, failing
+     over to the next roster model first: the first backoff absorbs short 503
+     capacity spikes and the second exceeds the observed ~37s per-minute-429
+     retryDelay; daily 429s fail again fast, with a hint pointing at the agy log.
    - Local runs: `scripts/e2e-local.sh [filter] [args...]` sources the token
      from `.env.e2e.local` (gitignored) and runs everything under a throwaway
      `HOME`, so the real `~/.gemini` state (OAuth login, settings, session
@@ -172,7 +177,8 @@ repository-level e2e key: the workflow checks out PR code.
 - `fetch_available_models()` runs `agy models` synchronously during `Adapter::new()`. If `agy` isn't installed, models list is empty (no error).
 - `agy models` prints `id<TAB>Human Label` on stdout and its "Fetching available models..." banner on stderr. Only the id is a valid `--model` argument; ACP gets the id as `modelId`/`value` and the label as `name`. Ids arriving from a client are checked against that list, and a `id<TAB>label` string left in an old `sessions.json` is repaired on restore.
 - `session/cancel` returns `{}` immediately but sets an `AtomicBool` flag that the prompt task polls; when set, it kills the in-flight `agy` subprocess *and every process agy started* (Unix only — see `src/proc.rs`) — agy shells out to run a tool call, so killing the pid alone left the command orphaned and running to completion — and the turn ends with `stopReason: "cancelled"`. A cancel — and ordinary turn teardown, and the start of the next turn — answers any permission request the turn left outstanding, so its timeout cannot fire during a later turn and mark that one a refusal. `cancel.rs` holds one token per in-flight turn rather than one per session — a host may send a second prompt before the first finishes, and a cancel stops every turn in that session.
-- Permission answers marked "Always" are keyed by `(session, tool name, Option<args fingerprint>)`. The fingerprint is the default: `sticky_scope()` returns `None` — tool-level keying — only for a tool whose kind is `read`, `edit` or `search` *and* whose arguments do *not* trip `has_unconstrained_reach` — no `CommandLine`, no `Url`, no `://` in any string value, at any depth. Kind alone is not sufficient evidence, because kind is a display classification: `read_url_content` is kind `read` but its `Url` is not a path field, so containment and the sensitive-path list are as inert against it as against a command line. Anything with unconstrained reach, and any tool whose kind is not on the list, is keyed by the arguments. The fingerprint is the argument object serialized minus `UNKEYED_FIELDS` (`toolAction`, `toolSummary`, `WaitMsBeforeAsync`, all presentational); comparison is exact, because under-matching costs a prompt and over-matching is a hole. Rejects narrow the same way. The prompt labels name whichever scope applies, via `AlwaysScope`: the tool, "this exact command" where a `CommandLine` is present, or "this exact call" otherwise — `read_url_content` and any unknown tool land on the last, since calling their arguments a command would be false. `AlwaysScope` is derived once in `decide` from the same `sticky_scope` result the key is built from, and passed to both the prompt and `apply_outcome`, so the button, the key and the reason string cannot disagree. `evict_if_needed` queues the evicted session id on `Adapter.pending_forget` (a `std::sync::Mutex`, not the adapter mutex, which `session/prompt` holds for a whole turn) and the `main.rs` dispatcher drains it into `PermissionBridge::forget_session`; re-admitting the id first cancels the forget.
+- Permission answers marked "Always" are keyed by `(session, tool name, Option<args fingerprint>)`. The fingerprint is the default: `sticky_scope()` returns `None` — tool-level keying — only for a tool whose kind is `read`, `edit` or `search` *and* whose arguments do *not* trip `has_unconstrained_reach` — no `CommandLine`, no `Url`, no `://` in any string value, at any depth. Kind alone is not sufficient evidence, because kind is a display classification: `read_url_content` is kind `read` but its `Url` is not a path field, so containment and the sensitive-path list are as inert against it as against a command line. Anything with unconstrained reach, and any tool whose kind is not on the list, is keyed by the arguments. The fingerprint is the argument object serialized minus `UNKEYED_FIELDS` (`toolAction`, `toolSummary`, `WaitMsBeforeAsync`, all presentational); comparison is exact, because under-matching costs a prompt and over-matching is a hole.
+  A fourth scope — **program keying** — widens `run_command` only when the command line classifies as a single invocation of an allowlisted read-only program *and* every other argument key is `Cwd` or presentational: the key becomes `safe:<program>` (see `src/permission/safe_command.rs`). A classified command with any other field present, or one the tokenizer cannot account for, falls back to the fingerprint exactly as today. **Allows widen, denies narrow:** a remembered allow may cover the program, but a remembered reject is always stored under the fingerprint and always wins over a later program allow for that string. The prompt labels name whichever scope applies, via `AlwaysScope`: the tool, the program ("Always allow `ls` commands this session"), "this exact command" where a `CommandLine` is present, or "this exact call" otherwise — `read_url_content` and any unknown tool land on the last, since calling their arguments a command would be false. `AlwaysScope` is derived once in `decide` from the same `sticky_scope` result the key is built from, and passed to both the prompt and `apply_outcome`, so the button, the key and the reason string cannot disagree. A remembered allow is only honoured when both containment checks pass on the current call — the existing `escapes_containment`, plus `classified_paths_escape`, which re-joins the command's extracted paths against its `Cwd`, so `ls /etc` still prompts after an `ls` approval. `evict_if_needed` queues the evicted session id on `Adapter.pending_forget` (a `std::sync::Mutex`, not the adapter mutex, which `session/prompt` holds for a whole turn) and the `main.rs` dispatcher drains it into `PermissionBridge::forget_session`; re-admitting the id first cancels the forget.
 - Both `session/set_model` and `session/setConfigOption` are accepted for model selection.
 
 ### Permission bridge (`--permission-prompts`)

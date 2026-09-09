@@ -3,9 +3,10 @@
 //! `e2e` must stay in these test paths: CI selects this tier by substring.
 //! Model-issuing tests pick a slug from `E2E_MODEL_ROSTER` via
 //! `session/set_model` so consecutive runs spread the free-tier daily
-//! per-model quota; an empty roster falls through to the `settings.json`
-//! default. `session_load` also asserts conversation memory, so there is
-//! no separate multi-turn test.
+//! per-model quota. Retries advance through that same roster to avoid waiting
+//! on one temporarily unavailable model; an empty roster falls through to the
+//! `settings.json` default. `session_load` also asserts conversation memory,
+//! so there is no separate multi-turn test.
 
 use serde_json::{json, Value};
 
@@ -58,6 +59,29 @@ fn pick_model(test_index: usize) -> Option<String> {
     pick_model_from(&roster, offset, test_index)
 }
 
+/// Pick a different roster position for a retry of this test's model turn.
+/// Retry zero is the initial assignment, so it does not switch models.
+fn retry_model_from(
+    roster: &str,
+    offset: usize,
+    test_index: usize,
+    retry_number: usize,
+) -> Option<String> {
+    if retry_number == 0 {
+        return None;
+    }
+    pick_model_from(roster, offset, test_index + retry_number)
+}
+
+fn retry_model(test_index: usize, retry_number: usize) -> Option<String> {
+    let roster = std::env::var("E2E_MODEL_ROSTER").unwrap_or_default();
+    let offset = std::env::var("E2E_MODEL_OFFSET")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    retry_model_from(&roster, offset, test_index, retry_number)
+}
+
 #[test]
 fn pick_model_from_empty_or_whitespace_is_none() {
     assert_eq!(pick_model_from("", 0, 0), None);
@@ -88,6 +112,15 @@ fn pick_model_from_single_entry_is_a_noop() {
 #[test]
 fn pick_model_from_trims_and_drops_empty_tokens() {
     assert_eq!(pick_model_from(" a, ,b ", 0, 1).as_deref(), Some("b"));
+}
+
+#[test]
+fn retry_model_advances_through_the_roster() {
+    let roster = "a,b,c";
+    assert_eq!(retry_model_from(roster, 0, 1, 0), None);
+    assert_eq!(retry_model_from(roster, 0, 1, 1).as_deref(), Some("c"));
+    assert_eq!(retry_model_from(roster, 0, 1, 2).as_deref(), Some("a"));
+    assert_eq!(retry_model_from("only", 0, 0, 1).as_deref(), Some("only"));
 }
 
 #[test]
@@ -149,6 +182,7 @@ fn test_e2e_agy_acp_full_round_trip() {
         &mut reader,
         4,
         session_id,
+        0,
         "Reply with exactly one word: PONG",
     );
     assert!(resp["error"].is_null(), "Got error: {}", resp["error"]);
@@ -235,10 +269,22 @@ fn send_recv(
 }
 
 fn set_model_rpc(rpc_id: u64, session_id: &str, slug: &str) -> String {
-    format!(
-        r#"{{"jsonrpc":"2.0","id":{},"method":"session/set_model","params":{{"sessionId":"{}","modelId":"{}"}}}}"#,
-        rpc_id, session_id, slug
-    )
+    json!({
+        "jsonrpc": "2.0",
+        "id": rpc_id,
+        "method": "session/set_model",
+        "params": { "sessionId": session_id, "modelId": slug },
+    })
+    .to_string()
+}
+
+#[test]
+fn set_model_rpc_encodes_session_and_model_strings() {
+    let request: Value =
+        serde_json::from_str(&set_model_rpc(7, "session\"id", "model\nslug")).unwrap();
+    assert_eq!(request["id"], 7);
+    assert_eq!(request["params"]["sessionId"], "session\"id");
+    assert_eq!(request["params"]["modelId"], "model\nslug");
 }
 
 /// Apply this test's roster assignment via `session/set_model`, or log that
@@ -265,6 +311,37 @@ fn maybe_set_model(
         None => {
             eprintln!("[e2e] model: (settings.json default; no E2E_MODEL_ROSTER)");
         }
+    }
+}
+
+/// Switch a retried prompt to the next configured roster member. A missing or
+/// rejected retry assignment is only diagnostic: the prompt still retries on
+/// the current model, preserving the original failure in the test output.
+fn switch_to_retry_model(
+    stdin: &mut std::process::ChildStdin,
+    reader: &mut std::io::BufReader<std::process::ChildStdout>,
+    session_id: &str,
+    test_index: usize,
+    retry_number: usize,
+    prompt_id: u64,
+) {
+    let Some(slug) = retry_model(test_index, retry_number) else {
+        eprintln!("[e2e] retry model: (settings.json default; no E2E_MODEL_ROSTER)");
+        return;
+    };
+    eprintln!("[e2e] retry model: {slug}");
+    let rpc_id = 10_000 + prompt_id * TURN_ATTEMPTS as u64 + retry_number as u64;
+    let response = send_recv_id(
+        stdin,
+        reader,
+        rpc_id,
+        &set_model_rpc(rpc_id, session_id, &slug),
+    );
+    if !response["error"].is_null() {
+        eprintln!(
+            "[e2e] retry model switch failed for {slug}: {}",
+            response["error"]
+        );
     }
 }
 
@@ -319,35 +396,67 @@ fn send_recv_id(
     }
 }
 
-/// Attempts for one model turn: the first try plus one retry.
-const TURN_ATTEMPTS: u32 = 2;
+/// Attempts for one model turn: the first try plus two bounded retries.
+const TURN_ATTEMPTS: u32 = 3;
 const _: () = assert!(TURN_ATTEMPTS >= 1);
 
-/// Delay before resending a failed turn. Captured per-minute 429s carry
-/// `retryDelay ~37s`, so 60s clears the 5/min bucket; daily-quota 429s fail
-/// again just as fast, since 429s return in seconds.
-const TURN_RETRY_DELAY_SECS: u64 = 60;
+/// Delays before resending a failed turn. The first catches brief 503 capacity
+/// spikes; the second exceeds the observed per-minute 429 `retryDelay ~37s`.
+const TURN_RETRY_DELAYS_SECS: [u64; 2] = [30, 60];
+const _: () = assert!(TURN_RETRY_DELAYS_SECS.len() == (TURN_ATTEMPTS - 1) as usize);
+
+/// Returns the delay for a valid retry count, never panicking on a bad caller.
+fn retry_delay_secs(attempts_left: u32) -> Option<u64> {
+    if !(1..TURN_ATTEMPTS).contains(&attempts_left) {
+        return None;
+    }
+    let retry_index = (TURN_ATTEMPTS - attempts_left - 1) as usize;
+    TURN_RETRY_DELAYS_SECS.get(retry_index).copied()
+}
+
+fn retry_number(attempts_left: u32) -> Option<usize> {
+    (1..TURN_ATTEMPTS)
+        .contains(&attempts_left)
+        .then_some((TURN_ATTEMPTS - attempts_left) as usize)
+}
+
+#[test]
+fn retry_delays_back_off_without_exceeding_the_e2e_budget() {
+    assert_eq!(retry_delay_secs(2), Some(30));
+    assert_eq!(retry_delay_secs(1), Some(60));
+    assert_eq!(retry_delay_secs(0), None);
+    assert_eq!(retry_delay_secs(TURN_ATTEMPTS), None);
+    assert_eq!(retry_number(2), Some(1));
+    assert_eq!(retry_number(1), Some(2));
+    assert_eq!(retry_number(0), None);
+    assert_eq!(retry_number(TURN_ATTEMPTS), None);
+}
 
 /// Decide whether a failed turn is worth resending. Sleeps before returning
 /// true. Always logs, so a retried turn is visible in the test output; on the
-/// final failure, points at the agy log, which names the quotaId behind a 429.
+/// final failure, points at the agy log, which names provider status and quota
+/// details when agy exposes them.
 ///
 /// The retry is deliberately blind to the error text: a failed turn surfaces
 /// as `agy failed: <opaque agy stderr>`, which often omits the provider status
 /// entirely, so matching "429"/"503" would miss transient phrasings while
 /// coupling us to agy stderr wording. Refusals are not errors here
 /// (`stopReason: "refusal"`), and malformed/session/auth failures cannot occur
-/// past the harness gates — so the only cost of a needless retry is one 60s
-/// sleep on an already-failed run.
+/// past the harness gates — so the only cost of a needless retry is at most 90s
+/// of backoff on an already-failed run.
 fn await_turn_retry(err: &Value, attempts_left: u32) -> bool {
     use std::time::Duration;
     if attempts_left == 0 {
         eprintln!("[e2e] turn failed after retry; not retrying: {err}");
-        eprintln!("[e2e] hint: a 429 names its quotaId in the agy log (CI: agy-logs artifact)");
+        eprintln!("[e2e] hint: provider details are in the agy-logs CI artifact");
         return false;
     }
-    eprintln!("[e2e] turn error, retrying once after {TURN_RETRY_DELAY_SECS}s: {err}");
-    std::thread::sleep(Duration::from_secs(TURN_RETRY_DELAY_SECS));
+    let Some(delay_secs) = retry_delay_secs(attempts_left) else {
+        eprintln!("[e2e] invalid retry count; not retrying: {err}");
+        return false;
+    };
+    eprintln!("[e2e] turn error, retrying ({attempts_left} remaining) after {delay_secs}s: {err}");
+    std::thread::sleep(Duration::from_secs(delay_secs));
     true
 }
 
@@ -356,6 +465,7 @@ fn send_prompt_wait(
     reader: &mut std::io::BufReader<std::process::ChildStdout>,
     id: u64,
     session_id: &str,
+    test_index: usize,
     text: &str,
 ) -> (Option<String>, Value) {
     use std::io::{BufRead, Write};
@@ -403,6 +513,10 @@ fn send_prompt_wait(
         if !await_turn_retry(&resp["error"], attempts_left) {
             return (notification_text, resp);
         }
+        let Some(retry_number) = retry_number(attempts_left) else {
+            return (notification_text, resp);
+        };
+        switch_to_retry_model(stdin, reader, session_id, test_index, retry_number, id);
         attempts_left -= 1;
     }
 }
@@ -439,6 +553,7 @@ fn test_e2e_session_load() {
         &mut reader,
         4,
         &session_id,
+        1,
         "Remember this word: BANANA. Reply OK.",
     );
     assert!(
@@ -468,6 +583,7 @@ fn test_e2e_session_load() {
         &mut reader,
         6,
         &session_id,
+        1,
         "What word did I ask you to remember? Reply with just that word.",
     );
     assert!(

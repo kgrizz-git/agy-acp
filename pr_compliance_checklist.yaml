@@ -33,10 +33,21 @@ pr_compliances:
       `outside_workspace()` no longer looks only at absolute paths -- home-
       relative and `..`-bearing arguments are judged against the workspace roots,
       and an unset root contains nothing.
+
+      For run_command, a fourth key -- `safe:<program>` -- widens the allow side
+      only when the command line classifies as a single invocation of an
+      allowlisted read-only program and every other argument key is Cwd or
+      presentational (inert_extra_args). A classified command with any other
+      field present falls back to the fingerprint exactly as today. Denies are
+      always stored under the fingerprint and always win over a later program
+      allow for that string. The honor site checks two conjuncts: the existing
+      escapes_containment, plus a second that re-joins extracted paths against
+      the command's Cwd so ls /etc still prompts after an ls approval.
     failure_criteria: >
       A hook response with no decision field (agy then hangs until print-mode
-      timeout), a default-allow branch, or an "always allow" answer that bypasses
-      the path checks.
+      timeout), a default-allow branch, an "always allow" answer that bypasses
+      the path checks, or a remembered reject that widens to cover invocations
+      beyond the exact string that was declined.
 
   - title: "Streaming comes from stream-json; SQLite is load-only"
     compliance_label: true

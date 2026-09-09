@@ -119,7 +119,7 @@ Set the `AGY_EXTRA_ARGS` environment variable to pass additional arguments to ev
 }
 ```
 
-Tool calls then arrive as ACP `session/request_permission` requests, with **Allow once** / **Always allow \<tool\> this session** / **Reject** / **Always reject \<tool\> this session** options. For a tool that runs a command the two "always" labels instead read **Always allow this exact command this session** and **Always reject this exact command this session**, because that is what they cover. Each label says what the answer is remembered by. See [What "Always" remembers](#what-always-remembers).
+Tool calls then arrive as ACP `session/request_permission` requests, with **Allow once** / **Always allow \<tool\> this session** / **Reject** / **Always reject \<tool\> this session** options. For a tool that runs a command the two "always" labels instead read **Always allow `ls` commands this session** (when the command classifies as a simple read-only program) or **Always allow this exact command this session** (when it does not), and **Always reject this exact command this session** — because that is what the reject always covers, even when the allow side widened. Each label says what the answer is remembered by. See [What "Always" remembers](#what-always-remembers).
 
 This works by installing a `PreToolUse` hook for `agy` in a private directory of the adapter's own — nothing is written to your workspace or to your global `agy` config, so plain `agy` use in a terminal is unaffected.
 
@@ -154,6 +154,13 @@ which:
   to it is covered, whatever file it names.
 - **Always allow this exact command this session** — keyed by the tool *and the
   arguments you were shown*. A later call with any different argument asks again.
+- **Always allow `ls` commands this session** — keyed by the *program*. For
+  `run_command`, when the command line is a single invocation of a read-only
+  program the bridge judges simple (`ls`, `cat`, `grep`, …), the answer covers
+  every later invocation of that program — `ls`, `ls -la`, `ls src/`. This is
+  the one-and-done approval the per-command key never reached: the same listing
+  run as `list_dir` was already one-and-done, but run as `run_command "ls"` it
+  reprompted on every new path.
 
 The narrow, per-command key is the default, and a tool has to *earn* the broader
 one. It earns it only by being a plain read, edit or search tool whose arguments
@@ -162,6 +169,35 @@ still constrain. An argument that carries a command line or a URL reaches
 somewhere those checks cannot follow, so the answer is pinned to the exact
 arguments instead. That is why **Always allow** on `read_url_content` covers the
 one URL you approved and not the next one.
+
+A command line earns the program key only when it parses cleanly: it must be a
+single invocation of an allowlisted program, with no shell metacharacters, no
+chaining, no redirection, no quoting, no expansion, and every flag and operand
+the bridge can account for. `ls; rm x`, `ls $(id)`, `ls > out`, `ls -z`, `sudo ls`
+and `cat >x` all fail to classify and stay per-command. **Allows widen, denies
+narrow:** a remembered reject of `ls -z` blocks only that exact string, and a
+later **Always allow `ls` commands** does not cover it. The first invocation of a
+program is always shown — this widens what a remembered answer *covers*, it never
+auto-allows a command you never saw.
+
+The program key is used only when every other top-level argument is `Cwd` or a
+presentation-only field. A later classified command shares the key only after its
+extracted paths pass the workspace and sensitive-path checks relative to its
+current `Cwd`; an unclassified command stays exact-command keyed.
+
+The current program allowlist is `ls`, `cat`, `head`, `tail`, `wc`, `file`,
+`stat`, `pwd`, `du`, `df`, `date`, `which`, `basename`, `dirname`, `grep`, and
+`rg`. Every other command, and any use of these programs the parser cannot fully
+account for, stays exact-command keyed and prompts again when its arguments
+change.
+
+What `ls` resolves to is outside the boundary. The allowlist constrains the
+command *string*; the binary comes from the machine's `PATH`, which the bridge
+does not control, so a shadowed GNU `stat` on a Homebrew path could read with
+different flag semantics. Containment is judged at authorize time while the
+program opens paths later, so a workspace symlink swapped between the check and
+the run is the same TOCTOU gap the path tools already have — a property of the
+bridge's containment model, not of this widening.
 
 A tool this fork does not recognise falls through to the same narrow treatment,
 by design. An MCP server tool (`mcp_<server>_<tool>`), a subagent-driven call, or
@@ -176,12 +212,16 @@ treating everything outside the known read/edit/search tools as **other** is the
 contract that keeps those open-ended additions prompting rather than silently
 allowed.
 
-"Exact" means exact: the arguments are compared as-is, with no tokenizing and no
-shell semantics. `ls -l` and `ls  -l` are different commands and each is asked
-separately. Only presentational fields agy attaches to the call — its own summary
-of the action and an async wait hint — are ignored, since they do not change what
-runs. Under-matching costs you a prompt; over-matching would be a hole, so the
-comparison errs toward asking.
+"Exact" means exact. Whitespace-insensitive classification applies only to a
+program-scoped allow: `ls`, `ls␠` and `ls  -l` may share the `safe:ls` approval,
+where `␠` represents one space.
+Every remembered reject remains keyed by the exact `CommandLine`, so `ls -l`
+and `ls  -l` are different rejects. Anything that does not classify — `ls; rm
+x`, `cat >x`, `ls -z` — also compares its arguments as-is, with no tokenizing
+and no shell semantics. Only presentational fields agy attaches to the call —
+its own summary of the action and an async wait hint — are ignored, since they
+do not change what runs. Under-matching costs you a prompt; over-matching would
+be a hole, so the comparison errs toward asking.
 
 This is a preference held in memory, not a stored grant: answers are scoped to
 one session id, are never written to disk, and are forgotten when the adapter
@@ -200,9 +240,11 @@ a URL is not on the filesystem at all. That is exactly why those answers are
 keyed by their arguments: the checks cannot constrain them, so the key has to. A
 remembered allow for `cat README.md` grants `cat README.md` and nothing else.
 
-A remembered **reject** narrows the same way, and applies immediately. Rejecting
-one command forever rejects that command, not every command; rejecting a read
-tool with **Always reject \<tool\>** rejects the tool.
+A remembered **reject** narrows to the exact call, and applies immediately.
+Rejecting one command forever rejects that command, not every command — even
+when the allow side of the same prompt widened to a program, the reject still
+covers only the call you declined. A later read-tool call with different
+arguments prompts again.
 
 There is no way to revoke an "Always" answer within a session; starting a new
 one, or restarting the host, clears it.

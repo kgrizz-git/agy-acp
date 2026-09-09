@@ -18,6 +18,18 @@ fn tool_titles_prefer_the_most_specific_argument() {
         tool_title("write_to_file", &json!({ "TargetFile": "/tmp/a.txt" })),
         "write_to_file /tmp/a.txt"
     );
+    assert_eq!(
+        tool_title("list_dir", &json!({ "DirectoryPath": "src" })),
+        "list_dir src"
+    );
+    assert_eq!(
+        tool_title("grep_search", &json!({ "SearchTerm": "needle" })),
+        "grep_search needle"
+    );
+    assert_eq!(
+        tool_title("schedule", &json!({})),
+        "schedule (runs in this turn; may hold it open until the timer or iterations finish)"
+    );
     assert_eq!(tool_title("some_tool", &json!({})), "some_tool");
 }
 
