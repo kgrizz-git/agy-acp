@@ -29,16 +29,18 @@ completion. When a piece of work gets a plan (kept under `plans/`):
   is being planned and implemented**. Do not delete them early.
 - **Link** the plan from the TODO entry (a one-line `Plan: plans/<name>.md`
   pointer) so the entry and the plan cross-reference.
-- **Delete** the entry in the **last commit of the pull request**, together with
-  the plan move and the CHANGELOG entry — not after the merge. A cleanup that
-  happens after landing has no owner: the branch is gone, the reviewer has moved
-  on, and what is left is a TODO entry for work that shipped and a plan sitting
-  in `plans/` claiming to be in flight. Putting it in the PR also lets a reviewer
-  see the claim that the work is done in the same diff as the work.
+- **Delete** the entry with the plan move and CHANGELOG entry in the same pull
+  request — not after the merge. A cleanup that happens after landing has no
+  owner: the branch is gone, the reviewer has moved on, and what is left is a
+  TODO entry for work that shipped and a plan sitting in `plans/` claiming to be
+  in flight. Putting it in the PR lets a reviewer see the claim that the work is
+  done in the same diff as the work.
 - This applies symmetrically: if an entry is removed before its work ships, the
-  work becomes untracked. Premature deletion is still the bug to avoid — the last
-  commit before merge is the earliest safe point, not an invitation to delete
-  during planning.
+  work becomes untracked. Premature deletion is still the bug to avoid.
+- Preserve reviewable history: make follow-up fixes as ordinary commits. Do not
+  squash, amend, rebase, or force-push a pull-request branch unless the user has
+  explicitly asked for that rewrite. A close-out commit need not remain the
+  branch tip if later review work is required.
 
 **Code does not cite plans.** A comment in `src/` never points at
 `plans/<name>.md`. Plans move (`plans/` → `plans/completed/`), so the path rots;
@@ -66,9 +68,10 @@ Plans live in three buckets:
 Filenames keep their topic (`permission-command-keying.md`), not a status
 prefix; the directory carries the status. In-flight plans are linked from
 `TODO.md` as `Plan: plans/<name>.md`. Move the plan to
-`plans/completed/<name>.md` in the pull request's last commit, alongside
-deleting the TODO entry and adding the CHANGELOG line — a plan still sitting in
-`plans/` after its work merged reads as in-flight to everyone who comes next.
+`plans/completed/<name>.md` in the same pull request as the TODO deletion and
+CHANGELOG line. A plan still sitting in `plans/` after its work merged reads as
+in-flight to everyone who comes next; later review commits do not require
+rewriting the close-out commit.
 
 **CHANGELOG** entries are bullets only — one short clause per observable change.
 Categories under each version, in order: **Added**, **Changed**, **Fixed**,
