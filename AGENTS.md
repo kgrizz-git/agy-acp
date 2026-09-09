@@ -80,12 +80,17 @@ the bullet in parentheses (`(PR #9)`). No "Known issues" section — open proble
 belong in `TODO.md`. An `## Unreleased` section exists only while a release is
 being cut.
 
-**Semver is deferred.** `Cargo.toml` stays at `0.1.0` with no tags and no
-release workflow until there is an external reason to cut a release (public
-announcement, `cargo install` use case, downstream version requirement). Three
-options when that happens: stay on `## Unreleased`, adopt date-stamped headings,
-or adopt semver with tags and a release workflow. The first release under semver
-would be `0.2.0`.
+**Versioning.** Keep the current `0.1.0` history as-is; do not retroactively
+version already-merged work. Starting with the next meaningful user-visible
+feature, behaviour, or security change, bump `Cargo.toml` in the same pull
+request and move its CHANGELOG entries from `## Unreleased` under that version
+heading. Use patch releases for compatible bug fixes and minor releases for
+new or materially changed behaviour; decide any breaking-change version before
+implementation. Documentation-only and internal-maintenance changes do not by
+themselves require a bump. Tag and publish an artifact when there is a public
+release channel, but versioned local builds are useful before then: `--version`
+must identify the software that was installed. The next versioned delivery will
+be `0.2.0`.
 
 > This is a **hard fork** of `hicder/agy-acp`: no upstream remote, no pull requests
 > filed there. Fork-specific context and workflow are in the second half of this
