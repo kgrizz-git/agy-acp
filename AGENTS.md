@@ -17,6 +17,14 @@ cargo test e2e -- --ignored --nocapture  # e2e only (needs agy binary + auth)
 No separate typecheck command — `cargo build` and `cargo clippy` cover it. The
 tree is rustfmt-clean and CI enforces it, so run `cargo fmt` before pushing.
 
+### Branch protection
+
+Never bypass branch protection, including a direct push that GitHub reports as
+bypassing pull-request, required-check, review, merge-queue, or similar rules,
+unless the user has explicitly approved bypassing that exact protection after
+its risk has been explained. A request to change, commit, or push code does not
+authorize the bypass; create or update a pull request instead.
+
 Work items live in [TODO.md](TODO.md), not here — this file describes how the
 code works today. Completed work is recorded in [CHANGELOG.md](CHANGELOG.md).
 
