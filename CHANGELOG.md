@@ -48,6 +48,9 @@ of its own yet, so everything below is unreleased.
 
 ### Maintenance
 
+- Split the permission hook client, prompt wording, and command-sticky tests
+  into focused modules to keep the CI file-length gate green. (PR #21)
+
 - The e2e workflow now asks for environment approval once, not twice. It had two
   jobs referencing the `e2e` environment -- a `gate` job that read the secret to
   check presence, then the test job -- and GitHub prompts for each protected-
@@ -141,6 +144,9 @@ of its own yet, so everything below is unreleased.
   (PR #19)
 
 ### Fixed
+
+- `stat -t` no longer lets GNU's following filesystem operand bypass containment
+  after a program-wide approval. (PR #21)
 
 - `AGY_ACP_AUTO_ALLOW=none` no longer discards `AGY_ACP_SENSITIVE_PATTERNS`. The
   `none` arm returned a default policy, dropping the user's patterns, and that

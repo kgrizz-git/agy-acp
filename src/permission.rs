@@ -23,8 +23,12 @@ use uuid::Uuid;
 
 mod path_rules;
 use path_rules::{outside_workspace, string_args};
+mod prompt;
+use prompt::tool_title;
 mod safe_command;
 use safe_command::{classify_call, ProgramDef, SafeCommand};
+mod hook_client;
+pub use hook_client::run_hook;
 
 /// Env var carrying the bridge socket path into the `agy` subprocess (and from
 /// there into the hook command).
@@ -58,7 +62,7 @@ pub enum Decision {
 }
 
 impl Decision {
-    fn as_hook_json(self, reason: &str) -> Value {
+    pub(super) fn as_hook_json(self, reason: &str) -> Value {
         let decision = match self {
             Decision::Allow => "allow",
             Decision::Deny => "deny",
@@ -1171,92 +1175,10 @@ fn step_idx(payload: &Value) -> i64 {
         .unwrap_or(-1)
 }
 
-/// Builds the one-line summary the ACP client shows in the prompt.
-fn tool_title(tool_name: &str, args: &Value) -> String {
-    let field = |key: &str| args.get(key).and_then(|v| v.as_str());
-
-    if let Some(command) = field("CommandLine") {
-        return format!("Run `{command}`");
-    }
-    if let Some(target) = field("TargetFile") {
-        return format!("{tool_name} {target}");
-    }
-    if let Some(path) = field("AbsolutePath").or_else(|| field("DirectoryPath")) {
-        return format!("{tool_name} {path}");
-    }
-    if let Some(query) = field("Query").or_else(|| field("SearchTerm")) {
-        return format!("{tool_name} {query}");
-    }
-    // `schedule` runs its work as later steps of this same turn under headless
-    // agy, so approving it approves holding the turn open, not just one call.
-    if tool_name == "schedule" {
-        return "schedule (runs in this turn; may hold it open until the timer or iterations finish)".to_string();
-    }
-    tool_name.to_string()
-}
-
 fn default_socket_path() -> PathBuf {
     let mut path = std::env::temp_dir();
     path.push(format!("agy-acp-perm-{}.sock", std::process::id()));
     path
-}
-
-/// Entry point for `agy-acp permission-hook`, the command wired into agy's
-/// `PreToolUse` hook. Reads the hook payload on stdin, asks the running adapter
-/// over the bridge socket, and writes agy's decision JSON to stdout.
-///
-/// The hook only ever reaches agy through the adapter's private hook directory,
-/// so a missing socket means the adapter that owns this run is gone. Every failure
-/// path denies: agy runs with its own permission checks disabled whenever this
-/// hook is installed, so an unanswerable request must not become an allow.
-///
-/// Every response carries an explicit `decision`. A decision-less response (`{}`)
-/// leaves agy waiting on the tool call until the prompt times out.
-pub fn run_hook() {
-    use std::io::{Read, Write};
-
-    let mut payload = String::new();
-    let _ = std::io::stdin().read_to_string(&mut payload);
-
-    let decision = match std::env::var(SOCKET_ENV) {
-        Ok(path) if !path.is_empty() => hook_roundtrip(&path, payload.trim()),
-        _ => Err(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            format!("{SOCKET_ENV} is not set"),
-        )),
-    }
-    .unwrap_or_else(|err| {
-        Decision::Deny
-            .as_hook_json(&format!("agy-acp: permission bridge unavailable ({err})"))
-            .to_string()
-    });
-
-    let mut stdout = std::io::stdout();
-    let _ = writeln!(stdout, "{decision}");
-    let _ = stdout.flush();
-}
-
-fn hook_roundtrip(socket_path: &str, payload: &str) -> std::io::Result<String> {
-    use std::io::{BufRead, BufReader as StdBufReader, Write};
-    use std::os::unix::net::UnixStream as StdUnixStream;
-
-    let mut stream = StdUnixStream::connect(socket_path)?;
-    stream.write_all(payload.as_bytes())?;
-    stream.write_all(b"\n")?;
-    stream.flush()?;
-
-    let mut reader = StdBufReader::new(stream);
-    let mut response = String::new();
-    reader.read_line(&mut response)?;
-
-    let response = response.trim().to_string();
-    if response.is_empty() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::UnexpectedEof,
-            "empty response from adapter",
-        ));
-    }
-    Ok(response)
 }
 
 mod sticky_rules;
@@ -1264,6 +1186,8 @@ use sticky_rules::*;
 
 #[cfg(test)]
 mod policy_tests;
+#[cfg(test)]
+mod sticky_command_tests;
 #[cfg(test)]
 mod sticky_tests;
 #[cfg(test)]

@@ -216,7 +216,10 @@ const STAT_FLAGS: &[FlagDef] = &[
     shorts('n'),
     shorts('q'),
     shorts('h'),
-    value_flag(None, Some('t'), false),
+    // GNU `stat -t` is a bare switch, while Darwin takes a time format. Parse
+    // the common safe arity: on Darwin the format is conservatively treated as
+    // an operand path, rather than risking consuming a GNU filesystem operand.
+    shorts('t'),
 ];
 
 const PWD_FLAGS: &[FlagDef] = &[shorts('L'), shorts('P')];
@@ -993,7 +996,17 @@ mod tests {
             paths("grep -f patterns.txt src"),
             vec!["patterns.txt".to_string(), "src".to_string()]
         );
-        assert_eq!(paths("stat -t %Y file"), vec!["file".to_string()]);
+        // GNU `stat -t` is arity zero. Darwin's time-format operand is
+        // deliberately checked as a candidate path so either dialect keeps
+        // every possible filesystem operand under containment.
+        assert_eq!(
+            paths("stat -t %Y file"),
+            vec!["%Y".to_string(), "file".to_string()]
+        );
+        assert_eq!(
+            paths("stat -t /etc/passwd"),
+            vec!["/etc/passwd".to_string()]
+        );
         assert_eq!(paths("du -d 2 dir"), vec!["dir".to_string()]);
         assert_eq!(program_of("head -n"), None, "missing value");
         assert_eq!(program_of("du -d"), None, "missing value");
