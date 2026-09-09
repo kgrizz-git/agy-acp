@@ -39,6 +39,10 @@ pub(super) struct SafeCommand {
 
 /// One allowlisted program. `noun` is the pre-formatted prompt phrase so the
 /// label carries no model-authored text even if table lookup were bypassed.
+///
+/// Structural equality only: every instance points into the static table, so
+/// two equal values are the same entry.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) struct ProgramDef {
     pub(super) name: &'static str,
     pub(super) noun: &'static str,
@@ -55,7 +59,7 @@ pub(super) struct ProgramDef {
 }
 
 /// How leftover (non-flag) tokens are treated.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum OperandPolicy {
     /// Every operand is a candidate path (checked per call).
     Paths,
@@ -68,6 +72,7 @@ pub(super) enum OperandPolicy {
 
 /// One permitted flag. Unknown flags unclassify: a new flag nobody classified
 /// must not silently widen.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) struct FlagDef {
     /// Long form without dashes (`Some("color")`); `None` for short-only.
     pub(super) long: Option<&'static str>,

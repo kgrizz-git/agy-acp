@@ -24,7 +24,7 @@ use uuid::Uuid;
 mod path_rules;
 use path_rules::{outside_workspace, string_args};
 mod safe_command;
-use safe_command::{classify_call, SafeCommand};
+use safe_command::{classify_call, ProgramDef, SafeCommand};
 
 /// Env var carrying the bridge socket path into the `agy` subprocess (and from
 /// there into the hook command).
@@ -91,6 +91,61 @@ impl Decision {
 /// has earned it. Without this, "always allow" on `echo hello` also allowed
 /// `rm -rf build`, and "always allow" on one URL allowed every other.
 type AlwaysKey = (String, String, Option<String>);
+
+/// What `decide` derives once per call and shares between the
+/// remembered-answer lookup, the prompt options, and the apply step: the two
+/// keys, the two wordings, and the classifier outcome. One derivation, three
+/// readers — label, lookup, copypath check cannot disagree. `sticky_scope`
+/// classifies again internally for the key; both call the same pure function
+/// on the same input.
+struct ResolvedCall {
+    allow_key: AlwaysKey,
+    fingerprint_key: AlwaysKey,
+    allow_scope: AlwaysScope,
+    deny_scope: AlwaysScope,
+    classified: Option<SafeCommand>,
+}
+
+impl ResolvedCall {
+    fn of(
+        session_id: &str,
+        tool_name: &str,
+        args: &Value,
+        scope: Option<String>,
+        classified: Option<SafeCommand>,
+    ) -> Self {
+        let allow_scope = match &classified {
+            // The allow label follows the *key*, not the classifier alone: a
+            // classified command with unaudited extra fields stores the
+            // fingerprint, so its label stays exact even though the command
+            // classified. Comparing against the freshly computed outcome —
+            // not parsing the key — keeps label, key, and reason from one
+            // source.
+            Some(cmd)
+                if scope.as_deref() == Some(format!("safe:{}", cmd.program.name).as_str()) =>
+            {
+                AlwaysScope::Program(cmd.program)
+            }
+            _ => AlwaysScope::of(scope.as_ref(), args),
+        };
+        // Denies stay narrow even when allows widen, so the reject wording is
+        // derived as if fingerprint-keyed — which the deny store is.
+        let fingerprint_key = (
+            session_id.to_string(),
+            tool_name.to_string(),
+            Some(args_fingerprint(args)),
+        );
+        let deny_scope = AlwaysScope::of(fingerprint_key.2.as_ref(), args);
+        let allow_key = (session_id.to_string(), tool_name.to_string(), scope);
+        ResolvedCall {
+            allow_key,
+            fingerprint_key,
+            allow_scope,
+            deny_scope,
+            classified,
+        }
+    }
+}
 
 #[derive(Default)]
 struct BridgeState {
@@ -487,36 +542,22 @@ impl PermissionBridge {
         }
 
         let scope = sticky_scope(&tool_name, &args);
-        let always_scope = AlwaysScope::of(scope.as_ref(), &args);
-        let always_key = (session_id.clone(), tool_name.clone(), scope.clone());
-        // Copied out before the branch: the body awaits the same mutex, and an
-        // `if let` scrutinee guard would still be held inside it.
-        let remembered = { self.state.lock().await.always.get(&always_key).copied() };
-        if let Some(decision) = remembered {
-            // A remembered deny applies immediately and unchanged.
-            if decision == Decision::Deny {
-                self.mark_user_refusal(turn).await;
-                return (
-                    Decision::Deny,
-                    match always_scope.noun() {
-                        Some(noun) => format!("Always rejected {noun} in this session."),
-                        None => format!("Always rejected `{tool_name}` in this session."),
-                    },
-                );
-            }
-            // A remembered allow is only honoured for calls the bridge itself would
-            // wave through. One that leaves the workspace or names something
-            // sensitive still goes to the user — the original allow never covered
-            // that, so it must not become a permanent bypass.
-            if !self.escapes_containment(&args).await {
-                return (
-                    Decision::Allow,
-                    match always_scope.noun() {
-                        Some(noun) => format!("Always allowed {noun} in this session."),
-                        None => format!("Always allowed `{tool_name}` in this session."),
-                    },
-                );
-            }
+        // Classified once per call: the remembered-answer lookup below and
+        // the honor-site path check read the same outcome. `sticky_scope`
+        // classifies again internally for the key; both call the same pure
+        // function on the same input, and the coherence of the two is
+        // asserted, not assumed.
+        let classified = classify_call(&tool_name, &args);
+        debug_assert!(
+            !scope.as_deref().is_some_and(|s| s.starts_with("safe:")) || classified.is_some(),
+            "a safe: key is only ever produced by classification"
+        );
+        let resolved = ResolvedCall::of(&session_id, &tool_name, &args, scope, classified);
+        if let Some(outcome) = self
+            .remembered_decision(&resolved, &tool_name, &args, turn)
+            .await
+        {
+            return outcome;
         }
 
         let request_id = format!("{REQUEST_ID_PREFIX}{}", Uuid::new_v4());
@@ -549,7 +590,7 @@ impl PermissionBridge {
                     "kind": tool_kind(&tool_name),
                     "rawInput": args,
                 },
-                "options": permission_options(&tool_name, always_scope),
+                "options": permission_options(&tool_name, resolved.allow_scope, resolved.deny_scope),
             },
         });
 
@@ -582,8 +623,80 @@ impl PermissionBridge {
             }
         };
 
-        self.apply_outcome(&outcome, always_key, &tool_name, always_scope, turn)
-            .await
+        self.apply_outcome(
+            &outcome,
+            resolved.allow_key.clone(),
+            &tool_name,
+            &args,
+            resolved.allow_scope,
+            turn,
+        )
+        .await
+    }
+
+    /// A remembered answer that applies without asking, if any. `None` falls
+    /// through to the full prompt path. Split out of `decide`, which this
+    /// would otherwise push past the complexity cap.
+    async fn remembered_decision(
+        &self,
+        resolved: &ResolvedCall,
+        tool_name: &str,
+        args: &Value,
+        turn: u64,
+    ) -> Option<(Decision, String)> {
+        // Copied out before the branch: the body awaits the same mutex, and an
+        // `if let` scrutinee guard would still be held inside it.
+        // A remembered deny is keyed by exact arguments and wins over any
+        // later program allow for that string.
+        let remembered_deny = {
+            self.state
+                .lock()
+                .await
+                .always
+                .get(&resolved.fingerprint_key)
+                .copied()
+        };
+        if let Some(Decision::Deny) = remembered_deny {
+            self.mark_user_refusal(turn).await;
+            return Some((
+                Decision::Deny,
+                match resolved.deny_scope.noun() {
+                    Some(noun) => format!("Always rejected {noun} in this session."),
+                    None => format!("Always rejected `{tool_name}` in this session."),
+                },
+            ));
+        }
+        let remembered = {
+            self.state
+                .lock()
+                .await
+                .always
+                .get(&resolved.allow_key)
+                .copied()
+        };
+        if let Some(Decision::Allow) = remembered {
+            // A remembered allow is only honoured for calls the bridge itself
+            // would wave through. One that leaves the workspace or names
+            // something sensitive still goes to the user — the original allow
+            // never covered that, so it must not become a permanent bypass.
+            // For a program allow the current call's extracted paths are
+            // judged too: the approval covered the program, not any path.
+            let contained = !self.escapes_containment(args).await;
+            let paths_contained = match &resolved.classified {
+                Some(cmd) => !self.classified_paths_escape(cmd, args).await,
+                None => true,
+            };
+            if contained && paths_contained {
+                return Some((
+                    Decision::Allow,
+                    match resolved.allow_scope.noun() {
+                        Some(noun) => format!("Always allowed {noun} in this session."),
+                        None => format!("Always allowed `{tool_name}` in this session."),
+                    },
+                ));
+            }
+        }
+        None
     }
 
     /// True when `args` leaves the workspace or names something sensitive — the
@@ -595,6 +708,43 @@ impl PermissionBridge {
         };
         outside_workspace(args, &workspace_roots).is_some()
             || string_args(args).iter().any(|arg| policy.is_sensitive(arg))
+    }
+
+    /// Second conjunct for a remembered program allow: the current call's
+    /// extracted paths, joined against its `Cwd` and judged as path fields,
+    /// so they inherit the symlink-resolving shape tests. Empty extraction
+    /// has nothing to judge — check 1 already covered the call. A missing
+    /// `Cwd` with paths to anchor fails closed: with nothing to join a
+    /// relative path against, the call prompts.
+    async fn classified_paths_escape(&self, classified: &SafeCommand, args: &Value) -> bool {
+        if classified.paths.is_empty() {
+            return false;
+        }
+        let Some(cwd) = args
+            .get("Cwd")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+        else {
+            return true;
+        };
+        let (policy, workspace_roots) = {
+            let state = self.state.lock().await;
+            (state.policy.clone(), state.workspace_roots.clone())
+        };
+        let joined: Vec<String> = classified
+            .paths
+            .iter()
+            .map(|p| {
+                if p.starts_with('/') || p.starts_with('~') {
+                    p.clone()
+                } else {
+                    format!("{cwd}/{p}")
+                }
+            })
+            .collect();
+        let synthetic = json!({ "Paths": joined });
+        outside_workspace(&synthetic, &workspace_roots).is_some()
+            || joined.iter().any(|p| policy.is_sensitive(p))
     }
 
     /// Decides whether a tool call is dull enough to approve without asking,
@@ -630,6 +780,7 @@ impl PermissionBridge {
         outcome: &Value,
         always_key: AlwaysKey,
         tool_name: &str,
+        args: &Value,
         scope: AlwaysScope,
         turn: u64,
     ) -> (Decision, String) {
@@ -651,32 +802,49 @@ impl PermissionBridge {
             .and_then(|v| v.as_str())
             .unwrap_or(OPTION_REJECT_ONCE);
         // The scope is the same value the label was worded from, so the reason
-        // agy sees cannot describe a breadth the user was not offered. Assert the
-        // key agrees, since these are the two things that must never diverge.
-        debug_assert_eq!(
-            always_key.2.is_some(),
-            scope != AlwaysScope::Tool,
-            "the label's scope and the key's scope disagree"
-        );
+        // agy sees cannot describe a breadth the user was not offered.
+        let deny_scope = AlwaysScope::of(Some(&args_fingerprint(args)), args);
 
         let (decision, sticky, reason) = match option_id {
             OPTION_ALLOW_ONCE => (Decision::Allow, false, "Approved by user.".to_string()),
-            OPTION_ALLOW_ALWAYS => (
-                Decision::Allow,
-                true,
-                match scope.noun() {
-                    Some(noun) => {
-                        format!("Approved by user; always allowing {noun} in this session.")
-                    }
-                    None => {
-                        format!("Approved by user; always allowing `{tool_name}` in this session.")
-                    }
-                },
-            ),
+            OPTION_ALLOW_ALWAYS => {
+                // Assert the key agrees, since these are the two things that
+                // must never diverge: a program allow stores under `safe:`.
+                debug_assert_eq!(
+                    always_key.2.is_some(),
+                    scope != AlwaysScope::Tool,
+                    "the label's scope and the key's scope disagree"
+                );
+                if let AlwaysScope::Program(_) = scope {
+                    debug_assert!(
+                        always_key
+                            .2
+                            .as_deref()
+                            .is_some_and(|s| s.starts_with("safe:")),
+                        "a program allow must store under a safe: key"
+                    );
+                }
+                (
+                    Decision::Allow,
+                    true,
+                    match scope.noun() {
+                        Some(noun) => {
+                            format!("Approved by user; always allowing {noun} in this session.")
+                        }
+                        None => {
+                            format!(
+                                "Approved by user; always allowing `{tool_name}` in this session."
+                            )
+                        }
+                    },
+                )
+            }
             OPTION_REJECT_ALWAYS => (
                 Decision::Deny,
                 true,
-                match scope.noun() {
+                // Mixed wording on purpose: the label names the exact call
+                // even on a prompt whose allow side widened to the program.
+                match deny_scope.noun() {
                     Some(noun) => {
                         format!("Declined by user; always rejecting {noun} in this session.")
                     }
@@ -697,10 +865,29 @@ impl PermissionBridge {
         // sessions that follow it -- the same rule a late answer already gets
         // when `abandon_pending` won the race for the pending entry, applied
         // whichever side won.
+        //
+        // Denies stay narrow even when allows widen: the reject records
+        // exactly the call the user rejected, keyed by fingerprint. Assert the
+        // store agrees with the wording, as above.
+        let store_key = if sticky && decision == Decision::Deny {
+            let deny_key: AlwaysKey = (
+                always_key.0.clone(),
+                tool_name.to_string(),
+                Some(args_fingerprint(args)),
+            );
+            debug_assert_eq!(
+                deny_key.2,
+                Some(args_fingerprint(args)),
+                "a deny must store under the fingerprint key"
+            );
+            deny_key
+        } else {
+            always_key
+        };
         if sticky {
             let mut state = self.state.lock().await;
             if state.turn_generation == turn {
-                state.always.insert(always_key, decision);
+                state.always.insert(store_key, decision);
             }
         }
         (decision, reason)
@@ -744,6 +931,11 @@ enum AlwaysScope {
     /// this fork does not know. Nothing above the buttons reads as a command, and
     /// a label must describe what is actually being consented to.
     Call,
+    /// Every later invocation of one allowlisted program, for this session:
+    /// `` `ls` commands ``. What a classified `run_command` allow covers, when
+    /// `sticky_scope` returns `safe:<program>`. Carries the table entry, not
+    /// the model's input, so the label cannot carry model-authored text.
+    Program(&'static ProgramDef),
 }
 
 impl AlwaysScope {
@@ -764,6 +956,7 @@ impl AlwaysScope {
             AlwaysScope::Tool => None,
             AlwaysScope::Command => Some("this exact command"),
             AlwaysScope::Call => Some("this exact call"),
+            AlwaysScope::Program(program) => Some(program.noun),
         }
     }
 }
@@ -776,19 +969,23 @@ impl AlwaysScope {
 /// the one command or call in front of the user. The prompt is where someone
 /// decides, not the README.
 ///
+/// The allow and deny wordings arrive as separate scopes because denies stay
+/// narrow while allows may widen: a classified command offers "Always allow
+/// `ls` commands" beside "Always reject this exact command". Each side is
+/// worded from the key its answer is actually stored under, so neither button
+/// can promise what its store does not cover.
+///
 /// The scope arrives as an [`AlwaysScope`], not as the command text: nothing in
 /// the label needs the string, and passing it would invite someone to interpolate
 /// it.
-fn permission_options(tool_name: &str, scope: AlwaysScope) -> Value {
-    let (allow_always, reject_always) = match scope.noun() {
-        Some(noun) => (
-            format!("Always allow {noun} this session"),
-            format!("Always reject {noun} this session"),
-        ),
-        None => (
-            format!("Always allow {tool_name} this session"),
-            format!("Always reject {tool_name} this session"),
-        ),
+fn permission_options(tool_name: &str, allow: AlwaysScope, deny: AlwaysScope) -> Value {
+    let allow_always = match allow.noun() {
+        Some(noun) => format!("Always allow {noun} this session"),
+        None => format!("Always allow {tool_name} this session"),
+    };
+    let reject_always = match deny.noun() {
+        Some(noun) => format!("Always reject {noun} this session"),
+        None => format!("Always reject {tool_name} this session"),
     };
     json!([
         { "optionId": OPTION_ALLOW_ONCE, "name": "Allow once", "kind": "allow_once" },
