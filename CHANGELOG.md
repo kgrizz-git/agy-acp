@@ -10,6 +10,23 @@ of its own yet, so everything below is unreleased.
 
 ## Unreleased
 
+### Added
+
+- **Safe-command classifier** (`src/permission/safe_command.rs`): a
+  character-allowlist tokenizer that recognises single invocations of 16
+  read-only programs (`ls`, `cat`, `head`, `tail`, `wc`, `file`, `stat`, `pwd`,
+  `du`, `df`, `date`, `which`, `basename`, `dirname`, `grep`, `rg`), extracts
+  path arguments, and enables one-and-done permission approval — "Always allow
+  `ls` commands this session" instead of reprompting on every new path. A
+  classified command with extra fields, shell metacharacters, or chained
+  operations falls back to exact-string keying. Denies always narrow (fingerprint
+  key), even when the allow side widened; the honor site checks two conjuncts
+  (workspace containment and Cwd-relative path containment). (PR #21)
+
+### Fixed
+
+- Safe-command approvals fall back to an exact key if classification loses coherence. (PR #21)
+
 ### Changed
 
 - `schedule` and `invoke_subagent` are now a decided classification rather than a
@@ -47,6 +64,9 @@ of its own yet, so everything below is unreleased.
   through this bridge, is deliberately still open.
 
 ### Maintenance
+
+- E2e transient turn failures now fail over through the model roster before two
+  retries, after 30s then 60s. (PR #21)
 
 - Split the permission hook client, prompt wording, and command-sticky tests
   into focused modules to keep the CI file-length gate green. (PR #21)

@@ -56,6 +56,90 @@ async fn always_allow_stat_does_not_cover_gnu_terse_path_outside_workspace() {
     assert_eq!(asking.await.unwrap().0, Decision::Deny);
 }
 
+/// Extracted operands need an explicit `Cwd` for containment. A leading tilde
+/// is home-relative too; use a non-sensitive name to prove containment rather
+/// than pattern matching.
+#[tokio::test]
+async fn always_allow_ls_rechecks_operands_and_requires_cwd() {
+    let workspace = std::env::temp_dir().join("agy-acp-home-operand-test");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let (bridge, mut rx) = test_bridge(&workspace.display().to_string(), &[]).await;
+    let cwd = workspace.display().to_string();
+
+    let first = {
+        let bridge = bridge.clone();
+        let cwd = cwd.clone();
+        tokio::spawn(async move {
+            bridge
+                .decide(&json!({
+                    "conversationId": "conv-1",
+                    "toolCall": {
+                        "name": "run_command",
+                        "args": { "CommandLine": "ls", "Cwd": cwd },
+                    },
+                }))
+                .await
+        })
+    };
+    let request = expect_permission_request(&mut rx).await;
+    bridge
+        .resolve_response(
+            &request["id"],
+            Some(json!({ "outcome": { "outcome": "selected", "optionId": "allow_always" } })),
+        )
+        .await;
+    assert_eq!(first.await.unwrap().0, Decision::Allow);
+
+    let asking = {
+        let bridge = bridge.clone();
+        tokio::spawn(async move {
+            bridge
+                .decide(&json!({
+                    "conversationId": "conv-1",
+                    "toolCall": {
+                        "name": "run_command",
+                        "args": {
+                            "CommandLine": "ls ~/ordinary-not-sensitive.txt",
+                            "Cwd": cwd,
+                        },
+                    },
+                }))
+                .await
+        })
+    };
+    let request = expect_permission_request(&mut rx).await;
+    bridge
+        .resolve_response(
+            &request["id"],
+            Some(json!({ "outcome": { "outcome": "selected", "optionId": "reject_once" } })),
+        )
+        .await;
+    assert_eq!(asking.await.unwrap().0, Decision::Deny);
+
+    let asking = {
+        let bridge = bridge.clone();
+        tokio::spawn(async move {
+            bridge
+                .decide(&json!({
+                    "conversationId": "conv-1",
+                    "toolCall": {
+                        "name": "run_command",
+                        "args": { "CommandLine": "ls ordinary.txt" },
+                    },
+                }))
+                .await
+        })
+    };
+    let request = expect_permission_request(&mut rx).await;
+    bridge
+        .resolve_response(
+            &request["id"],
+            Some(json!({ "outcome": { "outcome": "selected", "optionId": "reject_once" } })),
+        )
+        .await;
+    assert_eq!(asking.await.unwrap().0, Decision::Deny);
+}
+
 /// Unclassifiable commands keep exact-string stickiness beside widened keys.
 #[tokio::test]
 async fn unclassifiable_commands_keep_exact_string_keys() {
@@ -216,4 +300,11 @@ async fn program_allow_is_uncontaminated_by_an_earlier_deny() {
     let (decision, reason) = expect_auto_decision(&bridge, json!({ "conversationId": "conv-1", "toolCall": { "name": "run_command", "args": { "CommandLine": "ls other", "Cwd": cwd } } })).await;
     assert_eq!(decision, Decision::Allow);
     assert_eq!(reason, "Always allowed `ls` commands in this session.");
+
+    let (decision, reason) = expect_auto_decision(&bridge, json!({ "conversationId": "conv-1", "toolCall": { "name": "run_command", "args": { "CommandLine": "ls -z", "Cwd": cwd } } })).await;
+    assert_eq!(decision, Decision::Deny);
+    assert_eq!(
+        reason,
+        "Always rejected this exact command in this session."
+    );
 }

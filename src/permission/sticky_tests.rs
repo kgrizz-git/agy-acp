@@ -432,6 +432,37 @@ fn the_always_scope_decides_the_wording() {
     assert_ne!(AlwaysScope::Command.noun(), AlwaysScope::Call.noun());
 }
 
+#[test]
+fn an_incoherent_safe_scope_falls_back_to_the_fingerprint_key() {
+    let args = json!({ "CommandLine": "ls" });
+    let missing_classification = ResolvedCall::of(
+        "session",
+        "run_command",
+        &args,
+        Some("safe:ls".to_string()),
+        None,
+    );
+
+    assert_eq!(
+        missing_classification.allow_key,
+        missing_classification.fingerprint_key
+    );
+    assert_eq!(missing_classification.allow_scope, AlwaysScope::Command);
+
+    let mismatched_program = ResolvedCall::of(
+        "session",
+        "run_command",
+        &args,
+        Some("safe:cat".to_string()),
+        classify_call("run_command", &args),
+    );
+    assert_eq!(
+        mismatched_program.allow_key,
+        mismatched_program.fingerprint_key
+    );
+    assert_eq!(mismatched_program.allow_scope, AlwaysScope::Command);
+}
+
 /// Path tools keep the tool-level wording on the allow side, because allows
 /// keep the tool-level key. Denies narrow to the exact call for every tool:
 /// the reject button is worded for what its fingerprint-keyed store covers.

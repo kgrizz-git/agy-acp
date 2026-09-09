@@ -118,13 +118,17 @@ impl ResolvedCall {
         scope: Option<String>,
         classified: Option<SafeCommand>,
     ) -> Self {
+        // A safe scope without its matching classifier result fails closed.
+        let fingerprint = args_fingerprint(args);
+        let scope = match (scope, classified.as_ref()) {
+            (Some(scope), Some(cmd)) if scope.as_str() == format!("safe:{}", cmd.program.name) => {
+                Some(scope)
+            }
+            (Some(scope), _) if scope.starts_with("safe:") => Some(fingerprint.clone()),
+            (scope, _) => scope,
+        };
         let allow_scope = match &classified {
-            // The allow label follows the *key*, not the classifier alone: a
-            // classified command with unaudited extra fields stores the
-            // fingerprint, so its label stays exact even though the command
-            // classified. Comparing against the freshly computed outcome —
-            // not parsing the key — keeps label, key, and reason from one
-            // source.
+            // The label follows the stored key, not classification alone.
             Some(cmd)
                 if scope.as_deref() == Some(format!("safe:{}", cmd.program.name).as_str()) =>
             {
@@ -132,12 +136,11 @@ impl ResolvedCall {
             }
             _ => AlwaysScope::of(scope.as_ref(), args),
         };
-        // Denies stay narrow even when allows widen, so the reject wording is
-        // derived as if fingerprint-keyed — which the deny store is.
+        // Denies always use this fingerprint-keyed scope.
         let fingerprint_key = (
             session_id.to_string(),
             tool_name.to_string(),
-            Some(args_fingerprint(args)),
+            Some(fingerprint),
         );
         let deny_scope = AlwaysScope::of(fingerprint_key.2.as_ref(), args);
         let allow_key = (session_id.to_string(), tool_name.to_string(), scope);
@@ -150,7 +153,6 @@ impl ResolvedCall {
         }
     }
 }
-
 #[derive(Default)]
 struct BridgeState {
     /// agy conversation id -> ACP session id.

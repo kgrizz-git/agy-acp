@@ -37,6 +37,7 @@ pub fn run_hook() {
     let _ = stdout.flush();
 }
 
+/// Sends one hook payload and returns the bridge's single-line response.
 fn hook_roundtrip(socket_path: &str, payload: &str) -> std::io::Result<String> {
     use std::io::{BufRead, BufReader as StdBufReader, Write};
     use std::os::unix::net::UnixStream as StdUnixStream;
@@ -58,4 +59,59 @@ fn hook_roundtrip(socket_path: &str, payload: &str) -> std::io::Result<String> {
         ));
     }
     Ok(response)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixListener;
+
+    fn socket_path(label: &str) -> std::path::PathBuf {
+        // Unix socket addresses are short; `temp_dir()` can be much longer.
+        std::path::PathBuf::from("/tmp").join(format!("a-{label}-{}.sock", uuid::Uuid::new_v4()))
+    }
+
+    #[test]
+    fn hook_roundtrip_sends_the_payload_and_returns_the_response() {
+        let path = socket_path("hook-roundtrip");
+        let listener = UnixListener::bind(&path).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut payload = String::new();
+            BufReader::new(&stream).read_line(&mut payload).unwrap();
+            assert_eq!(payload, "{\"tool\":\"read\"}\n");
+            stream.write_all(b"{\"decision\":\"allow\"}\n").unwrap();
+        });
+
+        assert_eq!(
+            hook_roundtrip(path.to_str().unwrap(), "{\"tool\":\"read\"}").unwrap(),
+            "{\"decision\":\"allow\"}"
+        );
+        server.join().unwrap();
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn hook_roundtrip_rejects_an_empty_bridge_response() {
+        let path = socket_path("empty-hook-response");
+        let listener = UnixListener::bind(&path).unwrap();
+        let server = std::thread::spawn(move || drop(listener.accept().unwrap()));
+
+        let error = hook_roundtrip(path.to_str().unwrap(), "{}").unwrap_err();
+        // Closing a Unix stream without a reply is EOF on macOS and a reset on
+        // Linux. Both mean that the bridge supplied no decision.
+        assert!(matches!(
+            error.kind(),
+            std::io::ErrorKind::UnexpectedEof | std::io::ErrorKind::ConnectionReset
+        ));
+        server.join().unwrap();
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn hook_roundtrip_reports_an_unavailable_socket() {
+        let path = socket_path("missing-hook-socket");
+        assert!(hook_roundtrip(path.to_str().unwrap(), "{}").is_err());
+    }
 }

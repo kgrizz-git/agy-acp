@@ -2,7 +2,8 @@
 
 use serde_json::Value;
 
-/// Builds the one-line summary the ACP client shows in the prompt.
+/// Builds the one-line summary the ACP client shows in the prompt, including
+/// the longer explanation for a `schedule` call.
 pub(super) fn tool_title(tool_name: &str, args: &Value) -> String {
     let field = |key: &str| args.get(key).and_then(|v| v.as_str());
 
