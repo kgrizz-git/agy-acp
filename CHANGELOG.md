@@ -10,6 +10,12 @@ versioned delivery as `0.2.0`; everything under that heading shipped together.
 
 ## Unreleased
 
+### Maintenance
+
+- Repository renamed `agy-acp` → `agy-gated-acp` to mark the fork distinct
+  from upstream. Remote guard, contributor references, and docs moved with it;
+  the crate and binary stay `agy-acp` until their rename lands. (PR #25)
+
 ## 0.2.0
 
 ### Added

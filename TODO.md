@@ -9,7 +9,6 @@ document. Delete an entry when it lands, rather than checking it off.
 - [Verify Paseo's reopened-thread path](#paseo-integration).
 - [Carry a turn identity through the hook protocol](#reliability-and-lifecycle).
 - [Detect and surface workspace hook directories](#security-and-permission-boundaries).
-- [Rename the GitHub repository](#fork-maintenance).
 
 ## Active
 
@@ -47,9 +46,6 @@ document. Delete an entry when it lands, rather than checking it off.
 
 ### Fork maintenance
 
-- Rename the GitHub repository to mark the fork distinct, with a
-  fork-etiquette docs pass (attribution retained, install and origin
-  references updated). Plan: [plans/repo-rename.md](plans/repo-rename.md).
 - Rename the crate and binary, including migration and provider configuration.
   Plan: [plans/fork-maintenance.md](plans/fork-maintenance.md).
 - Decide whether CI-based SonarCloud supplies value beyond Clippy and llvm-cov.

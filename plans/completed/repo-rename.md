@@ -30,7 +30,7 @@ that no longer exists.
 1. Pick the new name first. Constraints: clearly not `agy-acp` (that string is
    upstream's identity — crate, binary, and repo all collide with it today);
    ideally a name the future crate/binary rename from
-   [fork-maintenance](fork-maintenance.md) can share, so the repo rename does
+   [fork-maintenance](../fork-maintenance.md) can share, so the repo rename does
    not have to be revisited. Check the name against crates.io and GitHub for
    collisions before committing to it.
    - **Chosen: `agy-gated-acp`.** Verified free on crates.io, free as
@@ -93,7 +93,7 @@ that no longer exists.
 
 ## Not in scope
 
-The crate and binary rename (see [fork-maintenance](fork-maintenance.md)):
+The crate and binary rename (see [fork-maintenance](../fork-maintenance.md)):
 new repo, old binary until that plan lands. Also out of scope: leaving the
 fork network (not self-serve) and enabling issues/Actions as part of this —
 those are separate settings decisions.
