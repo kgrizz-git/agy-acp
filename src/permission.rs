@@ -248,7 +248,7 @@ impl PermissionBridge {
     /// already checked against the platform limit. Nothing is unlinked first:
     /// the owner directory is freshly created, so its socket path cannot
     /// already be in use by a previous run.
-    pub fn start(
+    pub(crate) fn start(
         out_tx: mpsc::UnboundedSender<Option<String>>,
         owner: &RuntimeOwner,
     ) -> std::io::Result<Self> {

@@ -18,7 +18,7 @@ pub struct PermissionBridge {
 }
 
 impl PermissionBridge {
-    pub fn start(
+    pub(crate) fn start(
         _out_tx: mpsc::UnboundedSender<Option<String>>,
         _owner: &RuntimeOwner,
     ) -> std::io::Result<Self> {

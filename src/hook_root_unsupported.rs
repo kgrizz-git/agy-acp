@@ -14,7 +14,7 @@ pub struct HookRoot {
 }
 
 impl HookRoot {
-    pub fn create(_owner: &RuntimeOwner) -> std::io::Result<Self> {
+    pub(crate) fn create(_owner: &RuntimeOwner) -> std::io::Result<Self> {
         Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
             "permission prompts require a Unix platform",

@@ -29,7 +29,7 @@ pub struct HookRoot {
 
 impl HookRoot {
     /// Writes the hook definition into the runtime owner's hook child.
-    pub fn create(owner: &RuntimeOwner) -> std::io::Result<Self> {
+    pub(crate) fn create(owner: &RuntimeOwner) -> std::io::Result<Self> {
         let exe = std::env::current_exe()?;
         let dir = owner.hook_dir();
         let agents_dir = dir.join(".agents");
