@@ -51,6 +51,7 @@ pub(super) async fn test_bridge(
         })),
         out_tx: tx,
         socket_path: Arc::new(PathBuf::from("/tmp/unused.sock")),
+        accept_task: None,
     };
     bridge.register_conversation("conv-1", "session-1").await;
     // Every `decide` in production happens inside a running turn --

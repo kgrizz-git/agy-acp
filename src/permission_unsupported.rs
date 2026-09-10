@@ -8,6 +8,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use tokio::sync::mpsc;
 
+use crate::runtime::RuntimeOwner;
+
 pub const SOCKET_ENV: &str = "AGY_ACP_PERMISSION_SOCKET";
 
 #[derive(Clone)]
@@ -16,7 +18,10 @@ pub struct PermissionBridge {
 }
 
 impl PermissionBridge {
-    pub fn start(_out_tx: mpsc::UnboundedSender<Option<String>>) -> std::io::Result<Self> {
+    pub fn start(
+        _out_tx: mpsc::UnboundedSender<Option<String>>,
+        _owner: &RuntimeOwner,
+    ) -> std::io::Result<Self> {
         Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
             "permission prompts require a Unix platform",
@@ -26,6 +31,8 @@ impl PermissionBridge {
     pub fn socket_path(&self) -> &Path {
         &self.socket_path
     }
+
+    pub fn shutdown(&self) {}
 
     pub async fn register_conversation(&self, _conversation_id: &str, _session_id: &str) {}
 
@@ -72,11 +79,15 @@ mod tests {
 
     #[test]
     fn start_fails_closed_on_non_unix() {
-        let (out_tx, _out_rx) = mpsc::unbounded_channel();
-        let error = PermissionBridge::start(out_tx)
-            .err()
-            .expect("non-Unix platforms must not start the permission bridge");
-
-        assert_eq!(error.kind(), ErrorKind::Unsupported);
+        let (_out_tx, _out_rx) = mpsc::unbounded_channel();
+        let owner = RuntimeOwner::create();
+        // Unsupported: the owner itself fails closed on non-Unix, so `start`
+        // can never be reached with a real owner. Pinning `create` failing is
+        // the observable contract of the whole permission-prompts mode.
+        assert_eq!(
+            owner.err().unwrap().kind(),
+            ErrorKind::Unsupported,
+            "permission prompts must fail closed on non-Unix"
+        );
     }
 }

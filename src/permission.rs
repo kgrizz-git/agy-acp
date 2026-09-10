@@ -21,6 +21,8 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{mpsc, oneshot, Mutex};
 use uuid::Uuid;
 
+use crate::runtime::RuntimeOwner;
+
 mod path_rules;
 use path_rules::{outside_workspace, string_args};
 mod prompt;
@@ -221,41 +223,57 @@ pub struct PermissionBridge {
     state: Arc<Mutex<BridgeState>>,
     out_tx: mpsc::UnboundedSender<Option<String>>,
     socket_path: Arc<PathBuf>,
+    /// Stops the listener during partial-start rollback. The listener task
+    /// owns a bridge clone, so ordinary `Drop` cannot break that cycle.
+    accept_task: Option<Arc<tokio::task::AbortHandle>>,
 }
 
 impl PermissionBridge {
-    /// Binds the bridge socket and starts accepting hook connections.
-    pub fn start(out_tx: mpsc::UnboundedSender<Option<String>>) -> std::io::Result<Self> {
-        let socket_path = default_socket_path();
-        if let Some(parent) = socket_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        // A socket from a previous run would refuse to bind.
-        let _ = std::fs::remove_file(&socket_path);
+    /// Binds the bridge socket inside a private runtime directory and starts
+    /// accepting hook connections.
+    ///
+    /// The socket path is the owner's `s.sock`, which the path builder has
+    /// already checked against the platform limit. Nothing is unlinked first:
+    /// the owner directory is freshly created, so its socket path cannot
+    /// already be in use by a previous run.
+    pub fn start(
+        out_tx: mpsc::UnboundedSender<Option<String>>,
+        owner: &RuntimeOwner,
+    ) -> std::io::Result<Self> {
+        let socket_path = owner.socket_path();
 
         let listener = UnixListener::bind(&socket_path)?;
-        let bridge = PermissionBridge {
+        let mut bridge = PermissionBridge {
             state: Arc::new(Mutex::new(BridgeState {
                 policy: AutoAllowPolicy::from_env(),
                 ..BridgeState::default()
             })),
             out_tx,
             socket_path: Arc::new(socket_path),
+            accept_task: None,
         };
 
         let accept_bridge = bridge.clone();
-        tokio::spawn(async move {
+        let accept_task = tokio::spawn(async move {
             while let Ok((stream, _)) = listener.accept().await {
                 let bridge = accept_bridge.clone();
                 tokio::spawn(async move { bridge.serve_hook(stream).await });
             }
         });
+        bridge.accept_task = Some(Arc::new(accept_task.abort_handle()));
 
         Ok(bridge)
     }
 
     pub fn socket_path(&self) -> &Path {
         self.socket_path.as_path()
+    }
+
+    /// Stops accepting hook connections during rollback or shutdown.
+    pub fn shutdown(&self) {
+        if let Some(accept_task) = &self.accept_task {
+            accept_task.abort();
+        }
     }
 
     /// Associates an agy conversation with the ACP session that owns it, so hook
@@ -900,15 +918,6 @@ impl PermissionBridge {
     }
 }
 
-impl Drop for PermissionBridge {
-    fn drop(&mut self) {
-        // Only the last handle should unlink the socket.
-        if Arc::strong_count(&self.socket_path) == 1 {
-            let _ = std::fs::remove_file(self.socket_path.as_path());
-        }
-    }
-}
-
 const REQUEST_ID_PREFIX: &str = "agyacp-perm-";
 const OPTION_ALLOW_ONCE: &str = "allow_once";
 const OPTION_ALLOW_ALWAYS: &str = "allow_always";
@@ -1175,12 +1184,6 @@ fn step_idx(payload: &Value) -> i64 {
         .get("stepIdx")
         .and_then(|v| v.as_i64())
         .unwrap_or(-1)
-}
-
-fn default_socket_path() -> PathBuf {
-    let mut path = std::env::temp_dir();
-    path.push(format!("agy-acp-perm-{}.sock", std::process::id()));
-    path
 }
 
 mod sticky_rules;

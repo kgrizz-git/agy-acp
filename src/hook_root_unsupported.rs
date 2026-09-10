@@ -7,12 +7,14 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::runtime::RuntimeOwner;
+
 pub struct HookRoot {
     dir: PathBuf,
 }
 
 impl HookRoot {
-    pub fn create() -> std::io::Result<Self> {
+    pub fn create(_owner: &RuntimeOwner) -> std::io::Result<Self> {
         Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
             "permission prompts require a Unix platform",
@@ -26,15 +28,17 @@ impl HookRoot {
 
 #[cfg(test)]
 mod tests {
-    use super::HookRoot;
     use std::io::ErrorKind;
 
     #[test]
     fn create_fails_closed_on_non_unix() {
-        let error = HookRoot::create()
-            .err()
-            .expect("non-Unix platforms must not create a permission hook root");
-
-        assert_eq!(error.kind(), ErrorKind::Unsupported);
+        let owner = crate::runtime::RuntimeOwner::create();
+        // The owner itself fails closed on non-Unix, so `create` can never be
+        // reached with a real owner. Pinning that is the observable contract.
+        assert_eq!(
+            owner.err().unwrap().kind(),
+            ErrorKind::Unsupported,
+            "permission prompts must fail closed on non-Unix"
+        );
     }
 }
