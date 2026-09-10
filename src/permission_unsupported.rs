@@ -74,7 +74,8 @@ pub fn run_hook() {
 
 #[cfg(test)]
 mod tests {
-    use super::{mpsc, PermissionBridge};
+    use super::mpsc;
+    use crate::runtime::RuntimeOwner;
     use std::io::ErrorKind;
 
     #[test]
