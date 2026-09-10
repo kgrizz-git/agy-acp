@@ -18,7 +18,7 @@ versioned delivery as `0.2.0`; everything under that heading shipped together.
   repository. Sessions migrate automatically: a pre-rename
   `~/.openab/agy-acp/sessions.json` moves to the new state directory once on
   startup when nothing is there yet. Point hosts at the new binary name and
-  restart them. (PR #N)
+  restart them. (PR #26)
 
 ### Maintenance
 
@@ -26,7 +26,7 @@ versioned delivery as `0.2.0`; everything under that heading shipped together.
   from upstream. Remote guard, contributor references, and docs moved with it.
   (PR #25)
 - README gains a Paseo usage section; the fork notice now records the upstream
-  chain and points assessment detail at AGENTS.md instead of TODO.md. (PR #N)
+  chain and points assessment detail at AGENTS.md instead of TODO.md. (PR #26)
 
 ## 0.2.0
 
