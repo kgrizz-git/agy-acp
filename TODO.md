@@ -7,9 +7,9 @@ document. Delete an entry when it lands, rather than checking it off.
 ## Next Up
 
 - [Verify Paseo's reopened-thread path](#paseo-integration).
-- [Detect and surface workspace hook directories](#security-and-permission-boundaries).
 - [Carry a turn identity through the hook protocol](#reliability-and-lifecycle).
-- [Choose a distinct crate and binary name](#fork-maintenance).
+- [Detect and surface workspace hook directories](#security-and-permission-boundaries).
+- [Rename the GitHub repository](#fork-maintenance).
 
 ## Active
 
@@ -31,7 +31,9 @@ document. Delete an entry when it lands, rather than checking it off.
 - Decide whether an opt-in may use native agy permission grants, while retaining
   exact command keying, containment, and sensitive-path checks. Plan: [plans/permission-boundaries.md](plans/permission-boundaries.md).
 - Detect and surface workspace hook directories before the first turn; pursue an
-  upstream isolation option separately. Plan: [plans/workspace-hook-trust-boundary.md](plans/workspace-hook-trust-boundary.md).
+  upstream isolation option separately. The trust boundary itself is already
+  documented in the README; what remains is the opt-in detection.
+  Plan: [plans/workspace-hook-trust-boundary.md](plans/workspace-hook-trust-boundary.md).
 
 ### Reliability and lifecycle
 
@@ -45,6 +47,9 @@ document. Delete an entry when it lands, rather than checking it off.
 
 ### Fork maintenance
 
+- Rename the GitHub repository to mark the fork distinct, with a
+  fork-etiquette docs pass (attribution retained, install and origin
+  references updated). Plan: [plans/repo-rename.md](plans/repo-rename.md).
 - Rename the crate and binary, including migration and provider configuration.
   Plan: [plans/fork-maintenance.md](plans/fork-maintenance.md).
 - Decide whether CI-based SonarCloud supplies value beyond Clippy and llvm-cov.
