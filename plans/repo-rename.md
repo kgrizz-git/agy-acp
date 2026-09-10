@@ -33,6 +33,11 @@ that no longer exists.
    [fork-maintenance](fork-maintenance.md) can share, so the repo rename does
    not have to be revisited. Check the name against crates.io and GitHub for
    collisions before committing to it.
+   - **Chosen: `agy-gated-acp`.** Verified free on crates.io, free as
+     `kgrizz-git/agy-gated-acp`, and zero exact GitHub matches (2026-09-10).
+     Note the accepted tradeoff: it retains the `agy`/`acp` tokens for
+     discoverability at the cost of staying visually adjacent to upstream's
+     `agy-acp`; the fork notice and H1 change carry the distinctness.
 2. Rename in GitHub settings, then update the tree:
    - `.githooks/pre-push`: the four canonical remote URL forms and the denial
      message.
