@@ -1,4 +1,4 @@
-# agy-acp
+# agy-gated-acp
 
 Single Rust crate. ACP (Agent Client Protocol) stdio adapter for Google Antigravity CLI (`agy`). Bridges `agy` into OpenAB's JSON-RPC protocol.
 
@@ -239,6 +239,11 @@ headless under the adapter and headless agy cannot prompt for tool permissions, 
 tool calls silently failed. The bridge routes them to the ACP host instead. The
 sections above describe how it works and the agy behaviours it is built around.
 
+The repository is named `agy-gated-acp` to mark it distinct from upstream. The
+crate and binary are still `agy-acp` until the rename in
+[plans/fork-maintenance.md](plans/fork-maintenance.md) lands, so `agy-acp`
+below means the binary unless the repository is meant.
+
 Used with Paseo, though nothing in the code is Paseo-specific —
 `session/request_permission` is standard ACP and Zed implements it too. Keep it
 host-neutral: that is what makes the adapter usable from more than one host, and it
@@ -268,13 +273,13 @@ own history and there is no upstream to cut against.
 
 Hard fork as of August 2026. Concretely:
 
-- No `upstream` remote. `origin` is `kgrizz-git/agy-acp` and is the only remote.
-- `gh repo set-default kgrizz-git/agy-acp`, so `gh pr create` targets this repo
+- No `upstream` remote. `origin` is `kgrizz-git/agy-gated-acp` and is the only remote.
+- `gh repo set-default kgrizz-git/agy-gated-acp`, so `gh pr create` targets this repo
   rather than the parent — being a GitHub fork, it would otherwise default the PR
   base to `hicder/agy-acp` no matter what the git remotes say.
 - `.githooks/pre-push` denies by default: only the canonical
-  `git@github.com:kgrizz-git/agy-acp`, `https://github.com/kgrizz-git/agy-acp`, and
-  `ssh://git@github.com/kgrizz-git/agy-acp` remote forms (with or without `.git`)
+  `git@github.com:kgrizz-git/agy-gated-acp`, `https://github.com/kgrizz-git/agy-gated-acp`, and
+  `ssh://git@github.com/kgrizz-git/agy-gated-acp` remote forms (with or without `.git`)
   are allowed. After cloning, run
   `git config core.hooksPath .githooks` once. Set `SKIP_LOCAL_GATES=1` to skip
   the clippy and unit-test checks for a single push; the fork guard always runs.

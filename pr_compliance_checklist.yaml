@@ -175,7 +175,7 @@ pr_compliances:
       The fork has no upstream remote and files no pull requests upstream. Upstream
       work is taken deliberately, recorded by .upstream-watermark.
     success_criteria: >
-      Changes target kgrizz-git/agy-acp. Upstream code is read by fetching a URL,
+      Changes target kgrizz-git/agy-gated-acp. Upstream code is read by fetching a URL,
       not by adding a remote. The watermark moves in a human commit.
     failure_criteria: >
       Re-adding an upstream remote, targeting a PR at hicder/agy-acp, or advancing
