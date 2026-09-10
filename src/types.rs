@@ -26,7 +26,7 @@ pub struct JsonRpcNotification {
     pub params: Value,
 }
 
-/// Persisted session→conversation mapping stored in ~/.openab/agy-acp/sessions.json
+/// Persisted session→conversation mapping stored in ~/.openab/agy-gated-acp/sessions.json
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SessionStore {
     pub sessions: HashMap<String, StoredSession>,

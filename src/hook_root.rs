@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 use crate::runtime::{set_read_only, RuntimeOwner};
 
-const HOOK_NAME: &str = "agy-acp-permission-bridge";
+const HOOK_NAME: &str = "agy-gated-acp-permission-bridge";
 
 /// Hook timeout in seconds. Deliberately generous: it bounds how long a human has
 /// to answer, and must exceed the bridge's own response timeout.
@@ -95,12 +95,12 @@ mod tests {
 
     #[test]
     fn hooks_json_matches_every_tool_and_invokes_the_hook_subcommand() {
-        let value = hooks_json("/usr/local/bin/agy-acp");
+        let value = hooks_json("/usr/local/bin/agy-gated-acp");
         let group = &value[HOOK_NAME]["PreToolUse"][0];
         assert_eq!(group["matcher"], "*");
         assert_eq!(
             group["hooks"][0]["command"],
-            "/usr/local/bin/agy-acp permission-hook"
+            "/usr/local/bin/agy-gated-acp permission-hook"
         );
         assert_eq!(group["hooks"][0]["timeout"], HOOK_TIMEOUT_SECS);
     }

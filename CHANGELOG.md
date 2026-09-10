@@ -10,11 +10,23 @@ versioned delivery as `0.2.0`; everything under that heading shipped together.
 
 ## Unreleased
 
+## 0.3.0
+
+### Changed
+
+- Crate and binary renamed `agy-acp` → `agy-gated-acp` to match the
+  repository. Sessions migrate automatically: a pre-rename
+  `~/.openab/agy-acp/sessions.json` moves to the new state directory once on
+  startup when nothing is there yet. Point hosts at the new binary name and
+  restart them. (PR #N)
+
 ### Maintenance
 
 - Repository renamed `agy-acp` → `agy-gated-acp` to mark the fork distinct
-  from upstream. Remote guard, contributor references, and docs moved with it;
-  the crate and binary stay `agy-acp` until their rename lands. (PR #25)
+  from upstream. Remote guard, contributor references, and docs moved with it.
+  (PR #25)
+- README gains a Paseo usage section; the fork notice now records the upstream
+  chain and points assessment detail at AGENTS.md instead of TODO.md. (PR #N)
 
 ## 0.2.0
 

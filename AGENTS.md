@@ -134,7 +134,7 @@ must identify the software that was installed. The first versioned delivery was
 - `streaming.rs` — parses `agy --output-format stream-json` NDJSON (`init`, `step_update`, `result`) into ACP `session/update` notifications via `StreamProcessor`, which runs in a background task reading the `agy` subprocess's stdout as it streams.
 - `tools.rs` — maps agy tool names/parameters/output into ACP tool-call fields (`kind`, locations, content).
 - `types.rs` — JSON-RPC types, `SessionStore` for persistence.
-- `permission.rs` — `--permission-prompts` only. Unix socket server turning agy's `PreToolUse` hook into ACP `session/request_permission`, plus the `agy-acp permission-hook` subcommand agy invokes. One at-most-1-MiB frame per connection, eight host-waiting slots plus one bounded busy-deny writer, 10s bridge IO deadlines.
+- `permission.rs` — `--permission-prompts` only. Unix socket server turning agy's `PreToolUse` hook into ACP `session/request_permission`, plus the `agy-gated-acp permission-hook` subcommand agy invokes. One at-most-1-MiB frame per connection, eight host-waiting slots plus one bounded busy-deny writer, 10s bridge IO deadlines.
 - `runtime.rs` — `--permission-prompts` only. Per-process random `0700` owner dir for the socket and hook root; explicit idempotent cleanup on ordinary exit and handled signals, never a prefix sweep.
 - `permission/frame.rs` — shared frame limit and semantic validation used by both the bridge and the hook client.
 - `hook_root.rs` — `--permission-prompts` only. Writes that hook into the runtime owner's child dir handed to agy as an extra `--add-dir`.
@@ -143,7 +143,7 @@ must identify the software that was installed. The first versioned delivery was
 
 | Path | Purpose |
 |---|---|
-| `~/.openab/agy-acp/sessions.json` | Persisted session→conversation mapping (with `.lock` file for mutual exclusion). Capped at 256 entries, rewritten whole on every turn |
+| `~/.openab/agy-gated-acp/sessions.json` | Persisted session→conversation mapping (with `.lock` file for mutual exclusion). Capped at 256 entries, rewritten whole on every turn. A pre-rename `~/.openab/agy-acp/sessions.json` is moved here once on startup when the new file is absent |
 | `~/.gemini/antigravity-cli/brain/<conversation-id>/` | Where agy writes generated artifacts. Not the workspace, and not visible to the bridge — `generate_image` takes no destination argument |
 | `src/proc.rs` | Killing agy's process tree. agy puts each command it runs in its own process group, so a cancel stops agy, walks a process-table snapshot for descendants and kills those, rather than signalling a group; shutdown kills the same trees through `LiveChildren` |
 | `scripts/probe-cancel.py` | Manual check that a cancel stops the command agy is running. Needs `agy` and auth, so it is not in CI; it is the probe that caught the first attempt at this fix aiming at the wrong mechanism, kept so the check is repeatable |
@@ -239,10 +239,8 @@ headless under the adapter and headless agy cannot prompt for tool permissions, 
 tool calls silently failed. The bridge routes them to the ACP host instead. The
 sections above describe how it works and the agy behaviours it is built around.
 
-The repository is named `agy-gated-acp` to mark it distinct from upstream. The
-crate and binary are still `agy-acp` until the rename in
-[plans/fork-maintenance.md](plans/fork-maintenance.md) lands, so `agy-acp`
-elsewhere in this file means the binary unless the repository is meant.
+The repository, crate, and binary are all named `agy-gated-acp` since 0.3.0;
+`agy-acp` elsewhere in this file means the upstream project.
 
 Used with Paseo, though nothing in the code is Paseo-specific —
 `session/request_permission` is standard ACP and Zed implements it too. Keep it
@@ -325,8 +323,8 @@ in the repository settings.
 - **Re-sign the binary after copying it.** macOS invalidates the signature on `cp`
   and SIGKILLs the result, with no useful error (exit 137):
   ```bash
-  cp target/release/agy-acp ~/.local/bin/agy-acp
-  codesign -f -s - ~/.local/bin/agy-acp
+  cp target/release/agy-gated-acp ~/.local/bin/agy-gated-acp
+  codesign -f -s - ~/.local/bin/agy-gated-acp
   ```
 - **Do not name notes files `*.local.md`.** `~/.config/git/ignore` ignores that
   pattern globally, so such a file is silently never committed: `git status` stays
@@ -345,7 +343,7 @@ in the repository settings.
   GitHub's blame view honours the file without any configuration.
 - **Local coverage.** `cargo-llvm-cov` is not a dev-dependency. Install with
   `cargo install cargo-llvm-cov --locked` to reproduce the CI coverage report.
-- Paseo runs the adapter as `["agy-acp", "--permission-prompts"]` in
+- Paseo runs the adapter as `["agy-gated-acp", "--permission-prompts"]` in
   `~/.paseo/config.json`. Provider command changes need a daemon restart.
 - The permission flag is off by default. Without it the adapter behaves as the
   original upstream code did.

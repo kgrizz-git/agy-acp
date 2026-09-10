@@ -2,17 +2,17 @@
 
 An [Agent Client Protocol (ACP)](https://agentclientprotocol.com) stdio adapter for [Google Antigravity CLI](https://github.com/google-antigravity/antigravity-cli) (`agy`). It bridges `agy` into any ACP-compatible host like [Zed](https://zed.dev), enabling you to use Gemini models through `agy` inside Zed's Agent Panel.
 
-> This is a hard fork of [`hicder/agy-acp`](https://github.com/hicder/agy-acp).
-> What it adds is the permission-prompt bridge: headless `agy` cannot ask for
+> This is a hard fork of [`hicder/agy-acp`](https://github.com/hicder/agy-acp) —
+> itself an adapter for [Google Antigravity CLI](https://github.com/google-antigravity/antigravity-cli)
+> (`agy`).
+> What this fork adds is the permission-prompt bridge: headless `agy` cannot ask for
 > tool permissions, so this adapter routes them to the ACP host instead of
-> letting them fail silently. The crate and binary are still named `agy-acp`
-> until the rename lands, so `agy-acp` below means the binary unless the
-> repository is meant. Related efforts assessed along the way:
+> letting them fail silently. Related efforts assessed along the way:
 > [`javimosch/agy-acp-bridge`](https://github.com/javimosch/agy-acp-bridge)
 > (ACP stdio bridge for `agy`) and
 > [`tiezbro/paseo-agy-acp`](https://github.com/tiezbro/paseo-agy-acp)
 > (Paseo-focused ACP adapter for `agy`); what was taken, and what was
-> deliberately not, is tracked in TODO.md.
+> deliberately not, is recorded in AGENTS.md and tracked in TODO.md.
 
 ## Features
 
@@ -26,10 +26,10 @@ An [Agent Client Protocol (ACP)](https://agentclientprotocol.com) stdio adapter 
 
 ## How It Works
 
-`agy-acp` speaks JSON-RPC over stdin/stdout (the ACP transport). When a host sends a prompt, `agy-acp` spawns `agy` in stream-json mode, streams the output incrementally back via `session/update` notifications, and binds the `conversation_id` so subsequent turns or resumed sessions retain context.
+`agy-gated-acp` speaks JSON-RPC over stdin/stdout (the ACP transport). When a host sends a prompt, `agy-gated-acp` spawns `agy` in stream-json mode, streams the output incrementally back via `session/update` notifications, and binds the `conversation_id` so subsequent turns or resumed sessions retain context.
 
 ```
-Zed (ACP host)  <--stdin/stdout JSON-RPC-->  agy-acp  <--subprocess-->  agy  <--API-->  Gemini
+Zed (ACP host)  <--stdin/stdout JSON-RPC-->  agy-gated-acp  <--subprocess-->  agy  <--API-->  Gemini
 ```
 
 ## Prerequisites
@@ -44,22 +44,22 @@ Zed (ACP host)  <--stdin/stdout JSON-RPC-->  agy-acp  <--subprocess-->  agy  <--
 cargo build --release
 ```
 
-The binary is generated at `target/release/agy-acp`. Copy it to a directory in your `PATH`:
+The binary is generated at `target/release/agy-gated-acp`. Copy it to a directory in your `PATH`:
 
 ```bash
-cp target/release/agy-acp /usr/local/bin/
+cp target/release/agy-gated-acp /usr/local/bin/
 ```
 
 ## Use with Zed
 
-Add `agy-acp` as a custom agent server in your Zed settings (`~/.config/zed/settings.json`):
+Add `agy-gated-acp` as a custom agent server in your Zed settings (`~/.config/zed/settings.json`):
 
 ```json
 {
   "agent_servers": {
     "agy": {
       "type": "custom",
-      "command": "agy-acp",
+      "command": "agy-gated-acp",
       "args": ["--permission-prompts"],
       "env": {}
     }
@@ -83,7 +83,7 @@ To suppress leading narrative chatter from the model, pass `--skip-naration` in 
   "agent_servers": {
     "agy": {
       "type": "custom",
-      "command": "agy-acp",
+      "command": "agy-gated-acp",
       "args": ["--skip-naration"],
       "env": {}
     }
@@ -100,7 +100,7 @@ Set the `AGY_EXTRA_ARGS` environment variable to pass additional arguments to ev
   "agent_servers": {
     "agy": {
       "type": "custom",
-      "command": "agy-acp",
+      "command": "agy-gated-acp",
       "args": [],
       "env": {
         "AGY_EXTRA_ARGS": "--some-flag value"
@@ -109,6 +109,14 @@ Set the `AGY_EXTRA_ARGS` environment variable to pass additional arguments to ev
   }
 }
 ```
+
+## Use with Paseo
+
+Point Paseo at the adapter in `~/.paseo/config.json` with the provider command
+`["agy-gated-acp", "--permission-prompts"]`, then restart the Paseo daemon —
+provider command changes need a daemon restart to take effect. The adapter
+itself is host-neutral: `session/request_permission` is standard ACP, so
+everything under [Permission Prompts](#permission-prompts) applies unchanged.
 
 ## Permission Prompts
 
@@ -123,7 +131,7 @@ Set the `AGY_EXTRA_ARGS` environment variable to pass additional arguments to ev
   "agent_servers": {
     "agy": {
       "type": "custom",
-      "command": "agy-acp",
+      "command": "agy-gated-acp",
       "args": ["--permission-prompts"],
       "env": {}
     }
@@ -280,11 +288,11 @@ one, or restarting the host, clears it.
 
 ## Session Persistence
 
-Sessions are persisted to `~/.openab/agy-acp/sessions.json`. When you resume a session in Zed, `agy-acp` restores the conversation binding and continues it with `agy --conversation <id>`. State persistence uses atomic write-to-temp-and-rename under an exclusive file lock to avoid data corruption.
+Sessions are persisted to `~/.openab/agy-gated-acp/sessions.json`. When you resume a session in Zed, `agy-gated-acp` restores the conversation binding and continues it with `agy --conversation <id>`. State persistence uses atomic write-to-temp-and-rename under an exclusive file lock to avoid data corruption.
 
 ## Debugging
 
-To inspect the JSON-RPC messages between Zed and `agy-acp`, run `dev: open acp logs` from Zed's Command Palette.
+To inspect the JSON-RPC messages between Zed and `agy-gated-acp`, run `dev: open acp logs` from Zed's Command Palette.
 
 ## License
 

@@ -141,7 +141,7 @@ fn test_e2e_agy_acp_full_round_trip() {
 
     let binary = std::env::current_dir()
         .unwrap()
-        .join("target/release/agy-acp");
+        .join("target/release/agy-gated-acp");
     if !binary.exists() {
         panic!("Run `cargo build --release` first");
     }
@@ -151,7 +151,7 @@ fn test_e2e_agy_acp_full_round_trip() {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("failed to spawn agy-acp");
+        .expect("failed to spawn agy-gated-acp");
     forward_stderr(&mut child);
 
     let mut stdin = child.stdin.take().unwrap();
@@ -222,7 +222,7 @@ fn spawn_agy_acp() -> Option<(
     }
     let binary = std::env::current_dir()
         .unwrap()
-        .join("target/release/agy-acp");
+        .join("target/release/agy-gated-acp");
     if !binary.exists() {
         panic!("Run `cargo build --release` first");
     }
@@ -232,14 +232,14 @@ fn spawn_agy_acp() -> Option<(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("failed to spawn agy-acp");
+        .expect("failed to spawn agy-gated-acp");
     forward_stderr(&mut child);
     let stdin = child.stdin.take().unwrap();
     let stdout = child.stdout.take().unwrap();
     Some((stdin, BufReader::new(stdout), child))
 }
 
-/// Echoes the child's stderr to ours, locking the adapter's `[agy-acp] agy
+/// Echoes the child's stderr to ours, locking the adapter's `[agy-gated-acp] agy
 /// stderr: ...` lines into the test log. Without this the pipe is never read:
 /// the provider's actual error (a 429, an auth failure) sits in the buffer
 /// while the assertion sees only the JSON `agy failed:` wrapper, and a
@@ -249,7 +249,7 @@ fn forward_stderr(child: &mut std::process::Child) {
     if let Some(err) = child.stderr.take() {
         std::thread::spawn(move || {
             for line in BufReader::new(err).lines().map_while(Result::ok) {
-                eprintln!("[agy-acp stderr] {line}");
+                eprintln!("[agy-gated-acp stderr] {line}");
             }
         });
     }
@@ -386,7 +386,7 @@ fn send_recv_id(
         }
         let mut line = String::new();
         if reader.read_line(&mut line).unwrap() == 0 {
-            panic!("agy-acp closed stdout before answering id {}", id);
+            panic!("agy-gated-acp closed stdout before answering id {}", id);
         }
         let msg: Value = serde_json::from_str(line.trim())
             .unwrap_or_else(|e| panic!("non-JSON line on stdout: {e}: {:?}", line));

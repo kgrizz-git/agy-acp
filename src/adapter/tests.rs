@@ -1006,3 +1006,40 @@ async fn stream_notifications_go_through_the_output_channel() {
     }
     assert!(count >= 1, "at least one notification was emitted");
 }
+
+#[test]
+fn legacy_sessions_file_is_migrated_once() {
+    let home = std::env::temp_dir().join(format!("agy-gated-acp-mig-{}", Uuid::new_v4()));
+    let old_file = home.join(".openab/agy-acp/sessions.json");
+    fs::create_dir_all(old_file.parent().unwrap()).unwrap();
+    fs::write(&old_file, "{}").unwrap();
+
+    let adapter = Adapter::new_with_home(home.clone(), Vec::new(), false);
+    let new_file = home.join(".openab/agy-gated-acp/sessions.json");
+    assert_eq!(adapter.state_file, new_file);
+    assert_eq!(fs::read_to_string(&new_file).unwrap(), "{}");
+    assert!(
+        !old_file.exists(),
+        "the legacy file moves, it is not copied"
+    );
+
+    // A second start with both present keeps the new file and leaves the old one.
+    fs::write(&old_file, "{\"stale\":true}").unwrap();
+    fs::write(&new_file, "{\"current\":true}").unwrap();
+    Adapter::new_with_home(home.clone(), Vec::new(), false);
+    assert_eq!(fs::read_to_string(&new_file).unwrap(), "{\"current\":true}");
+    assert!(old_file.exists());
+
+    fs::remove_dir_all(&home).unwrap();
+}
+
+#[test]
+fn fresh_home_creates_no_state() {
+    let home = std::env::temp_dir().join(format!("agy-gated-acp-fresh-{}", Uuid::new_v4()));
+    let adapter = Adapter::new_with_home(home.clone(), Vec::new(), false);
+    assert!(!adapter.state_file.exists());
+    assert!(
+        !home.join(".openab").exists(),
+        "a home with no state must not gain an empty directory"
+    );
+}

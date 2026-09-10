@@ -39,7 +39,7 @@ const HOOK_DIR_NAME: &str = "hook";
 
 /// Prefix on the random owner directory. Short for the same reason as the
 /// socket filename.
-const RUNTIME_PREFIX: &str = "agy-acp-";
+const RUNTIME_PREFIX: &str = "agy-gated-acp-";
 
 /// How many random names to try before treating repeated collisions as a
 /// failure. Bounded so a hostile or broken temporary directory cannot make

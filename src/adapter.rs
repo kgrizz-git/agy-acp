@@ -150,7 +150,8 @@ impl Adapter {
     }
 
     fn new_with_home(home: PathBuf, available_models: Vec<AgyModel>, skip_naration: bool) -> Self {
-        let state_dir = home.join(".openab/agy-acp");
+        let state_dir = home.join(".openab/agy-gated-acp");
+        Self::migrate_legacy_state(&home, &state_dir);
         Self {
             sessions: HashMap::new(),
             working_dir: std::env::current_dir()
@@ -166,6 +167,29 @@ impl Adapter {
             live_children: LiveChildren::default(),
             agy_bin: "agy".to_string(),
             pending_forget: Arc::new(std::sync::Mutex::new(Vec::new())),
+        }
+    }
+
+    /// Moves a pre-rename `sessions.json` to the new state directory, once.
+    ///
+    /// Only when the new file is absent and the old one exists: a present new
+    /// file always wins and the old one is left alone, and when neither exists
+    /// nothing is created. Best-effort — a failure here surfaces again loudly
+    /// enough when the state is next persisted.
+    fn migrate_legacy_state(home: &Path, state_dir: &Path) {
+        let new_file = state_dir.join("sessions.json");
+        if new_file.exists() {
+            return;
+        }
+        let old_file = home.join(".openab/agy-acp/sessions.json");
+        if !old_file.exists() {
+            return;
+        }
+        if fs::create_dir_all(state_dir).is_err() {
+            return;
+        }
+        if fs::rename(&old_file, &new_file).is_ok() {
+            eprintln!("agy-gated-acp: migrated sessions from ~/.openab/agy-acp/sessions.json");
         }
     }
 
@@ -1104,7 +1128,7 @@ async fn drain_agy_io(
                 }
             }
             if let Some(e) = read_error {
-                eprintln!("agy-acp: error reading agy stdout: {e}");
+                eprintln!("agy-gated-acp: error reading agy stdout: {e}");
             }
         }
         processor
@@ -1180,7 +1204,7 @@ fn turn_response(id: Value, drained: &DrainOutcome, denied_by_user: bool) -> Vec
 
     let stderr_text = String::from_utf8_lossy(&drained.stderr_bytes);
     if !stderr_text.is_empty() {
-        eprintln!("[agy-acp] agy stderr: {}", stderr_text.trim_end());
+        eprintln!("[agy-gated-acp] agy stderr: {}", stderr_text.trim_end());
     }
 
     // A turn the user refused is an outcome, not a provider failure; the bridge
@@ -1189,7 +1213,7 @@ fn turn_response(id: Value, drained: &DrainOutcome, denied_by_user: bool) -> Vec
         && !denied_by_user
         && (!status.success() || result_failed || result_missing)
     {
-        eprintln!("[agy-acp] WARN: agy exited with status: {}", status);
+        eprintln!("[agy-gated-acp] WARN: agy exited with status: {}", status);
         // Updates already streamed to the client stay where they are; what must
         // not happen is a failed turn ending in a success response, which is
         // indistinguishable from a good one. This used to be gated on

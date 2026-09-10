@@ -4,7 +4,7 @@
 //! adapter takes over gating entirely:
 //!
 //! ```text
-//! agy (PreToolUse hook) --unix socket--> agy-acp --session/request_permission--> ACP client
+//! agy (PreToolUse hook) --unix socket--> agy-gated-acp --session/request_permission--> ACP client
 //!                       <--allow/deny--         <--outcome--------------------
 //! ```
 //!
@@ -564,7 +564,7 @@ impl PermissionBridge {
                 None => {
                     return (
                         Decision::Deny,
-                        "agy-acp: no ACP session to ask for permission".to_string(),
+                        "agy-gated-acp: no ACP session to ask for permission".to_string(),
                     )
                 }
             };
@@ -575,7 +575,7 @@ impl PermissionBridge {
             if state.active_session.as_deref() != Some(session_id.as_str()) {
                 return (
                     Decision::Deny,
-                    "agy-acp: the turn ended before this was asked".to_string(),
+                    "agy-gated-acp: the turn ended before this was asked".to_string(),
                 );
             }
             (session_id, state.turn_generation)
@@ -590,7 +590,7 @@ impl PermissionBridge {
             if targets_hook_root(&args, &hook_root) {
                 return (
                     Decision::Deny,
-                    "agy-acp: that path is the adapter's internal directory, not part \
+                    "agy-gated-acp: that path is the adapter's internal directory, not part \
                      of the workspace. Use the workspace directory instead."
                         .to_string(),
                 );
@@ -634,7 +634,7 @@ impl PermissionBridge {
         {
             return (
                 Decision::Deny,
-                "agy-acp: the turn ended before this was asked".to_string(),
+                "agy-gated-acp: the turn ended before this was asked".to_string(),
             );
         }
 
@@ -658,7 +658,7 @@ impl PermissionBridge {
             self.state.lock().await.pending.remove(&request_id);
             return (
                 Decision::Deny,
-                "agy-acp: client connection closed".to_string(),
+                "agy-gated-acp: client connection closed".to_string(),
             );
         }
 
@@ -670,7 +670,7 @@ impl PermissionBridge {
             Ok(Ok(Answer::Abandoned)) => {
                 return (
                     Decision::Deny,
-                    "agy-acp: the turn ended before this was answered".to_string(),
+                    "agy-gated-acp: the turn ended before this was answered".to_string(),
                 );
             }
             _ => {
@@ -678,7 +678,7 @@ impl PermissionBridge {
                 self.mark_user_refusal(turn).await;
                 return (
                     Decision::Deny,
-                    "agy-acp: timed out waiting for a permission decision".to_string(),
+                    "agy-gated-acp: timed out waiting for a permission decision".to_string(),
                 );
             }
         };

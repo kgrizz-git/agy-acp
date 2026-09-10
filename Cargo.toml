@@ -1,6 +1,6 @@
 [package]
-name = "agy-acp"
-version = "0.2.0"
+name = "agy-gated-acp"
+version = "0.3.0"
 edition = "2021"
 license = "MIT"
 description = "ACP stdio adapter for Google Antigravity CLI (agy)"
