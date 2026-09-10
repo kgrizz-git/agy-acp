@@ -75,22 +75,42 @@ enum Command {
 /// with agy's checks disabled and no bridge to replace them. On success the
 /// private runtime owner is returned so ordinary exit and handled signals can
 /// remove its directory explicitly.
+///
+/// The cleanup handle is published to `shared_cleanup` immediately after the
+/// owner is created -- before the bridge, hook root, and their awaits -- so a
+/// handled signal arriving mid-setup still removes the directory instead of
+/// observing `None` and exiting past `RuntimeOwner::drop`. Every later failure
+/// clears the slot again, so a failed setup retains no stale cleanup state.
 async fn start_permission_prompts(
     adapter: &Arc<tokio::sync::Mutex<Adapter>>,
     out_tx: &mpsc::UnboundedSender<Option<String>>,
+    shared_cleanup: &SharedCleanup,
 ) -> std::io::Result<(
     permission::PermissionBridge,
     hook_root::HookRoot,
     runtime::RuntimeOwner,
-    runtime::RuntimeCleanup,
 )> {
     let owner = runtime::RuntimeOwner::create()?;
-    let cleanup = owner.cleanup_handle();
-    let bridge = permission::PermissionBridge::start(out_tx.clone(), &owner)?;
+    *shared_cleanup
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(owner.cleanup_handle());
+    let clear_shared = || {
+        *shared_cleanup
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    };
+    let bridge = match permission::PermissionBridge::start(out_tx.clone(), &owner) {
+        Ok(bridge) => bridge,
+        Err(error) => {
+            clear_shared();
+            return Err(error);
+        }
+    };
     let hook_root = match hook_root::HookRoot::create(&owner) {
         Ok(hook_root) => hook_root,
         Err(error) => {
             bridge.shutdown();
+            clear_shared();
             return Err(error);
         }
     };
@@ -99,13 +119,13 @@ async fn start_permission_prompts(
         .lock()
         .await
         .enable_permission_bridge(&bridge, hook_root.path());
-    Ok((bridge, hook_root, owner, cleanup))
+    Ok((bridge, hook_root, owner))
 }
 
-/// Shared handle to the private runtime cleanup, populated once the owner is
-/// created. The signal handlers read it when they fire, so a signal that
-/// arrives before (or when) prompts are off simply finds `None` and skips
-/// cleanup.
+/// Shared handle to the private runtime cleanup, published at owner creation
+/// inside `start_permission_prompts`. The signal handlers read it when they
+/// fire, so a signal that arrives before (or when) prompts are off simply
+/// finds `None` and skips cleanup.
 #[cfg(unix)]
 type SharedCleanup = std::sync::Arc<std::sync::Mutex<Option<runtime::RuntimeCleanup>>>;
 
@@ -222,18 +242,13 @@ async fn main() {
     // runtime directory (the explicit cleanup below normally runs first, making
     // the drop a no-op). `_hook_root` only carries the path agy was given.
     let (bridge, _hook_root, _owner, runtime_cleanup) = if cli.permission_prompts {
-        match start_permission_prompts(&adapter, &out_tx).await {
-            Ok((bridge, hook_root, owner, cleanup)) => {
-                *shared_cleanup
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(cleanup);
-                (
-                    Some(bridge),
-                    Some(hook_root),
-                    Some(owner),
-                    Some(shared_cleanup),
-                )
-            }
+        match start_permission_prompts(&adapter, &out_tx, &shared_cleanup).await {
+            Ok((bridge, hook_root, owner)) => (
+                Some(bridge),
+                Some(hook_root),
+                Some(owner),
+                Some(shared_cleanup),
+            ),
             Err(e) => {
                 eprintln!("agy-acp: could not enable permission prompts: {e}");
                 eprintln!("agy-acp: continuing with agy's own permission handling");
