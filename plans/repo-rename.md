@@ -53,12 +53,21 @@ that no longer exists.
      in this plan, and its `hicder/agy-acp` links are historical evidence.
      Upstream-attribution wording there stays as written.
 3. Fork-etiquette docs pass, same PR:
-   - Keep the `hicder/agy-acp` attribution prominent (README, AGENTS.md):
-     what was taken, that the fork is hard with no upstream PRs, and that
-     upstream work is read by fetching a URL, never by re-adding a remote.
-   - State the difference honestly: what this fork adds (the ACP
-     permission-prompt bridge and its hardening) in one short paragraph aimed
-     at someone arriving from upstream.
+   - `README.md` currently never says it is a fork — a reader arriving from
+     crates, search, or a fresh clone cannot tell. Add a short fork notice up
+     top: hard fork of `hicder/agy-acp`, what this fork adds (the ACP
+     permission-prompt bridge and its hardening) in one paragraph, and links
+     to all three upstreams: `hicder/agy-acp` (origin), plus the assessed
+     community projects `javimosch/agy-acp-bridge` and `tiezbro/paseo-agy-acp`
+     with one line each on what was taken or deliberately not (mirroring the
+     "Related community projects" section in AGENTS.md and the TODO.md entry
+     that tracks them).
+   - Sweep stale claims while there: any remaining "only gate" language must
+     keep the tool-calls qualifier from the README boundary note; install and
+     clone commands must use the new slug. There are currently no badges to
+     update — verify that is still true rather than assuming it.
+   - `AGENTS.md` relationship section: new origin slug, unchanged upstream
+     instructions (fetch by URL, never re-add the remote).
    - No code changes in this PR: binary, crate, state directory
      (`~/.openab/agy-acp`), hook invocation, and Paseo provider command are all
      untouched — those belong to the crate/binary rename.
