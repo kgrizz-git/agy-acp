@@ -242,7 +242,7 @@ sections above describe how it works and the agy behaviours it is built around.
 The repository is named `agy-gated-acp` to mark it distinct from upstream. The
 crate and binary are still `agy-acp` until the rename in
 [plans/fork-maintenance.md](plans/fork-maintenance.md) lands, so `agy-acp`
-below means the binary unless the repository is meant.
+elsewhere in this file means the binary unless the repository is meant.
 
 Used with Paseo, though nothing in the code is Paseo-specific —
 `session/request_permission` is standard ACP and Zed implements it too. Keep it

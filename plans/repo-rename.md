@@ -39,8 +39,8 @@ that no longer exists.
      discoverability at the cost of staying visually adjacent to upstream's
      `agy-acp`; the fork notice and H1 change carry the distinctness.
 2. Rename in GitHub settings, then update the tree:
-   - `.githooks/pre-push`: the four canonical remote URL forms and the denial
-     message.
+   - `.githooks/pre-push`: the three canonical remote URL forms (each with
+     and without `.git`) and the denial message.
    - `AGENTS.md`: the `# agy-acp` H1 (becomes the new repo name), origin
      remote, `gh repo set-default`, fork-guard URL forms,
      and the relationship-to-upstream section.

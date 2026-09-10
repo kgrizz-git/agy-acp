@@ -9,7 +9,10 @@ An [Agent Client Protocol (ACP)](https://agentclientprotocol.com) stdio adapter 
 > until the rename lands, so `agy-acp` below means the binary unless the
 > repository is meant. Related efforts assessed along the way:
 > [`javimosch/agy-acp-bridge`](https://github.com/javimosch/agy-acp-bridge)
-> and [`tiezbro/paseo-agy-acp`](https://github.com/tiezbro/paseo-agy-acp).
+> (ACP stdio bridge for `agy`) and
+> [`tiezbro/paseo-agy-acp`](https://github.com/tiezbro/paseo-agy-acp)
+> (Paseo-focused ACP adapter for `agy`); what was taken, and what was
+> deliberately not, is tracked in TODO.md.
 
 ## Features
 
