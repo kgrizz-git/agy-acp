@@ -7,9 +7,8 @@ document. Delete an entry when it lands, rather than checking it off.
 ## Next Up
 
 - [Verify Paseo's reopened-thread path](#paseo-integration).
-- [Detect and surface workspace hook directories](#security-and-permission-boundaries).
 - [Carry a turn identity through the hook protocol](#reliability-and-lifecycle).
-- [Choose a distinct crate and binary name](#fork-maintenance).
+- [Detect and surface workspace hook directories](#security-and-permission-boundaries).
 
 ## Active
 
@@ -31,7 +30,9 @@ document. Delete an entry when it lands, rather than checking it off.
 - Decide whether an opt-in may use native agy permission grants, while retaining
   exact command keying, containment, and sensitive-path checks. Plan: [plans/permission-boundaries.md](plans/permission-boundaries.md).
 - Detect and surface workspace hook directories before the first turn; pursue an
-  upstream isolation option separately. Plan: [plans/workspace-hook-trust-boundary.md](plans/workspace-hook-trust-boundary.md).
+  upstream isolation option separately. The trust boundary itself is already
+  documented in the README; what remains is the opt-in detection.
+  Plan: [plans/workspace-hook-trust-boundary.md](plans/workspace-hook-trust-boundary.md).
 
 ### Reliability and lifecycle
 
