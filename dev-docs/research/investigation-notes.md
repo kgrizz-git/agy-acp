@@ -185,26 +185,26 @@ before the first turn. Isolated hook discovery needs an upstream agy flag.
 
 ### Permission socket hardening
 
-the Unix-socket pathname is predictable from the adapter PID and hook
-connections/tasks have no explicit peer or concurrency limit. Measure socket
-permissions and test same-user spoofing or connection exhaustion; use a private
-`0700` directory, an unguessable path, framing limits, and bounded connection
-handling if the threat is realistic.
+Closed by plans/completed/permission-ipc-hardening.md (0.2.0). The socket now
+lives in a per-process random `0700` runtime directory with no PID-derived
+pathname; each connection carries one at-most-1-MiB JSON frame with 10s
+read/write deadlines, and at most eight connections wait on the host at once
+with one bounded busy-deny writer for a further peer. Frames that are
+malformed, oversized, slow, or name no tool deny without a host prompt. The
+socket path is checked against the 104-byte macOS limit before bind and fails
+closed. This protects the adapter's own files against accidental or cross-user
+interference through the system temporary directory; it does not sandbox a
+hostile same-user process.
 
 ### Hook-root temporary-directory race
 
-the private hook root is also a predictable `$TMPDIR/agy-acp-hooks-<pid>` path,
-created with `create_dir_all` and made read-only only after writing
-`hooks.json`. Replace it with an exclusive random `0700` temporary directory;
-never recursively delete a merely prefix-matching stale directory without
-proving it was created by this adapter.
-
-Related: the hook root is deleted by `HookRoot`'s `Drop`, and the signal handler
-added with the cancellation fix ends the process with `std::process::exit`, which
-runs no destructors. A signalled adapter therefore leaves its hook root behind,
-and the bridge's socket with it. This is not a regression — an unhandled
-`SIGTERM` skipped the same `Drop` — but handling the signal is what makes
-cleaning up there possible at all.
+Closed by plans/completed/permission-ipc-hardening.md (0.2.0). The hook root
+is a child of the same random `0700` runtime owner, created exclusively (no
+`create_dir_all` adoption, no PID naming, no prefix sweep), and cleanup
+restores its read-only mode before removing only the owned directory.
+Ordinary exit and handled `SIGTERM`/`SIGINT`/`SIGHUP` run that explicit
+idempotent cleanup; `SIGKILL` and machine-loss remnants are inert and are
+deliberately never swept by a later startup.
 
 ## Reliability and lifecycle
 
@@ -252,13 +252,14 @@ turn of the same session.
 
 ### Unbounded input/output work
 
-stdin JSON-RPC lines, hook payloads, pending permission requests, and stream-
-json lines are not size- or count-bounded. Remembered permission answers now
-retain a copy of each approved argument object as its key fingerprint
-(`args_fingerprint`), so an unbounded hook payload becomes an unbounded map key —
-the same exposure, widened. The bound belongs on the payload, and fixing it there
-fixes both; do not bound the key separately. Establish host limits and add
-practical frame and queue safeguards to prevent a malformed client or provider
+stdin JSON-RPC lines and stream-json lines are not size- or count-bounded.
+Hook payloads are now bounded — one at-most-1-MiB frame per connection in each
+direction — and pending host permission requests with them (at most eight),
+closed by plans/completed/permission-ipc-hardening.md (0.2.0). Remembered
+permission answers retain a copy of each approved argument object as its key
+fingerprint (`args_fingerprint`), and that key inherits the payload bound, so
+no separate key bound was added. Establish host limits and add practical frame
+and queue safeguards to prevent a malformed client or provider
 data from exhausting memory.
 
 The output channel is the concrete case. Every notification now goes through one

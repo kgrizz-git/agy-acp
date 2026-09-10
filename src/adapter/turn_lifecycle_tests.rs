@@ -45,13 +45,22 @@ fn stub_agy(body: &str) -> StubAgy {
     StubAgy { dir, bin }
 }
 
-/// `PermissionBridge::start` binds one socket per *process*, and it unlinks the
-/// path before binding. Two bridge tests in this binary therefore race: the
-/// loser's bind lands after the winner's unlink and fails with EEXIST. Held for
-/// the whole test rather than just the `start` call, because the bridge owns
-/// that path until it drops -- and a `tokio` mutex rather than a `std` one,
-/// since it is held across the `await` on the turn.
+/// `PermissionBridge::start` binds a socket inside a freshly created private
+/// runtime directory, so two bridge tests in this binary get distinct paths and
+/// do not race. The owner must outlive the bridge and the turn that uses it.
 static BRIDGE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Starts a bridge inside its own private runtime owner, returned alongside the
+/// owner so the test can keep it (and the directory) alive for the turn.
+async fn start_bridge() -> (
+    crate::permission::PermissionBridge,
+    crate::runtime::RuntimeOwner,
+) {
+    let owner = crate::runtime::RuntimeOwner::create().expect("runtime owner");
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let bridge = crate::permission::PermissionBridge::start(tx, &owner).expect("start bridge");
+    (bridge, owner)
+}
 
 /// Runs one turn against `stub`, returning the response lines and the
 /// adapter, so a test can assert on live children after the turn.
@@ -292,10 +301,7 @@ async fn a_result_event_error_outranks_the_other_failure_messages() {
 #[tokio::test]
 async fn a_successful_turn_binds_persists_and_releases_the_bridge() {
     let _bridge_guard = BRIDGE_LOCK.lock().await;
-    let bridge = {
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        crate::permission::PermissionBridge::start(tx).expect("start bridge")
-    };
+    let (bridge, _owner) = start_bridge().await;
 
     let mut adapter = Adapter::new_for_test();
     let frame = r#"{"event":"result","result":{"conversation_id":"conv-xyz","status":"SUCCESS","response":"done"}}"#;
@@ -358,10 +364,7 @@ async fn a_successful_turn_binds_persists_and_releases_the_bridge() {
 #[tokio::test]
 async fn bridge_binding_is_cleared_after_spawn_failure() {
     let _bridge_guard = BRIDGE_LOCK.lock().await;
-    let bridge = {
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        crate::permission::PermissionBridge::start(tx).expect("start bridge")
-    };
+    let (bridge, _owner) = start_bridge().await;
 
     let mut adapter = Adapter::new_for_test();
     adapter.agy_bin = "/nonexistent/agy-acp-not-a-real-binary".to_string();

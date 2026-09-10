@@ -16,18 +16,25 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::net::UnixListener;
+use tokio::sync::{mpsc, oneshot, Mutex, Semaphore};
 use uuid::Uuid;
 
+use crate::runtime::RuntimeOwner;
+
+mod frame;
+pub(crate) use frame::{parse_frame, HOOK_READ_TIMEOUT, MAX_CONNECTIONS, MAX_SATURATION_DENIES};
 mod path_rules;
 use path_rules::{outside_workspace, string_args};
 mod prompt;
-use prompt::tool_title;
+use prompt::{
+    permission_options, tool_title, AlwaysScope, OPTION_ALLOW_ALWAYS, OPTION_ALLOW_ONCE,
+    OPTION_REJECT_ALWAYS, OPTION_REJECT_ONCE,
+};
 mod safe_command;
-use safe_command::{classify_call, ProgramDef, SafeCommand};
+use safe_command::{classify_call, SafeCommand};
 mod hook_client;
+mod serve;
 pub use hook_client::run_hook;
 
 /// Env var carrying the bridge socket path into the `agy` subprocess (and from
@@ -47,11 +54,24 @@ pub const TIMEOUT_ENV: &str = "AGY_ACP_PERMISSION_TIMEOUT_SECS";
 const DEFAULT_RESPONSE_TIMEOUT: Duration = Duration::from_secs(540);
 
 fn response_timeout() -> Duration {
-    std::env::var(TIMEOUT_ENV)
+    let configured_secs = std::env::var(TIMEOUT_ENV)
         .ok()
-        .and_then(|raw| raw.parse().ok())
-        .map(Duration::from_secs)
-        .unwrap_or(DEFAULT_RESPONSE_TIMEOUT)
+        .and_then(|raw| raw.parse().ok());
+    bounded_response_timeout(configured_secs)
+}
+
+/// Keeps the bridge's host wait strictly inside the hook's socket-read deadline.
+///
+/// If this ordering reverses, the hook denies and disconnects while the bridge
+/// still waits for the host, leaving a late answer with no peer to receive it.
+/// A one-second margin preserves the ordering even when callers configure the
+/// environment variable at or beyond the hook timeout.
+fn bounded_response_timeout(configured_secs: Option<u64>) -> Duration {
+    let max_secs = HOOK_READ_TIMEOUT.as_secs().saturating_sub(1);
+    let seconds = configured_secs
+        .unwrap_or(DEFAULT_RESPONSE_TIMEOUT.as_secs())
+        .min(max_secs);
+    Duration::from_secs(seconds)
 }
 
 /// Decision returned to `agy`'s `PreToolUse` hook.
@@ -221,41 +241,92 @@ pub struct PermissionBridge {
     state: Arc<Mutex<BridgeState>>,
     out_tx: mpsc::UnboundedSender<Option<String>>,
     socket_path: Arc<PathBuf>,
+    /// Stops the listener during partial-start rollback. The listener task
+    /// owns a bridge clone, so ordinary `Drop` cannot break that cycle.
+    accept_task: Option<Arc<tokio::task::AbortHandle>>,
+    /// Full-lifetime connection permits. One is held for the whole
+    /// read → host wait → write of each accepted connection, so pending host
+    /// requests are bounded alongside tasks and memory.
+    permits: Arc<Semaphore>,
+    /// A one-slot, deadline-bounded writer reserve for saturated denials. The
+    /// primary permit cap still bounds all host-facing work at eight.
+    saturation_permits: Arc<Semaphore>,
 }
 
 impl PermissionBridge {
-    /// Binds the bridge socket and starts accepting hook connections.
-    pub fn start(out_tx: mpsc::UnboundedSender<Option<String>>) -> std::io::Result<Self> {
-        let socket_path = default_socket_path();
-        if let Some(parent) = socket_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        // A socket from a previous run would refuse to bind.
-        let _ = std::fs::remove_file(&socket_path);
+    /// Binds the bridge socket inside a private runtime directory and starts
+    /// accepting hook connections.
+    ///
+    /// The socket path is the owner's `s.sock`, which the path builder has
+    /// already checked against the platform limit. Nothing is unlinked first:
+    /// the owner directory is freshly created, so its socket path cannot
+    /// already be in use by a previous run.
+    pub(crate) fn start(
+        out_tx: mpsc::UnboundedSender<Option<String>>,
+        owner: &RuntimeOwner,
+    ) -> std::io::Result<Self> {
+        let socket_path = owner.socket_path();
 
         let listener = UnixListener::bind(&socket_path)?;
-        let bridge = PermissionBridge {
+        let mut bridge = PermissionBridge {
             state: Arc::new(Mutex::new(BridgeState {
                 policy: AutoAllowPolicy::from_env(),
                 ..BridgeState::default()
             })),
             out_tx,
             socket_path: Arc::new(socket_path),
+            accept_task: None,
+            permits: Arc::new(Semaphore::new(MAX_CONNECTIONS)),
+            saturation_permits: Arc::new(Semaphore::new(MAX_SATURATION_DENIES)),
         };
 
         let accept_bridge = bridge.clone();
-        tokio::spawn(async move {
+        let accept_task = tokio::spawn(async move {
             while let Ok((stream, _)) = listener.accept().await {
                 let bridge = accept_bridge.clone();
-                tokio::spawn(async move { bridge.serve_hook(stream).await });
+                // One of eight full-lifetime permits, acquired before spawning
+                // and held for the whole read → prompt → write. A saturated
+                // listener remains responsive. One deadline-bounded task may
+                // flush a saturated deny; further peers close fail-closed. No
+                // host request can be created and no rejection can allow.
+                match bridge.permits.clone().try_acquire_owned() {
+                    Ok(permit) => {
+                        tokio::spawn(async move {
+                            let _permit = permit;
+                            bridge.serve_hook(stream).await;
+                        });
+                    }
+                    Err(_) => {
+                        if let Ok(permit) = bridge.saturation_permits.clone().try_acquire_owned() {
+                            tokio::spawn(async move {
+                                let _permit = permit;
+                                serve::write_saturated_deny(stream).await;
+                            });
+                        }
+                    }
+                }
             }
         });
+        bridge.accept_task = Some(Arc::new(accept_task.abort_handle()));
 
         Ok(bridge)
     }
 
+    /// Test-only view of how many connection permits are still free.
+    #[cfg(test)]
+    pub(crate) fn available_permits(&self) -> usize {
+        self.permits.available_permits()
+    }
+
     pub fn socket_path(&self) -> &Path {
         self.socket_path.as_path()
+    }
+
+    /// Stops accepting hook connections during rollback or shutdown.
+    pub fn shutdown(&self) {
+        if let Some(accept_task) = &self.accept_task {
+            accept_task.abort();
+        }
     }
 
     /// Associates an agy conversation with the ACP session that owns it, so hook
@@ -453,23 +524,6 @@ impl PermissionBridge {
                 .send(Answer::Host(result.unwrap_or_else(|| json!({}))));
         }
         true
-    }
-
-    /// Handles one hook invocation: read the payload, ask the user, write the decision.
-    async fn serve_hook(&self, stream: UnixStream) {
-        let (read_half, mut write_half) = stream.into_split();
-        let mut lines = BufReader::new(read_half).lines();
-
-        let payload = match lines.next_line().await {
-            Ok(Some(line)) => serde_json::from_str::<Value>(&line).unwrap_or_else(|_| json!({})),
-            _ => return,
-        };
-
-        let (decision, reason) = self.decide(&payload).await;
-        let response = decision.as_hook_json(&reason).to_string();
-        let _ = write_half.write_all(response.as_bytes()).await;
-        let _ = write_half.write_all(b"\n").await;
-        let _ = write_half.flush().await;
     }
 
     // A policy cascade, read top to bottom: each arm is one reason to allow or
@@ -900,115 +954,7 @@ impl PermissionBridge {
     }
 }
 
-impl Drop for PermissionBridge {
-    fn drop(&mut self) {
-        // Only the last handle should unlink the socket.
-        if Arc::strong_count(&self.socket_path) == 1 {
-            let _ = std::fs::remove_file(self.socket_path.as_path());
-        }
-    }
-}
-
 const REQUEST_ID_PREFIX: &str = "agyacp-perm-";
-const OPTION_ALLOW_ONCE: &str = "allow_once";
-const OPTION_ALLOW_ALWAYS: &str = "allow_always";
-const OPTION_REJECT_ONCE: &str = "reject_once";
-const OPTION_REJECT_ALWAYS: &str = "reject_always";
-
-/// What the two "always" labels claim the answer covers.
-///
-/// Derived once, in `decide`, from the same `sticky_scope` result that builds the
-/// key, and then handed to both the prompt and [`PermissionBridge::apply_outcome`]
-/// -- so the button, the stored key and the reason string cannot disagree about
-/// scope. They were previously derived independently in those three places, with
-/// nothing tying them together, and the label drifted from the key.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum AlwaysScope {
-    /// Every later call to this tool, for this session. What the answer covers
-    /// when `sticky_scope` returns `None`.
-    Tool,
-    /// This exact command line and no other. The prompt's title is already
-    /// ``Run `{command}` `` (see [`tool_title`]), so "this exact command" refers
-    /// to something shown directly above the buttons.
-    Command,
-    /// This exact call -- same tool, same arguments. The answer is keyed by the
-    /// arguments, but the arguments are not a command, so calling it one would be
-    /// a lie: `read_url_content` and `search_web` land here, as does every tool
-    /// this fork does not know. Nothing above the buttons reads as a command, and
-    /// a label must describe what is actually being consented to.
-    Call,
-    /// Every later invocation of one allowlisted program, for this session:
-    /// `` `ls` commands ``. What a classified `run_command` allow covers, when
-    /// `sticky_scope` returns `safe:<program>`. Carries the table entry, not
-    /// the model's input, so the label cannot carry model-authored text.
-    Program(&'static ProgramDef),
-}
-
-impl AlwaysScope {
-    /// `scope` is the `sticky_scope` result the key is built from; `args` decides
-    /// only the wording, never the breadth.
-    fn of(scope: Option<&String>, args: &Value) -> Self {
-        match scope {
-            None => AlwaysScope::Tool,
-            Some(_) if has_command_line(args) => AlwaysScope::Command,
-            Some(_) => AlwaysScope::Call,
-        }
-    }
-
-    /// The noun the labels and reasons agree on. `None` for [`AlwaysScope::Tool`],
-    /// which names the tool instead.
-    fn noun(self) -> Option<&'static str> {
-        match self {
-            AlwaysScope::Tool => None,
-            AlwaysScope::Command => Some("this exact command"),
-            AlwaysScope::Call => Some("this exact call"),
-            AlwaysScope::Program(program) => Some(program.noun),
-        }
-    }
-}
-
-/// The four answers offered with every prompt.
-///
-/// `kind` is the ACP enum the host styles on; `name` is free display text and is
-/// ours to word. The "always" labels say "this session" because that is the outer
-/// bound on every remembered answer, and name the scope inside it -- the tool, or
-/// the one command or call in front of the user. The prompt is where someone
-/// decides, not the README.
-///
-/// The allow and deny wordings arrive as separate scopes because denies stay
-/// narrow while allows may widen: a classified command offers "Always allow
-/// `ls` commands" beside "Always reject this exact command". Each side is
-/// worded from the key its answer is actually stored under, so neither button
-/// can promise what its store does not cover.
-///
-/// The scope arrives as an [`AlwaysScope`], not as the command text: nothing in
-/// the label needs the string, and passing it would invite someone to interpolate
-/// it.
-fn permission_options(tool_name: &str, allow: AlwaysScope, deny: AlwaysScope) -> Value {
-    let allow_always = match allow.noun() {
-        Some(noun) => format!("Always allow {noun} this session"),
-        None => format!("Always allow {tool_name} this session"),
-    };
-    let reject_always = match deny.noun() {
-        Some(noun) => format!("Always reject {noun} this session"),
-        None => format!("Always reject {tool_name} this session"),
-    };
-    json!([
-        { "optionId": OPTION_ALLOW_ONCE, "name": "Allow once", "kind": "allow_once" },
-        {
-            "optionId": OPTION_ALLOW_ALWAYS,
-            "name": allow_always,
-            "kind": "allow_always",
-        },
-        { "optionId": OPTION_REJECT_ONCE, "name": "Reject", "kind": "reject_once" },
-        {
-            "optionId": OPTION_REJECT_ALWAYS,
-            "name": reject_always,
-            "kind": "reject_always",
-        },
-    ])
-}
-
 /// Comma-separated list of what may run without asking. Accepts tool names and
 /// the groups `reads`, `searches` and `none`. Defaults to [`DEFAULT_AUTO_ALLOW`].
 pub const AUTO_ALLOW_ENV: &str = "AGY_ACP_AUTO_ALLOW";
@@ -1177,15 +1123,11 @@ fn step_idx(payload: &Value) -> i64 {
         .unwrap_or(-1)
 }
 
-fn default_socket_path() -> PathBuf {
-    let mut path = std::env::temp_dir();
-    path.push(format!("agy-acp-perm-{}.sock", std::process::id()));
-    path
-}
-
 mod sticky_rules;
 use sticky_rules::*;
 
+#[cfg(test)]
+mod ipc_tests;
 #[cfg(test)]
 mod policy_tests;
 #[cfg(test)]

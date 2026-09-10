@@ -21,6 +21,11 @@ mod permission;
 mod permission;
 mod proc;
 mod protobuf;
+#[cfg(unix)]
+mod runtime;
+#[cfg(not(unix))]
+#[path = "runtime_unsupported.rs"]
+mod runtime;
 mod streaming;
 mod tools;
 mod types;
@@ -67,19 +72,71 @@ enum Command {
 ///
 /// Both are needed for prompting to work, so a failure in either leaves the
 /// adapter running with agy's default (headless) permission behaviour rather than
-/// with agy's checks disabled and no bridge to replace them.
+/// with agy's checks disabled and no bridge to replace them. On success the
+/// private runtime owner is returned so ordinary exit and handled signals can
+/// remove its directory explicitly.
+///
+/// The cleanup handle is published to `shared_cleanup` immediately after the
+/// owner is created -- before the bridge, hook root, and their awaits -- so a
+/// handled signal arriving mid-setup still removes the directory instead of
+/// observing `None` and exiting past `RuntimeOwner::drop`. Every later failure
+/// clears the slot again, so a failed setup retains no stale cleanup state.
 async fn start_permission_prompts(
     adapter: &Arc<tokio::sync::Mutex<Adapter>>,
     out_tx: &mpsc::UnboundedSender<Option<String>>,
-) -> std::io::Result<(permission::PermissionBridge, hook_root::HookRoot)> {
-    let bridge = permission::PermissionBridge::start(out_tx.clone())?;
-    let hook_root = hook_root::HookRoot::create()?;
+    shared_cleanup: &SharedCleanup,
+) -> std::io::Result<(
+    permission::PermissionBridge,
+    hook_root::HookRoot,
+    runtime::RuntimeOwner,
+)> {
+    let owner = runtime::RuntimeOwner::create()?;
+    *shared_cleanup
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(owner.cleanup_handle());
+    let clear_shared = || {
+        *shared_cleanup
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    };
+    let bridge = match permission::PermissionBridge::start(out_tx.clone(), &owner) {
+        Ok(bridge) => bridge,
+        Err(error) => {
+            clear_shared();
+            return Err(error);
+        }
+    };
+    let hook_root = match hook_root::HookRoot::create(&owner) {
+        Ok(hook_root) => hook_root,
+        Err(error) => {
+            bridge.shutdown();
+            clear_shared();
+            return Err(error);
+        }
+    };
     bridge.set_hook_root(hook_root.path()).await;
     adapter
         .lock()
         .await
         .enable_permission_bridge(&bridge, hook_root.path());
-    Ok((bridge, hook_root))
+    Ok((bridge, hook_root, owner))
+}
+
+/// Shared handle to the private runtime cleanup, published at owner creation
+/// inside `start_permission_prompts`. The signal handlers read it when they
+/// fire, so a signal that arrives before (or when) prompts are off simply
+/// finds `None` and skips cleanup.
+#[cfg(unix)]
+type SharedCleanup = std::sync::Arc<std::sync::Mutex<Option<runtime::RuntimeCleanup>>>;
+
+/// Clones the cleanup handle while recovering from a poisoned bookkeeping
+/// mutex. Cleanup must not turn a handled signal into a stuck process.
+#[cfg(unix)]
+fn shared_runtime_cleanup(shared: &SharedCleanup) -> Option<runtime::RuntimeCleanup> {
+    shared
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
 }
 
 /// Kills agy and everything it started if the adapter is signalled.
@@ -90,11 +147,17 @@ async fn start_permission_prompts(
 /// use to stop the adapter are handled; `SIGKILL` cannot be, and a tree orphaned
 /// that way is beyond reach.
 ///
+/// When permission prompts are on, the handled signal also removes the private
+/// runtime directory through the shared cleanup handle, and a failed removal is
+/// reported rather than swallowed. `SIGKILL` and machine loss cannot run this;
+/// their random, owner-private remnants are inert and are never swept by a later
+/// startup.
+///
 /// Note this makes a signalled shutdown do work before it exits -- reading the
 /// process table and killing -- where it used to be immediate. That is the cost
 /// of not orphaning the tree, but a supervisor with a short patience will see it.
 #[cfg(unix)]
-fn install_shutdown_killer(live_children: proc::LiveChildren) {
+fn install_shutdown_killer(live_children: proc::LiveChildren, cleanup: SharedCleanup) {
     use tokio::signal::unix::{signal, SignalKind};
 
     for (kind, signum) in [
@@ -105,6 +168,7 @@ fn install_shutdown_killer(live_children: proc::LiveChildren) {
         // One task per signal rather than one `select!` over all three, so that a
         // handler that cannot be installed costs only its own signal.
         let live_children = live_children.clone();
+        let cleanup = cleanup.clone();
         tokio::spawn(async move {
             let mut stream = match signal(kind) {
                 Ok(stream) => stream,
@@ -115,13 +179,29 @@ fn install_shutdown_killer(live_children: proc::LiveChildren) {
             };
             stream.recv().await;
             live_children.kill_all();
+            if let Some(cleanup) = shared_runtime_cleanup(&cleanup) {
+                if let Err(e) = cleanup.cleanup() {
+                    eprintln!("agy-acp: could not clean up runtime directory on shutdown: {e}");
+                }
+            }
             std::process::exit(128 + signum);
         });
     }
 }
 
 #[cfg(not(unix))]
-fn install_shutdown_killer(_live_children: proc::LiveChildren) {}
+type SharedCleanup = std::sync::Arc<std::sync::Mutex<Option<runtime::RuntimeCleanup>>>;
+
+#[cfg(not(unix))]
+fn shared_runtime_cleanup(shared: &SharedCleanup) -> Option<runtime::RuntimeCleanup> {
+    shared
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+}
+
+#[cfg(not(unix))]
+fn install_shutdown_killer(_live_children: proc::LiveChildren, _cleanup: SharedCleanup) {}
 
 // A long, flat dispatch: one arm per JSON-RPC method, read top to bottom. The
 // lint is measuring length it cannot distinguish from depth, and splitting the
@@ -146,7 +226,10 @@ async fn main() {
     // Cloned out once. Draining through the adapter mutex would put every cancel
     // behind a running prompt, which is why this has its own lock.
     let pending_forget = Arc::clone(&adapter.lock().await.pending_forget);
-    install_shutdown_killer(live_children.clone());
+    // Shared with the signal handlers, which are installed before the runtime
+    // owner (and its cleanup) exists. Populated below once prompts are on.
+    let shared_cleanup: SharedCleanup = std::sync::Arc::new(std::sync::Mutex::new(None));
+    install_shutdown_killer(live_children.clone(), shared_cleanup.clone());
     let active_cancellations: cancel::CancelRegistry = cancel::CancelRegistry::default();
 
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
@@ -155,18 +238,25 @@ async fn main() {
     // Permission prompting is opt-in: enabling it disables agy's own tool gating
     // and makes this bridge the only thing standing between the model and the
     // tool, so it must not switch on by accident.
-    // `_hook_root` must outlive the session loop: dropping it deletes the hook.
-    let (bridge, _hook_root) = if cli.permission_prompts {
-        match start_permission_prompts(&adapter, &out_tx).await {
-            Ok((bridge, hook_root)) => (Some(bridge), Some(hook_root)),
+    // `_owner` must outlive the session loop: dropping it removes the private
+    // runtime directory (the explicit cleanup below normally runs first, making
+    // the drop a no-op). `_hook_root` only carries the path agy was given.
+    let (bridge, _hook_root, _owner, runtime_cleanup) = if cli.permission_prompts {
+        match start_permission_prompts(&adapter, &out_tx, &shared_cleanup).await {
+            Ok((bridge, hook_root, owner)) => (
+                Some(bridge),
+                Some(hook_root),
+                Some(owner),
+                Some(shared_cleanup),
+            ),
             Err(e) => {
                 eprintln!("agy-acp: could not enable permission prompts: {e}");
                 eprintln!("agy-acp: continuing with agy's own permission handling");
-                (None, None)
+                (None, None, None, None)
             }
         }
     } else {
-        (None, None)
+        (None, None, None, None)
     };
 
     std::thread::spawn(move || {
@@ -406,4 +496,19 @@ async fn main() {
     // left to kill. This covers the paths that do not wait -- a closed output
     // channel, or any future early return from the loop.
     live_children.kill_all();
+
+    if let Some(bridge) = bridge.as_ref() {
+        bridge.shutdown();
+    }
+
+    // Ordinary exit removes the private runtime directory explicitly, the same
+    // idempotent operation the signal handlers run. The owner's `Drop` is only
+    // a no-panic fallback for paths that do not reach here.
+    if let Some(shared) = runtime_cleanup.as_ref() {
+        if let Some(cleanup) = shared_runtime_cleanup(shared) {
+            if let Err(e) = cleanup.cleanup() {
+                eprintln!("agy-acp: could not clean up runtime directory on exit: {e}");
+            }
+        }
+    }
 }

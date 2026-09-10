@@ -9,6 +9,27 @@ use super::test_support::*;
 use super::*;
 
 #[test]
+fn response_timeout_stays_inside_the_hook_deadline() {
+    assert_eq!(
+        bounded_response_timeout(None),
+        DEFAULT_RESPONSE_TIMEOUT,
+        "the default remains unchanged"
+    );
+    assert_eq!(
+        bounded_response_timeout(Some(HOOK_READ_TIMEOUT.as_secs() - 1)),
+        Duration::from_secs(HOOK_READ_TIMEOUT.as_secs() - 1)
+    );
+    assert_eq!(
+        bounded_response_timeout(Some(HOOK_READ_TIMEOUT.as_secs())),
+        Duration::from_secs(HOOK_READ_TIMEOUT.as_secs() - 1)
+    );
+    assert_eq!(
+        bounded_response_timeout(Some(u64::MAX)),
+        Duration::from_secs(HOOK_READ_TIMEOUT.as_secs() - 1)
+    );
+}
+
+#[test]
 fn tool_titles_prefer_the_most_specific_argument() {
     assert_eq!(
         tool_title("run_command", &json!({ "CommandLine": "rm -rf build" })),
@@ -101,6 +122,9 @@ async fn unknown_conversations_are_denied() {
         state: Arc::new(Mutex::new(BridgeState::default())),
         out_tx: tx,
         socket_path: Arc::new(PathBuf::from("/tmp/unused.sock")),
+        accept_task: None,
+        permits: Arc::new(Semaphore::new(MAX_CONNECTIONS)),
+        saturation_permits: Arc::new(Semaphore::new(MAX_SATURATION_DENIES)),
     };
 
     let (decision, reason) = bridge
@@ -124,6 +148,9 @@ async fn only_the_users_own_refusal_counts_as_a_refusal() {
         state: Arc::new(Mutex::new(BridgeState::default())),
         out_tx: tx,
         socket_path: Arc::new(PathBuf::from("/tmp/unused.sock")),
+        accept_task: None,
+        permits: Arc::new(Semaphore::new(MAX_CONNECTIONS)),
+        saturation_permits: Arc::new(Semaphore::new(MAX_SATURATION_DENIES)),
     };
     bridge.set_active_session(Some("session-1")).await;
 
@@ -183,6 +210,9 @@ async fn a_registered_conversation_asks_the_client_and_honors_approval() {
         state: Arc::new(Mutex::new(BridgeState::default())),
         out_tx: tx,
         socket_path: Arc::new(PathBuf::from("/tmp/unused.sock")),
+        accept_task: None,
+        permits: Arc::new(Semaphore::new(MAX_CONNECTIONS)),
+        saturation_permits: Arc::new(Semaphore::new(MAX_SATURATION_DENIES)),
     };
     bridge.register_conversation("conv-1", "session-1").await;
     bridge.set_active_session(Some("session-1")).await;
@@ -245,6 +275,9 @@ async fn tool_calls_aimed_at_the_hook_root_are_refused_without_asking() {
         state: Arc::new(Mutex::new(BridgeState::default())),
         out_tx: tx,
         socket_path: Arc::new(PathBuf::from("/tmp/unused.sock")),
+        accept_task: None,
+        permits: Arc::new(Semaphore::new(MAX_CONNECTIONS)),
+        saturation_permits: Arc::new(Semaphore::new(MAX_SATURATION_DENIES)),
     };
     bridge.register_conversation("conv-1", "session-1").await;
     bridge.set_active_session(Some("session-1")).await;
@@ -274,6 +307,9 @@ async fn cancelled_permission_requests_deny() {
         state: Arc::new(Mutex::new(BridgeState::default())),
         out_tx: tx,
         socket_path: Arc::new(PathBuf::from("/tmp/unused.sock")),
+        accept_task: None,
+        permits: Arc::new(Semaphore::new(MAX_CONNECTIONS)),
+        saturation_permits: Arc::new(Semaphore::new(MAX_SATURATION_DENIES)),
     };
     bridge.register_conversation("conv-1", "session-1").await;
     bridge.set_active_session(Some("session-1")).await;
@@ -312,6 +348,9 @@ async fn responses_for_other_ids_are_left_alone() {
         state: Arc::new(Mutex::new(BridgeState::default())),
         out_tx: tx,
         socket_path: Arc::new(PathBuf::from("/tmp/unused.sock")),
+        accept_task: None,
+        permits: Arc::new(Semaphore::new(MAX_CONNECTIONS)),
+        saturation_permits: Arc::new(Semaphore::new(MAX_SATURATION_DENIES)),
     };
     assert!(!bridge.resolve_response(&json!(17), None).await);
     assert!(!bridge.resolve_response(&json!("some-other-id"), None).await);
