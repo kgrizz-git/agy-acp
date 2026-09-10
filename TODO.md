@@ -48,6 +48,7 @@ document. Delete an entry when it lands, rather than checking it off.
 
 - Rename the crate and binary, including migration and provider configuration.
   Plan: [plans/fork-maintenance.md](plans/fork-maintenance.md).
+  Implementation: [plans/crate-rename.md](plans/crate-rename.md).
 - Decide whether CI-based SonarCloud supplies value beyond Clippy and llvm-cov.
   Plan: [plans/fork-maintenance.md](plans/fork-maintenance.md).
 - Assess replacing private-schema conversation replay with adapter-owned history.
