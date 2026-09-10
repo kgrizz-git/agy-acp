@@ -120,8 +120,8 @@ new or materially changed behaviour; decide any breaking-change version before
 implementation. Documentation-only and internal-maintenance changes do not by
 themselves require a bump. Tag and publish an artifact when there is a public
 release channel, but versioned local builds are useful before then: `--version`
-must identify the software that was installed. The next versioned delivery will
-be `0.2.0`.
+must identify the software that was installed. The first versioned delivery was
+`0.2.0` (permission IPC hardening).
 
 > This is a **hard fork** of `hicder/agy-acp`: no upstream remote, no pull requests
 > filed there. Fork-specific context and workflow are in the second half of this
@@ -134,8 +134,10 @@ be `0.2.0`.
 - `streaming.rs` — parses `agy --output-format stream-json` NDJSON (`init`, `step_update`, `result`) into ACP `session/update` notifications via `StreamProcessor`, which runs in a background task reading the `agy` subprocess's stdout as it streams.
 - `tools.rs` — maps agy tool names/parameters/output into ACP tool-call fields (`kind`, locations, content).
 - `types.rs` — JSON-RPC types, `SessionStore` for persistence.
-- `permission.rs` — `--permission-prompts` only. Unix socket server turning agy's `PreToolUse` hook into ACP `session/request_permission`, plus the `agy-acp permission-hook` subcommand agy invokes.
-- `hook_root.rs` — `--permission-prompts` only. Writes that hook into a private temp dir handed to agy as an extra `--add-dir`.
+- `permission.rs` — `--permission-prompts` only. Unix socket server turning agy's `PreToolUse` hook into ACP `session/request_permission`, plus the `agy-acp permission-hook` subcommand agy invokes. One at-most-1-MiB frame per connection, eight host-waiting slots plus one bounded busy-deny writer, 10s bridge IO deadlines.
+- `runtime.rs` — `--permission-prompts` only. Per-process random `0700` owner dir for the socket and hook root; explicit idempotent cleanup on ordinary exit and handled signals, never a prefix sweep.
+- `permission/frame.rs` — shared frame limit and semantic validation used by both the bridge and the hook client.
+- `hook_root.rs` — `--permission-prompts` only. Writes that hook into the runtime owner's child dir handed to agy as an extra `--add-dir`.
 
 ## Key paths
 
@@ -226,6 +228,8 @@ All of these were established experimentally against agy 1.1.12 and are easy to 
 - Three timeouts stack around a pending request and the order matters: the bridge's wait must expire before the hook's `timeout`, which must expire before agy's `--print-timeout`. Only the innermost yields a clean deny the model can continue from; if an outer one fires first, agy aborts the whole turn. Print mode defaults to 5m, so the adapter raises it when prompts are on.
 - agy treats **every `--add-dir` as a workspace root**, so the hook directory is visible to the model, which will try to work in it after a refusal. Tool calls naming that directory are refused without prompting.
 - Hooks are discovered in `.agents/hooks.json` under any workspace root, including secondary `--add-dir` ones. That is what keeps the hook out of the user's repo and global config.
+- The socket and hook root live in a per-process random `0700` runtime directory (`src/runtime.rs`), removed only by explicit idempotent cleanup on ordinary exit and handled `SIGTERM`/`SIGINT`/`SIGHUP`; `SIGKILL` remnants are inert and never swept by a later startup.
+- One at-most-1-MiB JSON frame per connection in each direction (`src/permission/frame.rs`); malformed, oversized, slow, or tool-less frames deny without a host prompt. Eight connections may wait on the host at once; a further peer gets one bounded busy-deny. Bridge read/write deadlines are 10s; the hook waits up to 590s for an answer, covering the 540s host wait under agy's 600s hook timeout.
 - `{"decision":"ask"}` is a safe passthrough — it defers to agy's normal handling rather than forcing a prompt or a deny.
 
 ## What this fork is

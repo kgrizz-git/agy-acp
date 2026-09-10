@@ -5,10 +5,12 @@ Notable changes to this fork. Entries land here when work leaves
 using the adapter, under **Maintenance** if it only matters to whoever works on
 it next.
 
-This fork of [hicder/agy-acp](https://github.com/hicder/agy-acp) has no releases
-of its own yet, so everything below is unreleased.
+This fork of [hicder/agy-acp](https://github.com/hicder/agy-acp) cut its first
+versioned delivery as `0.2.0`; everything under that heading shipped together.
 
 ## Unreleased
+
+## 0.2.0
 
 ### Added
 
@@ -23,12 +25,23 @@ of its own yet, so everything below is unreleased.
   key), even when the allow side widened; the honor site checks two conjuncts
   (workspace containment and Cwd-relative path containment). (PR #21)
 
-### Fixed
-
-- Safe-command approvals fall back to an exact key if classification loses coherence. (PR #21)
+- `--permission-prompts` routes agy's tool permission checks to the ACP host.
+  agy runs headless under this adapter and cannot ask, so without the bridge it
+  auto-denies and tool calls fail silently. The bridge is the sole gate: agy runs
+  with `--dangerously-skip-permissions` because its own checks would otherwise
+  deny before a `PreToolUse` hook decision could take effect, so every case the
+  bridge cannot resolve denies.
+- Streaming reads `agy --output-format stream-json` instead of polling agy's
+  SQLite conversation DB, adopted from upstream. Live updates arrive as agy
+  writes them, and the conversation id comes from the stream rather than from
+  diffing DB filenames.
 
 ### Changed
 
+- The bridge socket and hook root live in a per-process random `0700` runtime
+  directory with no predictable pathname; normal exit and handled signals remove
+  only that owned directory, and `SIGKILL` remnants are inert and never swept by
+  prefix.
 - `schedule` and `invoke_subagent` are now a decided classification rather than a
   deferred one, settled by capturing agy 1.1.25/1.1.26. Both stay `"other"`
   (argument-keyed, always prompt): a subagent's tool calls reach the same
@@ -63,109 +76,20 @@ of its own yet, so everything below is unreleased.
   `invoke_subagent`, whose spawned agent may never route its tool calls back
   through this bridge, is deliberately still open.
 
-### Maintenance
-
-- Reorganized the TODO board into linked plans and preserved research notes. (PR #23)
-
-- E2e transient turn failures now fail over through the model roster before two
-  retries, after 30s then 60s. (PR #21)
-
-- Split the permission hook client, prompt wording, and command-sticky tests
-  into focused modules to keep the CI file-length gate green. (PR #21)
-
-- The e2e workflow now asks for environment approval once, not twice. It had two
-  jobs referencing the `e2e` environment -- a `gate` job that read the secret to
-  check presence, then the test job -- and GitHub prompts for each protected-
-  environment job separately. Collapsed to one job: the fork-skip is the job
-  `if` (it needs only the event, no secret), and the secret-presence check is the
-  first step, with the real steps guarded on its output so a missing key still
-  reads as a green no-op rather than a failure.
-
-- e2e tests now run serially (`--test-threads=1`). Each drives a real agy turn
-  against the Gemini API, and running the four in parallel burst against the
-  free-tier key's low per-minute Flash quota, intermittently aborting one turn
-  with "Agent execution terminated due to error". Serial keeps the calls under
-  the rate limit.
-
-- The e2e environment is now proven, not just configured. A run went through the
-  full chain -- gate job, reviewer approval, pinned-archive verification, and all
-  four e2e tests -- and passed on a same-repository PR. That closes the standing
-  "configured but unproven" gap, since a mistake anywhere in that chain would have
-  read as *skipping*, indistinguishable from the missing-secret case it replaced.
-
-- README now describes the permission boundary as it actually is. Two
-  corrections. The bridge is the sole gate on the model's **tool calls**, but not
-  on a workspace's own `.agents/hooks.json` lifecycle-hook commands (`PreInvocation`,
-  `Stop`), which `agy` runs directly, outside the bridge -- so opening an untrusted
-  repository can run its hook commands unprompted; the README said "the only gate
-  on tool execution" without that carve-out. And the `"other"` classification is
-  now stated as the deliberate contract for the open-ended part of agy's tool
-  surface: any tool the fork does not recognise (an MCP `mcp_<server>_<tool>`, a
-  subagent-driven call, anything new) is argument-keyed and in no auto-allow
-  group, so it cannot be auto-allowed and prompts unless an exact-argument
-  "Always allow" for that identical call is already remembered. Both close their
-  TODO entries; see
-  plans/workspace-hook-trust-boundary.md and dev-docs/agy-tool-surface.md.
-
-- The e2e workflow could not run agy. Three things, all surfaced on the gate's
-  first real runs (it had been "configured but unproven"). (1) The install step
-  looked for a binary named `agy`, but the release `linux_x64` archive ships it
-  as `antigravity`, so `find` matched nothing and the step died on a silent
-  `test -n`; the find now accepts either name. (2) Every real turn aborted with
-  "Agent execution terminated due to error". The cause was the model, not the
-  agy version: with no model selected the adapter passes no `--model`, so agy
-  used its default Gemini Pro model, which a free-tier `GEMINI_API_KEY` cannot
-  call. Reproduced locally against the CI config with the real key, both the
-  failure (default model) and the fix (any Gemini Flash tier succeeds). The
-  `settings.json` `model` field is keyed by display label, not slug, so the
-  configure step now selects the newest `*-flash-low` label from the live
-  `agy models` list and writes it -- self-updating, so a catalog rename (3.5 was
-  already dropped, 3.8 is now default) needs no manual bump; it falls back to
-  `"Gemini 3.6 Flash (Low)"` if the query returns nothing. (3) Incidentally the
-  pin was
-  bumped `1.1.16` -> `1.1.26` (sha updated); this was not the turn-execution fix
-  but keeps CI on the version used locally. A local preflight that used the
-  installer-provided `agy` rather than extracting the raw archive, and that ran
-  under OAuth rather than a free API key, would have masked both the name
-  mismatch and the model failure, which is how they reached CI.
-
-- `permission.rs` was sitting at exactly the 1200-line cap, so the next line
-  added to it -- a doc comment, in this case -- failed the length gate. The
-  cluster that decides how broad a remembered "Always" answer may be
-  (`sticky_scope`, `KEYED_BY_TOOL_KINDS`, `args_fingerprint`, `tool_kind` and
-  the two reach checks) moved to `permission/sticky_rules.rs`, alongside the
-  existing `path_rules.rs`. Behaviour is unchanged; the grouping is the point,
-  since getting the breadth wrong is how one "Always allow" covers a call the
-  user never saw.
-
-- The tree is rustfmt-formatted and CI enforces it with `cargo fmt --check`.
-  Formatting drift only ratchets — 9 hunks when CI was set up, 27 after the
-  test-module split — because every file was written by hand, and `AGENTS.md`
-  had to tell each contributor and agent not to run bare `cargo fmt`. That rule
-  is gone. The pre-push hook checks formatting too, so the gate is reachable
-  before a push rather than only after one, and `rustfmt.toml` names the style
-  edition so the gate's answer does not move when the floating `stable`
-  toolchain does. The formatting commit is listed in
-  `.git-blame-ignore-revs`; run
-  `git config blame.ignoreRevsFile .git-blame-ignore-revs` once to keep blame
-  readable locally, as GitHub already does.
-
-- E2e model rotation is confirmed, not experimental. The configure step writes
-  the fallback `settings.json` first — `agy models` prints nothing without it
-  under a bare key — then collects the flash-low slugs into `E2E_MODEL_ROSTER`
-  for the tests to spread turns across via `session/set_model`. Probes measured
-  1 request per no-tool turn, base-model metering (effort variants share one
-  bucket), and no project-wide aggregate: ~20 runs/day across the three live
-  base versions. `scripts/e2e-local.sh` runs the tier locally under a throwaway
-  HOME from a `.env.e2e.local` token. See
-  plans/completed/e2e-quota-rotation.md. (PR #19)
-
-- E2e turns retry once after a 60s sleep. Per-minute 429s carry a ~37s
-  retryDelay, so the transient class usually clears on the second attempt;
-  daily-quota 429s fail again just as fast, with a hint pointing at the agy log.
-  (PR #19)
+- Permission prompt options say what they cover: "Always allow run_command this
+  session" rather than "Always allow". The answer applies to every later call to
+  that tool for the rest of the session, and the prompt -- which shows one
+  command -- is where someone decides. The ACP `kind` values are unchanged, so
+  hosts style and bind them as before.
 
 ### Fixed
+
+- Hook IPC frames are bounded to one at-most-1-MiB JSON frame per connection on
+  both sides, and malformed, oversized, slow, or semantically empty frames deny
+  without asking the host.
+- At most eight hook connections wait on the host at once; a further peer gets
+  one bounded busy-deny rather than another long-lived task.
+- Safe-command approvals fall back to an exact key if classification loses coherence. (PR #21)
 
 - `stat -t` no longer lets GNU's following filesystem operand bypass containment
   after a program-wide approval. (PR #21)
@@ -299,54 +223,6 @@ of its own yet, so everything below is unreleased.
   `FilePath` was added on separate evidence: `tools.rs` and `protobuf.rs` already
   treated it as naming a location while `PATH_FIELDS` did not.
 
-### Maintenance
-
-- The two files and one function that had outgrown reading are split.
-  `handle_session_prompt` is four phases instead of 317 lines, path containment
-  moved out of `permission.rs` into `permission/path_rules.rs`, and the flat
-  2879-line `tests.rs` became per-subject test files beside the modules they
-  exercise. The turn lifecycle has tests for the first time, driven by stub
-  binaries rather than a real `agy`. Complexity lints are denied crate-wide and
-  file length is capped by `scripts/check-file-length.sh`
-  ([plans/completed/split-large-files.md](plans/completed/split-large-files.md)).
-- `pr_compliance_checklist.yaml` gains a rule for what a cancel has to reach, so
-  an automated review that sees `child.kill()` reappear on a kill path, or the
-  walk swapped back for `killpg`, has the measurement to judge it by.
-- Check `PATH_FIELDS` against real agy 1.1.22 traffic. One field was missing (see
-  Fixed above); every other path argument observed is covered, and `Url`, `query`
-  and the boolean `FullPath` are correctly not treated as paths. Also established
-  agy's tool surface as observed in 1.1.22, which does not match this fork's
-  assumptions: five tool names in `permission.rs` match nothing agy emitted or
-  self-reported, and seven tools it does report are unclassified here. Both
-  recorded in [TODO.md](TODO.md).
-- Keep the Windows build portable by failing closed when the Unix-socket-based
-  `--permission-prompts` feature is requested there.
-- Keep fork PRs from waiting on an e2e-environment approval they cannot use, and
-  make unit-test scratch homes collision-resistant across test processes.
-
-### Added
-
-- `--permission-prompts` routes agy's tool permission checks to the ACP host.
-  agy runs headless under this adapter and cannot ask, so without the bridge it
-  auto-denies and tool calls fail silently. The bridge is the sole gate: agy runs
-  with `--dangerously-skip-permissions` because its own checks would otherwise
-  deny before a `PreToolUse` hook decision could take effect, so every case the
-  bridge cannot resolve denies.
-- Streaming reads `agy --output-format stream-json` instead of polling agy's
-  SQLite conversation DB, adopted from upstream. Live updates arrive as agy
-  writes them, and the conversation id comes from the stream rather than from
-  diffing DB filenames.
-
-### Changed
-
-- Permission prompt options say what they cover: "Always allow run_command this
-  session" rather than "Always allow". The answer applies to every later call to
-  that tool for the rest of the session, and the prompt -- which shows one
-  command -- is where someone decides. The ACP `kind` values are unchanged, so
-  hosts style and bind them as before.
-
-### Fixed
-
 - Two paths reached around the permission boundary. `outside_workspace()` only
   looked at arguments beginning with `/`, so `../../secret` and `~/.ssh/id_rsa`
   were never judged against the workspace and were auto-allowed; relative and
@@ -444,6 +320,129 @@ of its own yet, so everything below is unreleased.
   opt-in with a warning.
 
 ### Maintenance
+
+- Reorganized the TODO board into linked plans and preserved research notes. (PR #23)
+
+- E2e transient turn failures now fail over through the model roster before two
+  retries, after 30s then 60s. (PR #21)
+
+- Split the permission hook client, prompt wording, and command-sticky tests
+  into focused modules to keep the CI file-length gate green. (PR #21)
+
+- The e2e workflow now asks for environment approval once, not twice. It had two
+  jobs referencing the `e2e` environment -- a `gate` job that read the secret to
+  check presence, then the test job -- and GitHub prompts for each protected-
+  environment job separately. Collapsed to one job: the fork-skip is the job
+  `if` (it needs only the event, no secret), and the secret-presence check is the
+  first step, with the real steps guarded on its output so a missing key still
+  reads as a green no-op rather than a failure.
+
+- e2e tests now run serially (`--test-threads=1`). Each drives a real agy turn
+  against the Gemini API, and running the four in parallel burst against the
+  free-tier key's low per-minute Flash quota, intermittently aborting one turn
+  with "Agent execution terminated due to error". Serial keeps the calls under
+  the rate limit.
+
+- The e2e environment is now proven, not just configured. A run went through the
+  full chain -- gate job, reviewer approval, pinned-archive verification, and all
+  four e2e tests -- and passed on a same-repository PR. That closes the standing
+  "configured but unproven" gap, since a mistake anywhere in that chain would have
+  read as *skipping*, indistinguishable from the missing-secret case it replaced.
+
+- README now describes the permission boundary as it actually is. Two
+  corrections. The bridge is the sole gate on the model's **tool calls**, but not
+  on a workspace's own `.agents/hooks.json` lifecycle-hook commands (`PreInvocation`,
+  `Stop`), which `agy` runs directly, outside the bridge -- so opening an untrusted
+  repository can run its hook commands unprompted; the README said "the only gate
+  on tool execution" without that carve-out. And the `"other"` classification is
+  now stated as the deliberate contract for the open-ended part of agy's tool
+  surface: any tool the fork does not recognise (an MCP `mcp_<server>_<tool>`, a
+  subagent-driven call, anything new) is argument-keyed and in no auto-allow
+  group, so it cannot be auto-allowed and prompts unless an exact-argument
+  "Always allow" for that identical call is already remembered. Both close their
+  TODO entries; see
+  plans/workspace-hook-trust-boundary.md and dev-docs/agy-tool-surface.md.
+
+- The e2e workflow could not run agy. Three things, all surfaced on the gate's
+  first real runs (it had been "configured but unproven"). (1) The install step
+  looked for a binary named `agy`, but the release `linux_x64` archive ships it
+  as `antigravity`, so `find` matched nothing and the step died on a silent
+  `test -n`; the find now accepts either name. (2) Every real turn aborted with
+  "Agent execution terminated due to error". The cause was the model, not the
+  agy version: with no model selected the adapter passes no `--model`, so agy
+  used its default Gemini Pro model, which a free-tier `GEMINI_API_KEY` cannot
+  call. Reproduced locally against the CI config with the real key, both the
+  failure (default model) and the fix (any Gemini Flash tier succeeds). The
+  `settings.json` `model` field is keyed by display label, not slug, so the
+  configure step now selects the newest `*-flash-low` label from the live
+  `agy models` list and writes it -- self-updating, so a catalog rename (3.5 was
+  already dropped, 3.8 is now default) needs no manual bump; it falls back to
+  `"Gemini 3.6 Flash (Low)"` if the query returns nothing. (3) Incidentally the
+  pin was
+  bumped `1.1.16` -> `1.1.26` (sha updated); this was not the turn-execution fix
+  but keeps CI on the version used locally. A local preflight that used the
+  installer-provided `agy` rather than extracting the raw archive, and that ran
+  under OAuth rather than a free API key, would have masked both the name
+  mismatch and the model failure, which is how they reached CI.
+
+- `permission.rs` was sitting at exactly the 1200-line cap, so the next line
+  added to it -- a doc comment, in this case -- failed the length gate. The
+  cluster that decides how broad a remembered "Always" answer may be
+  (`sticky_scope`, `KEYED_BY_TOOL_KINDS`, `args_fingerprint`, `tool_kind` and
+  the two reach checks) moved to `permission/sticky_rules.rs`, alongside the
+  existing `path_rules.rs`. Behaviour is unchanged; the grouping is the point,
+  since getting the breadth wrong is how one "Always allow" covers a call the
+  user never saw.
+
+- The tree is rustfmt-formatted and CI enforces it with `cargo fmt --check`.
+  Formatting drift only ratchets — 9 hunks when CI was set up, 27 after the
+  test-module split — because every file was written by hand, and `AGENTS.md`
+  had to tell each contributor and agent not to run bare `cargo fmt`. That rule
+  is gone. The pre-push hook checks formatting too, so the gate is reachable
+  before a push rather than only after one, and `rustfmt.toml` names the style
+  edition so the gate's answer does not move when the floating `stable`
+  toolchain does. The formatting commit is listed in
+  `.git-blame-ignore-revs`; run
+  `git config blame.ignoreRevsFile .git-blame-ignore-revs` once to keep blame
+  readable locally, as GitHub already does.
+
+- E2e model rotation is confirmed, not experimental. The configure step writes
+  the fallback `settings.json` first — `agy models` prints nothing without it
+  under a bare key — then collects the flash-low slugs into `E2E_MODEL_ROSTER`
+  for the tests to spread turns across via `session/set_model`. Probes measured
+  1 request per no-tool turn, base-model metering (effort variants share one
+  bucket), and no project-wide aggregate: ~20 runs/day across the three live
+  base versions. `scripts/e2e-local.sh` runs the tier locally under a throwaway
+  HOME from a `.env.e2e.local` token. See
+  plans/completed/e2e-quota-rotation.md. (PR #19)
+
+- E2e turns retry once after a 60s sleep. Per-minute 429s carry a ~37s
+  retryDelay, so the transient class usually clears on the second attempt;
+  daily-quota 429s fail again just as fast, with a hint pointing at the agy log.
+  (PR #19)
+
+- The two files and one function that had outgrown reading are split.
+  `handle_session_prompt` is four phases instead of 317 lines, path containment
+  moved out of `permission.rs` into `permission/path_rules.rs`, and the flat
+  2879-line `tests.rs` became per-subject test files beside the modules they
+  exercise. The turn lifecycle has tests for the first time, driven by stub
+  binaries rather than a real `agy`. Complexity lints are denied crate-wide and
+  file length is capped by `scripts/check-file-length.sh`
+  ([plans/completed/split-large-files.md](plans/completed/split-large-files.md)).
+- `pr_compliance_checklist.yaml` gains a rule for what a cancel has to reach, so
+  an automated review that sees `child.kill()` reappear on a kill path, or the
+  walk swapped back for `killpg`, has the measurement to judge it by.
+- Check `PATH_FIELDS` against real agy 1.1.22 traffic. One field was missing (see
+  Fixed above); every other path argument observed is covered, and `Url`, `query`
+  and the boolean `FullPath` are correctly not treated as paths. Also established
+  agy's tool surface as observed in 1.1.22, which does not match this fork's
+  assumptions: five tool names in `permission.rs` match nothing agy emitted or
+  self-reported, and seven tools it does report are unclassified here. Both
+  recorded in [TODO.md](TODO.md).
+- Keep the Windows build portable by failing closed when the Unix-socket-based
+  `--permission-prompts` feature is requested there.
+- Keep fork PRs from waiting on an e2e-environment approval they cannot use, and
+  make unit-test scratch homes collision-resistant across test processes.
 
 - CI (`ci.yml`, PR #10): `cargo build`, unit tests, ignored I/O tier
   (`--ignored --skip e2e`), clippy (`-W clippy::all -D clippy::all`;

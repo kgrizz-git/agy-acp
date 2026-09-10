@@ -6,7 +6,6 @@ document. Delete an entry when it lands, rather than checking it off.
 
 ## Next Up
 
-- [Harden the permission socket and hook-root creation/cleanup](#security-and-permission-boundaries).
 - [Verify Paseo's reopened-thread path](#paseo-integration).
 - [Detect and surface workspace hook directories](#security-and-permission-boundaries).
 - [Carry a turn identity through the hook protocol](#reliability-and-lifecycle).
@@ -33,8 +32,6 @@ document. Delete an entry when it lands, rather than checking it off.
   exact command keying, containment, and sensitive-path checks. Plan: [plans/permission-boundaries.md](plans/permission-boundaries.md).
 - Detect and surface workspace hook directories before the first turn; pursue an
   upstream isolation option separately. Plan: [plans/workspace-hook-trust-boundary.md](plans/workspace-hook-trust-boundary.md).
-- Assess and harden the permission socket and hook-root creation/cleanup paths.
-  Plan: [plans/permission-ipc-hardening.md](plans/permission-ipc-hardening.md).
 
 ### Reliability and lifecycle
 

@@ -49,6 +49,25 @@ pr_compliances:
       the path checks, or a remembered reject that widens to cover invocations
       beyond the exact string that was declined.
 
+  - title: "Permission IPC resources are private and bounded"
+    compliance_label: true
+    objective: >
+      The bridge socket and hook root live in a per-process random 0700 runtime
+      directory with no predictable pathname. Cleanup removes only the owned
+      directory on ordinary exit and handled SIGTERM/SIGINT/SIGHUP; SIGKILL
+      remnants are inert and are never swept by prefix on a later startup.
+    success_criteria: >
+      One at-most-1-MiB JSON frame per connection in each direction, shared by
+      the bridge and the hook client; malformed, oversized, slow, or tool-less
+      frames deny without a host prompt. At most eight connections wait on the
+      host at once; a further peer gets one bounded busy-deny. Bridge
+      read/write deadlines are 10s; the hook answer wait covers the bridge host
+      wait under agy's hook timeout, so the innermost timeout fires first.
+    failure_criteria: >
+      A predictable socket or hook path, unlinking or sweeping an entry this
+      process did not create, an unbounded frame or connection path, or a
+      rejection path that can allow.
+
   - title: "Streaming comes from stream-json; SQLite is load-only"
     compliance_label: true
     objective: >

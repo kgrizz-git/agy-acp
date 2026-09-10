@@ -123,6 +123,12 @@ Tool calls then arrive as ACP `session/request_permission` requests, with **Allo
 
 This works by installing a `PreToolUse` hook for `agy` in a private directory of the adapter's own — nothing is written to your workspace or to your global `agy` config, so plain `agy` use in a terminal is unaffected.
 
+Each run creates a fresh random per-process runtime directory (mode `0700`) under the system temporary directory holding the bridge socket and the hook root — no predictable pathname, nothing reused or swept by prefix. Normal exit and handled `SIGTERM`/`SIGINT`/`SIGHUP` remove only that owned directory; remnants from `SIGKILL` or machine loss are inert and left alone.
+
+Each hook connection carries one at-most-1-MiB JSON frame in each direction. A frame that is malformed, oversized, slow (10s read/write deadlines on the bridge side), or names no tool denies without asking the host. At most eight connections wait on the host at once, and a further peer gets one bounded busy-deny. The hook waits up to 590s for an answer, covering the bridge's own host wait (default 540s, `AGY_ACP_PERMISSION_TIMEOUT_SECS`) under agy's 600s hook timeout, so the innermost timeout always fires first and a deny stays a clean deny.
+
+This hardens the adapter's own files against accidental or cross-user interference through the shared temporary directory. It is not a sandbox against a hostile process running as the same user.
+
 > [!IMPORTANT]
 > Enabling this runs `agy` with `--dangerously-skip-permissions`, because a hook cannot grant a permission that `agy`'s own checks have already denied — while they are active a hook can only veto. The adapter becomes the only gate on the model's **tool calls**, so anything it cannot resolve (no host to ask, host disconnected, no answer in time) is denied.
 >
