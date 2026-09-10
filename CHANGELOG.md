@@ -65,6 +65,8 @@ of its own yet, so everything below is unreleased.
 
 ### Maintenance
 
+- Reorganized the TODO board into linked plans and preserved research notes. (PR #23)
+
 - E2e transient turn failures now fail over through the model roster before two
   retries, after 30s then 60s. (PR #21)
 

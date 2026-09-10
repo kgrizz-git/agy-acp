@@ -85,8 +85,31 @@ rewriting the close-out commit.
 Categories under each version, in order: **Added**, **Changed**, **Fixed**,
 **Removed**, **Maintenance**. Omit empty categories. Citations go at the end of
 the bullet in parentheses (`(PR #9)`). No "Known issues" section — open problems
-belong in `TODO.md`. An `## Unreleased` section exists only while a release is
-being cut.
+belong in `TODO.md`. `## Unreleased` collects entries for the next version and
+is renamed to that semver heading when the release is cut.
+
+### Documentation gardening
+
+`TODO.md` is a concise work board: every entry names an outcome, its next
+concrete step, and a plan or reference link. Do not keep experiment transcripts,
+threat-model alternatives, implementation detail, or completed-work narratives
+there. Put active implementation design and acceptance criteria in `plans/`;
+move explicitly parked approaches to `plans/deferred/`; keep durable observed
+behavior and research in `dev-docs/`; and record shipped effects only in the
+CHANGELOG. Preserve useful evidence by moving it, not deleting it.
+
+Every in-flight file directly under `plans/` must have a current `TODO.md` entry
+linking to it. Reference documents track no work: when their findings imply a
+next action, add that action to `TODO.md` and create or link its plan. Before
+moving a plan to `plans/completed/` or `plans/deferred/`, update or remove the
+corresponding TODO link in the same pull request.
+
+Documentation-only or internal-maintenance work does not trigger a semver bump,
+but it gets one short `## Unreleased` **Maintenance** entry when it materially
+changes how the project is maintained. A user-visible behavior, feature, or
+security change follows the versioning rule below: bump `Cargo.toml` in that PR
+and move its CHANGELOG entries beneath the new semver heading. Never use the
+CHANGELOG to describe a plan or a rejected alternative.
 
 **Versioning.** Keep the current `0.1.0` history as-is; do not retroactively
 version already-merged work. Starting with the next meaningful user-visible
