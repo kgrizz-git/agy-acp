@@ -150,8 +150,7 @@ impl Adapter {
     }
 
     fn new_with_home(home: PathBuf, available_models: Vec<AgyModel>, skip_naration: bool) -> Self {
-        let state_dir = home.join(".openab/agy-gated-acp");
-        Self::migrate_legacy_state(&home, &state_dir);
+        let state_dir = migrated_state_dir(&home);
         Self {
             sessions: HashMap::new(),
             working_dir: std::env::current_dir()
@@ -167,30 +166,6 @@ impl Adapter {
             live_children: LiveChildren::default(),
             agy_bin: "agy".to_string(),
             pending_forget: Arc::new(std::sync::Mutex::new(Vec::new())),
-        }
-    }
-
-    /// Moves a pre-rename `sessions.json` to the new state directory, once.
-    ///
-    /// Only when the new file is absent and the old one exists: a present new
-    /// file always wins and the old one is left alone, and when neither exists
-    /// nothing is created. Best-effort and silent, like the persistence below
-    /// it — if the move cannot run, the old file stays and the adapter simply
-    /// starts with fresh state.
-    fn migrate_legacy_state(home: &Path, state_dir: &Path) {
-        let new_file = state_dir.join("sessions.json");
-        if new_file.exists() {
-            return;
-        }
-        let old_file = home.join(".openab/agy-acp/sessions.json");
-        if !old_file.exists() {
-            return;
-        }
-        if fs::create_dir_all(state_dir).is_err() {
-            return;
-        }
-        if fs::rename(&old_file, &new_file).is_ok() {
-            eprintln!("agy-gated-acp: migrated sessions from ~/.openab/agy-acp/sessions.json");
         }
     }
 

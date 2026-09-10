@@ -1044,6 +1044,7 @@ fn fresh_home_creates_no_state() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn unwritable_home_skips_migration_silently() {
     use std::os::unix::fs::PermissionsExt;
