@@ -55,7 +55,7 @@ schedules, controlled over MCP tools or a CLI (`paseo` skill). For this adapter,
 the relevant facts:
 
 - Paseo runs the adapter as
-  `["agy-acp", "--permission-prompts"]` in `~/.paseo/config.json`
+  `["agy-gated-acp", "--permission-prompts"]` in `~/.paseo/config.json`
   (AGENTS.md, Local gotchas). So the bridge is **on** for Paseo by default.
 - The adapter is a **host-neutral** ACP stdio server. Paseo is just one ACP host
   that answers `session/request_permission`; the design must stay usable from

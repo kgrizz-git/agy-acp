@@ -174,8 +174,9 @@ impl Adapter {
     ///
     /// Only when the new file is absent and the old one exists: a present new
     /// file always wins and the old one is left alone, and when neither exists
-    /// nothing is created. Best-effort — a failure here surfaces again loudly
-    /// enough when the state is next persisted.
+    /// nothing is created. Best-effort and silent, like the persistence below
+    /// it — if the move cannot run, the old file stays and the adapter simply
+    /// starts with fresh state.
     fn migrate_legacy_state(home: &Path, state_dir: &Path) {
         let new_file = state_dir.join("sessions.json");
         if new_file.exists() {

@@ -1,6 +1,6 @@
 # agy-gated-acp
 
-An [Agent Client Protocol (ACP)](https://agentclientprotocol.com) stdio adapter for [Google Antigravity CLI](https://github.com/google-antigravity/antigravity-cli) (`agy`). It bridges `agy` into any ACP-compatible host like [Zed](https://zed.dev), enabling you to use Gemini models through `agy` inside Zed's Agent Panel.
+An [Agent Client Protocol (ACP)](https://agentclientprotocol.com) stdio adapter for [Google Antigravity CLI](https://github.com/google-antigravity/antigravity-cli) (`agy`). It bridges `agy` into any ACP-compatible host like [Zed](https://zed.dev) and [Paseo](#use-with-paseo), enabling you to use Gemini models through `agy` from either.
 
 > This is a hard fork of [`hicder/agy-acp`](https://github.com/hicder/agy-acp) —
 > itself an adapter for [Google Antigravity CLI](https://github.com/google-antigravity/antigravity-cli)

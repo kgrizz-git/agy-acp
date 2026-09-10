@@ -109,8 +109,8 @@ mod tests {
     fn paths_with_spaces_are_quoted_for_sh() {
         assert_eq!(shell_quote("/plain/path"), "/plain/path");
         assert_eq!(
-            shell_quote("/Applications/My App/agy-acp"),
-            "'/Applications/My App/agy-acp'"
+            shell_quote("/Applications/My App/agy-gated-acp"),
+            "'/Applications/My App/agy-gated-acp'"
         );
     }
 

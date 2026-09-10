@@ -1043,3 +1043,30 @@ fn fresh_home_creates_no_state() {
         "a home with no state must not gain an empty directory"
     );
 }
+
+#[test]
+fn unwritable_home_skips_migration_silently() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let home = std::env::temp_dir().join(format!("agy-gated-acp-ro-{}", Uuid::new_v4()));
+    let old_file = home.join(".openab/agy-acp/sessions.json");
+    fs::create_dir_all(old_file.parent().unwrap()).unwrap();
+    fs::write(&old_file, "{}").unwrap();
+    // Lock the directory the new state dir would be created under: the home
+    // itself only needs listing, which stays allowed.
+    let openab = home.join(".openab");
+    fs::set_permissions(&openab, fs::Permissions::from_mode(0o555)).unwrap();
+
+    let adapter = Adapter::new_with_home(home.clone(), Vec::new(), false);
+    assert!(
+        !adapter.state_file.exists(),
+        "a failed move must not leave a partial new file"
+    );
+    assert!(
+        old_file.exists(),
+        "a failed move must leave the legacy file alone"
+    );
+
+    fs::set_permissions(&openab, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::remove_dir_all(&home).unwrap();
+}
