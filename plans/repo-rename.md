@@ -36,16 +36,22 @@ that no longer exists.
 2. Rename in GitHub settings, then update the tree:
    - `.githooks/pre-push`: the four canonical remote URL forms and the denial
      message.
-   - `AGENTS.md`: origin remote, `gh repo set-default`, fork-guard URL forms,
+   - `AGENTS.md`: the `# agy-acp` H1 (becomes the new repo name), origin
+     remote, `gh repo set-default`, fork-guard URL forms,
      and the relationship-to-upstream section.
    - `pr_compliance_checklist.yaml`: the "changes target" rule and hard-fork
      title.
-   - `README.md`: install/clone URLs, badges, and any "differences from
+   - `README.md`: the `# agy-acp` H1 (becomes the new repo name),
+     install/clone URLs, badges, and any "differences from
      upstream" wording (see etiquette pass below).
    - Workflows: confirm nothing hardcodes the repo slug (`upstream-watch.yml`
      watches `hicder/agy-acp`, which is unaffected; the `upstream-watch` issue
      title is unaffected).
    - `scripts/check-upstream.sh`: unaffected (upstream slug), verify only.
+   - `dev-docs/` is explicitly exempt: its `agy-acp` references name the
+     binary, hook invocation, and Paseo provider command, none of which change
+     in this plan, and its `hicder/agy-acp` links are historical evidence.
+     Upstream-attribution wording there stays as written.
 3. Fork-etiquette docs pass, same PR:
    - Keep the `hicder/agy-acp` attribution prominent (README, AGENTS.md):
      what was taken, that the fork is hard with no upstream PRs, and that
