@@ -153,7 +153,15 @@ mod tests {
     fn hook_roundtrip_rejects_an_empty_bridge_response() {
         let path = socket_path("empty-hook-response");
         let listener = UnixListener::bind(&path).unwrap();
-        let server = std::thread::spawn(move || drop(listener.accept().unwrap()));
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            // Read the request before closing our write half so the client
+            // cannot race the close while sending it. That makes this an
+            // empty-response test rather than a write-error race.
+            let mut reader = std::io::BufReader::new(&stream);
+            read_bounded_line_sync(&mut reader, MAX_FRAME_BYTES).unwrap();
+            stream.shutdown(std::net::Shutdown::Write).unwrap();
+        });
 
         let error = hook_roundtrip(path.to_str().unwrap(), "{}").unwrap_err();
         // Closing a Unix stream without a reply is EOF on macOS and a reset on

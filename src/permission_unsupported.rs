@@ -74,13 +74,11 @@ pub fn run_hook() {
 
 #[cfg(test)]
 mod tests {
-    use super::mpsc;
     use crate::runtime::RuntimeOwner;
     use std::io::ErrorKind;
 
     #[test]
     fn start_fails_closed_on_non_unix() {
-        let (_out_tx, _out_rx) = mpsc::unbounded_channel();
         let owner = RuntimeOwner::create();
         // Unsupported: the owner itself fails closed on non-Unix, so `start`
         // can never be reached with a real owner. Pinning `create` failing is
