@@ -23,7 +23,7 @@ use uuid::Uuid;
 use crate::runtime::RuntimeOwner;
 
 mod frame;
-pub(crate) use frame::{parse_frame, MAX_CONNECTIONS, MAX_SATURATION_DENIES};
+pub(crate) use frame::{parse_frame, HOOK_READ_TIMEOUT, MAX_CONNECTIONS, MAX_SATURATION_DENIES};
 mod path_rules;
 use path_rules::{outside_workspace, string_args};
 mod prompt;
@@ -54,11 +54,24 @@ pub const TIMEOUT_ENV: &str = "AGY_ACP_PERMISSION_TIMEOUT_SECS";
 const DEFAULT_RESPONSE_TIMEOUT: Duration = Duration::from_secs(540);
 
 fn response_timeout() -> Duration {
-    std::env::var(TIMEOUT_ENV)
+    let configured_secs = std::env::var(TIMEOUT_ENV)
         .ok()
-        .and_then(|raw| raw.parse().ok())
-        .map(Duration::from_secs)
-        .unwrap_or(DEFAULT_RESPONSE_TIMEOUT)
+        .and_then(|raw| raw.parse().ok());
+    bounded_response_timeout(configured_secs)
+}
+
+/// Keeps the bridge's host wait strictly inside the hook's socket-read deadline.
+///
+/// If this ordering reverses, the hook denies and disconnects while the bridge
+/// still waits for the host, leaving a late answer with no peer to receive it.
+/// A one-second margin preserves the ordering even when callers configure the
+/// environment variable at or beyond the hook timeout.
+fn bounded_response_timeout(configured_secs: Option<u64>) -> Duration {
+    let max_secs = HOOK_READ_TIMEOUT.as_secs().saturating_sub(1);
+    let seconds = configured_secs
+        .unwrap_or(DEFAULT_RESPONSE_TIMEOUT.as_secs())
+        .min(max_secs);
+    Duration::from_secs(seconds)
 }
 
 /// Decision returned to `agy`'s `PreToolUse` hook.

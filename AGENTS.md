@@ -203,7 +203,7 @@ repository-level e2e key: the workflow checks out PR code.
 | `GEMINI_API_KEY` | API key for e2e tests and CI |
 | `AGY_ACP_AUTO_ALLOW` | What may run without asking. Tool names plus the groups `reads`, `searches`, `none`. Default `ask_question` |
 | `AGY_ACP_SENSITIVE_PATTERNS` | Extra comma-separated substrings marking a path as too sensitive to read without asking |
-| `AGY_ACP_PERMISSION_TIMEOUT_SECS` | How long a permission request waits before denying. Default `540` |
+| `AGY_ACP_PERMISSION_TIMEOUT_SECS` | How long a permission request waits before denying. Default `540`; capped at `589` to remain below the hook timeout |
 | `AGY_ACP_PERMISSION_SOCKET` | Set by the adapter on the `agy` subprocess; tells the hook where to reach the bridge. Not for users |
 
 ## Quirks
@@ -229,7 +229,7 @@ All of these were established experimentally against agy 1.1.12 and are easy to 
 - agy treats **every `--add-dir` as a workspace root**, so the hook directory is visible to the model, which will try to work in it after a refusal. Tool calls naming that directory are refused without prompting.
 - Hooks are discovered in `.agents/hooks.json` under any workspace root, including secondary `--add-dir` ones. That is what keeps the hook out of the user's repo and global config.
 - The socket and hook root live in a per-process random `0700` runtime directory (`src/runtime.rs`), removed only by explicit idempotent cleanup on ordinary exit and handled `SIGTERM`/`SIGINT`/`SIGHUP`; `SIGKILL` remnants are inert and never swept by a later startup.
-- One at-most-1-MiB JSON frame per connection in each direction (`src/permission/frame.rs`); malformed, oversized, slow, or tool-less frames deny without a host prompt. Eight connections may wait on the host at once; a further peer gets one bounded busy-deny. Bridge read/write deadlines are 10s; the hook waits up to 590s for an answer, covering the 540s host wait under agy's 600s hook timeout.
+- One at-most-1-MiB JSON frame per connection in each direction (`src/permission/frame.rs`); malformed, oversized, slow, or tool-less frames deny without a host prompt. Eight connections may wait on the host at once; a further peer gets one bounded busy-deny. Bridge read/write deadlines are 10s; the hook waits up to 590s for an answer, and the host wait is capped at 589s under agy's 600s hook timeout.
 - `{"decision":"ask"}` is a safe passthrough — it defers to agy's normal handling rather than forcing a prompt or a deny.
 
 ## What this fork is
@@ -359,4 +359,5 @@ Things worth re-checking after any change, because each one was a real bug:
 - **A read of `.env`** with `AGY_ACP_AUTO_ALLOW=reads` — must still prompt.
 
 `AGY_ACP_PERMISSION_TIMEOUT_SECS` exists mainly so the timeout ordering can be
-tested in seconds rather than nine minutes.
+tested in seconds rather than nine minutes. It is capped at 589 seconds so the
+bridge always denies before the hook's fixed 590-second socket-read deadline.

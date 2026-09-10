@@ -89,6 +89,8 @@ versioned delivery as `0.2.0`; everything under that heading shipped together.
   without asking the host.
 - At most eight hook connections wait on the host at once; a further peer gets
   one bounded busy-deny rather than another long-lived task.
+- The configurable host wait is capped at 589 seconds, preserving its order
+  beneath the hook's 590-second response deadline.
 - Safe-command approvals fall back to an exact key if classification loses coherence. (PR #21)
 
 - `stat -t` no longer lets GNU's following filesystem operand bypass containment

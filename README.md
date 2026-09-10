@@ -125,7 +125,7 @@ This works by installing a `PreToolUse` hook for `agy` in a private directory of
 
 Each run creates a fresh random per-process runtime directory (mode `0700`) under the system temporary directory holding the bridge socket and the hook root — no predictable pathname, nothing reused or swept by prefix. Normal exit and handled `SIGTERM`/`SIGINT`/`SIGHUP` remove only that owned directory; remnants from `SIGKILL` or machine loss are inert and left alone.
 
-Each hook connection carries one at-most-1-MiB JSON frame in each direction. A frame that is malformed, oversized, slow (10s read/write deadlines on the bridge side), or names no tool denies without asking the host. At most eight connections wait on the host at once, and a further peer gets one bounded busy-deny. The hook waits up to 590s for an answer, covering the bridge's own host wait (default 540s, `AGY_ACP_PERMISSION_TIMEOUT_SECS`) under agy's 600s hook timeout, so the innermost timeout always fires first and a deny stays a clean deny.
+Each hook connection carries one at-most-1-MiB JSON frame in each direction. A frame that is malformed, oversized, slow (10s read/write deadlines on the bridge side), or names no tool denies without asking the host. At most eight connections wait on the host at once, and a further peer gets one bounded busy-deny. The hook waits up to 590s for an answer; the bridge's host wait (default 540s, `AGY_ACP_PERMISSION_TIMEOUT_SECS`) is capped at 589s so it always expires first under agy's 600s hook timeout and a deny stays a clean deny.
 
 This hardens the adapter's own files against accidental or cross-user interference through the shared temporary directory. It is not a sandbox against a hostile process running as the same user.
 
@@ -264,7 +264,7 @@ one, or restarting the host, clears it.
 | `AGY_EXTRA_ARGS` | Space-separated extra args passed to every `agy` invocation |
 | `AGY_ACP_AUTO_ALLOW` | What may run without asking. Tool names plus the groups `reads`, `searches`, `none`. Default `ask_question` |
 | `AGY_ACP_SENSITIVE_PATTERNS` | Extra comma-separated substrings marking a path as too sensitive to read without asking. Matched against every string argument, so it also catches substrings of a command line |
-| `AGY_ACP_PERMISSION_TIMEOUT_SECS` | How long a permission request waits for an answer before denying. Default `540` |
+| `AGY_ACP_PERMISSION_TIMEOUT_SECS` | How long a permission request waits for an answer before denying. Default `540`; capped at `589` to remain below the hook timeout |
 
 ## Session Persistence
 

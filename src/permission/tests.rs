@@ -9,6 +9,27 @@ use super::test_support::*;
 use super::*;
 
 #[test]
+fn response_timeout_stays_inside_the_hook_deadline() {
+    assert_eq!(
+        bounded_response_timeout(None),
+        DEFAULT_RESPONSE_TIMEOUT,
+        "the default remains unchanged"
+    );
+    assert_eq!(
+        bounded_response_timeout(Some(HOOK_READ_TIMEOUT.as_secs() - 1)),
+        Duration::from_secs(HOOK_READ_TIMEOUT.as_secs() - 1)
+    );
+    assert_eq!(
+        bounded_response_timeout(Some(HOOK_READ_TIMEOUT.as_secs())),
+        Duration::from_secs(HOOK_READ_TIMEOUT.as_secs() - 1)
+    );
+    assert_eq!(
+        bounded_response_timeout(Some(u64::MAX)),
+        Duration::from_secs(HOOK_READ_TIMEOUT.as_secs() - 1)
+    );
+}
+
+#[test]
 fn tool_titles_prefer_the_most_specific_argument() {
     assert_eq!(
         tool_title("run_command", &json!({ "CommandLine": "rm -rf build" })),
