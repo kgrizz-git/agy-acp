@@ -59,8 +59,8 @@ document. Delete an entry when it lands, rather than checking it off.
 ## Icebox
 
 - Revisit a PTY fallback only if current agy versions reproduce the original
-  non-TTY or thinking-model failures. Reference: [backlog notes](dev-docs/research/backlog-notes.md#pty-fallback).
+  non-TTY or thinking-model failures. Reference: [investigation notes](dev-docs/research/investigation-notes.md#pty-fallback).
 - Investigate a Paseo context bridge only if required host context is unavailable
-  to agy. Reference: [backlog notes](dev-docs/research/backlog-notes.md#daemon-context-bridge).
+  to agy. Reference: [investigation notes](dev-docs/research/investigation-notes.md#daemon-context-bridge).
 - Do not adopt the rejected community-fork designs without a new threat-model
   decision. Reference: [deferred record](plans/deferred/community-and-command-parsing.md).

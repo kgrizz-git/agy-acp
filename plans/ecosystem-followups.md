@@ -25,4 +25,4 @@ without inventing incorrect lifecycle or permission behavior.
 ## Evidence
 
 The prior investigations are preserved in
-[`dev-docs/research/backlog-notes.md`](../dev-docs/research/backlog-notes.md#upstream-and-ecosystem).
+[`dev-docs/research/investigation-notes.md`](../dev-docs/research/investigation-notes.md#upstream-and-ecosystem).

@@ -1,10 +1,11 @@
-# Backlog research and decision notes
+# Permission and integration investigation notes
 
-This is the supporting evidence, experiments, and alternatives formerly kept in
-`TODO.md`. It is reference material, not a task board: active work and its next
-step live in [TODO.md](../../TODO.md), with implementation plans under
-[`plans/`](../../plans/). A finding here becomes work only when a concise TODO
-entry links to a plan.
+This preserves supporting evidence, experiments, and alternatives formerly kept
+in `TODO.md`. It is reference material, not a task board and it tracks no work:
+every remaining action belongs in [TODO.md](../../TODO.md), with an in-flight
+plan under [`plans/`](../../plans/) where design or acceptance criteria are
+needed. A finding here becomes work only when a concise TODO entry links to it
+or to its plan.
 
 ## Paseo verification notes
 

@@ -26,4 +26,4 @@ what a remembered or imported approval can authorize.
 ## Evidence
 
 Detailed findings and alternatives are in
-[`dev-docs/research/backlog-notes.md`](../dev-docs/research/backlog-notes.md#security-and-permission-boundaries).
+[`dev-docs/research/investigation-notes.md`](../dev-docs/research/investigation-notes.md#security-and-permission-boundaries).

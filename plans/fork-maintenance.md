@@ -23,4 +23,4 @@ by a clear benefit.
 ## Evidence
 
 Background research is preserved in
-[`dev-docs/research/backlog-notes.md`](../dev-docs/research/backlog-notes.md#fork-maintenance).
+[`dev-docs/research/investigation-notes.md`](../dev-docs/research/investigation-notes.md#fork-maintenance).

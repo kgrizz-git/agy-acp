@@ -13,5 +13,5 @@ and a fail-closed implementation path.
 ## Evidence
 
 The original alternatives and rationale are preserved in
-[`dev-docs/research/backlog-notes.md`](../../dev-docs/research/backlog-notes.md#deliberately-not-taken-parsing-what-a-command-does)
+[`dev-docs/research/investigation-notes.md`](../../dev-docs/research/investigation-notes.md#deliberately-not-taken-parsing-what-a-command-does)
 and its community-fork notes.

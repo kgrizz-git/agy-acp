@@ -23,4 +23,4 @@ Paseo, rather than inferring it from an in-session continuation.
 ## Evidence
 
 The prior end-to-end results and their limits are preserved in
-[`dev-docs/research/backlog-notes.md`](../dev-docs/research/backlog-notes.md#paseo-verification-notes).
+[`dev-docs/research/investigation-notes.md`](../dev-docs/research/investigation-notes.md#paseo-verification-notes).

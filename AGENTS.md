@@ -98,6 +98,12 @@ move explicitly parked approaches to `plans/deferred/`; keep durable observed
 behavior and research in `dev-docs/`; and record shipped effects only in the
 CHANGELOG. Preserve useful evidence by moving it, not deleting it.
 
+Every in-flight file directly under `plans/` must have a current `TODO.md` entry
+linking to it. Reference documents track no work: when their findings imply a
+next action, add that action to `TODO.md` and create or link its plan. Before
+moving a plan to `plans/completed/` or `plans/deferred/`, update or remove the
+corresponding TODO link in the same pull request.
+
 Documentation-only or internal-maintenance work does not trigger a semver bump,
 but it gets one short `## Unreleased` **Maintenance** entry when it materially
 changes how the project is maintained. A user-visible behavior, feature, or

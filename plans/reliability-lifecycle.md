@@ -25,4 +25,4 @@ bridge's turn/session isolation.
 ## Evidence
 
 The architecture constraints and observed races are preserved in
-[`dev-docs/research/backlog-notes.md`](../dev-docs/research/backlog-notes.md#reliability-and-lifecycle).
+[`dev-docs/research/investigation-notes.md`](../dev-docs/research/investigation-notes.md#reliability-and-lifecycle).
