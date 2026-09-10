@@ -16,13 +16,19 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::sync::{mpsc, oneshot, Mutex, Semaphore};
 use uuid::Uuid;
 
 use crate::runtime::RuntimeOwner;
 
+mod frame;
+pub(crate) use frame::{
+    parse_frame, BRIDGE_READ_TIMEOUT, BRIDGE_WRITE_TIMEOUT, MAX_CONNECTIONS, MAX_FRAME_BYTES,
+    MAX_SATURATION_DENIES,
+};
+use frame::{read_bounded_line_async, FrameReject};
 mod path_rules;
 use path_rules::{outside_workspace, string_args};
 mod prompt;
@@ -226,6 +232,13 @@ pub struct PermissionBridge {
     /// Stops the listener during partial-start rollback. The listener task
     /// owns a bridge clone, so ordinary `Drop` cannot break that cycle.
     accept_task: Option<Arc<tokio::task::AbortHandle>>,
+    /// Full-lifetime connection permits. One is held for the whole
+    /// read → host wait → write of each accepted connection, so pending host
+    /// requests are bounded alongside tasks and memory.
+    permits: Arc<Semaphore>,
+    /// A one-slot, deadline-bounded writer reserve for saturated denials. The
+    /// primary permit cap still bounds all host-facing work at eight.
+    saturation_permits: Arc<Semaphore>,
 }
 
 impl PermissionBridge {
@@ -251,18 +264,46 @@ impl PermissionBridge {
             out_tx,
             socket_path: Arc::new(socket_path),
             accept_task: None,
+            permits: Arc::new(Semaphore::new(MAX_CONNECTIONS)),
+            saturation_permits: Arc::new(Semaphore::new(MAX_SATURATION_DENIES)),
         };
 
         let accept_bridge = bridge.clone();
         let accept_task = tokio::spawn(async move {
             while let Ok((stream, _)) = listener.accept().await {
                 let bridge = accept_bridge.clone();
-                tokio::spawn(async move { bridge.serve_hook(stream).await });
+                // One of eight full-lifetime permits, acquired before spawning
+                // and held for the whole read → prompt → write. A saturated
+                // listener remains responsive. One deadline-bounded task may
+                // flush a saturated deny; further peers close fail-closed. No
+                // host request can be created and no rejection can allow.
+                match bridge.permits.clone().try_acquire_owned() {
+                    Ok(permit) => {
+                        tokio::spawn(async move {
+                            let _permit = permit;
+                            bridge.serve_hook(stream).await;
+                        });
+                    }
+                    Err(_) => {
+                        if let Ok(permit) = bridge.saturation_permits.clone().try_acquire_owned() {
+                            tokio::spawn(async move {
+                                let _permit = permit;
+                                write_saturated_deny(stream).await;
+                            });
+                        }
+                    }
+                }
             }
         });
         bridge.accept_task = Some(Arc::new(accept_task.abort_handle()));
 
         Ok(bridge)
+    }
+
+    /// Test-only view of how many connection permits are still free.
+    #[cfg(test)]
+    pub(crate) fn available_permits(&self) -> usize {
+        self.permits.available_permits()
     }
 
     pub fn socket_path(&self) -> &Path {
@@ -474,20 +515,80 @@ impl PermissionBridge {
     }
 
     /// Handles one hook invocation: read the payload, ask the user, write the decision.
+    ///
+    /// Exactly one at-most-1-MiB frame is read, under a read deadline; the
+    /// response write has its own deadline. Frames that cannot parse, exceed
+    /// the limit, time out, or lack a non-empty `toolCall.name` deny without
+    /// asking the ACP host. The caller's permit outlives this future, so the
+    /// host wait inside `decide` stays within the eight-connection bound.
     async fn serve_hook(&self, stream: UnixStream) {
-        let (read_half, mut write_half) = stream.into_split();
-        let mut lines = BufReader::new(read_half).lines();
+        self.serve_hook_with_timeout(stream, BRIDGE_READ_TIMEOUT)
+            .await;
+    }
 
-        let payload = match lines.next_line().await {
-            Ok(Some(line)) => serde_json::from_str::<Value>(&line).unwrap_or_else(|_| json!({})),
-            _ => return,
+    /// Same as [`PermissionBridge::serve_hook`] with an injectable read
+    /// deadline. Production passes [`BRIDGE_READ_TIMEOUT`]; tests pass a short
+    /// deadline so a slow peer is denied without waiting out the full bound.
+    async fn serve_hook_with_timeout(&self, stream: UnixStream, read_timeout: Duration) {
+        let (read_half, mut write_half) = stream.into_split();
+        let mut reader = BufReader::new(read_half);
+
+        let line = match tokio::time::timeout(
+            read_timeout,
+            read_bounded_line_async(&mut reader, MAX_FRAME_BYTES),
+        )
+        .await
+        {
+            Ok(Ok(line)) => line,
+            Ok(Err(error)) => {
+                let reject = if error.kind() == std::io::ErrorKind::InvalidInput {
+                    FrameReject::Oversized
+                } else {
+                    FrameReject::Malformed
+                };
+                self.write_hook_response(&mut write_half, reject).await;
+                return;
+            }
+            Err(_) => {
+                self.write_hook_response(&mut write_half, FrameReject::Timeout)
+                    .await;
+                return;
+            }
+        };
+
+        let payload = match parse_frame(line.trim()) {
+            Ok(payload) => payload,
+            Err(reject) => {
+                self.write_hook_response(&mut write_half, reject).await;
+                return;
+            }
         };
 
         let (decision, reason) = self.decide(&payload).await;
-        let response = decision.as_hook_json(&reason).to_string();
-        let _ = write_half.write_all(response.as_bytes()).await;
-        let _ = write_half.write_all(b"\n").await;
-        let _ = write_half.flush().await;
+        let response = format!("{}\n", decision.as_hook_json(&reason));
+        // Bounded write: the response is small, but a stuck peer must not hold
+        // a permit past its deadline. A failed write denies by omission -- agy
+        // treats a decision-less close as no allow, and no rejection path here
+        // can become one.
+        let _ = tokio::time::timeout(
+            BRIDGE_WRITE_TIMEOUT,
+            write_hook_line(&mut write_half, response.as_bytes()),
+        )
+        .await;
+    }
+
+    /// Writes a fail-closed deny for a frame rejected before `decide`.
+    async fn write_hook_response(
+        &self,
+        write_half: &mut tokio::net::unix::OwnedWriteHalf,
+        reject: FrameReject,
+    ) {
+        let response = format!("{}\n", Decision::Deny.as_hook_json(reject.reason()));
+        let _ = tokio::time::timeout(
+            BRIDGE_WRITE_TIMEOUT,
+            write_hook_line(write_half, response.as_bytes()),
+        )
+        .await;
     }
 
     // A policy cascade, read top to bottom: each arm is one reason to allow or
@@ -918,6 +1019,38 @@ impl PermissionBridge {
     }
 }
 
+/// Writes one response line under the caller's deadline.
+async fn write_hook_line(
+    write_half: &mut tokio::net::unix::OwnedWriteHalf,
+    bytes: &[u8],
+) -> std::io::Result<()> {
+    write_half.write_all(bytes).await?;
+    write_half.flush().await
+}
+
+/// Answers a connection that arrived with no free permit.
+///
+/// Writes a saturated denial inside the one-slot saturated-deny reserve.
+/// Its deadline keeps a non-reading peer from holding that reserve forever.
+async fn write_saturated_deny(stream: UnixStream) {
+    let (read_half, mut write_half) = stream.into_split();
+    // A saturated peer gets one deny line, not a request body.
+    drop(read_half);
+    let response = format!(
+        "{}\n",
+        Decision::Deny.as_hook_json(FrameReject::Saturated.reason())
+    );
+    // Truncate defensively: the deny is far below the frame limit, and a
+    // response must never exceed what the hook will buffer.
+    let bytes = response.as_bytes();
+    let end = bytes.len().min(MAX_FRAME_BYTES);
+    let _ = tokio::time::timeout(
+        BRIDGE_WRITE_TIMEOUT,
+        write_hook_line(&mut write_half, &bytes[..end]),
+    )
+    .await;
+}
+
 const REQUEST_ID_PREFIX: &str = "agyacp-perm-";
 const OPTION_ALLOW_ONCE: &str = "allow_once";
 const OPTION_ALLOW_ALWAYS: &str = "allow_always";
@@ -1189,6 +1322,8 @@ fn step_idx(payload: &Value) -> i64 {
 mod sticky_rules;
 use sticky_rules::*;
 
+#[cfg(test)]
+mod ipc_tests;
 #[cfg(test)]
 mod policy_tests;
 #[cfg(test)]

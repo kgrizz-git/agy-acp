@@ -102,6 +102,8 @@ async fn unknown_conversations_are_denied() {
         out_tx: tx,
         socket_path: Arc::new(PathBuf::from("/tmp/unused.sock")),
         accept_task: None,
+        permits: Arc::new(Semaphore::new(MAX_CONNECTIONS)),
+        saturation_permits: Arc::new(Semaphore::new(MAX_SATURATION_DENIES)),
     };
 
     let (decision, reason) = bridge
@@ -126,6 +128,8 @@ async fn only_the_users_own_refusal_counts_as_a_refusal() {
         out_tx: tx,
         socket_path: Arc::new(PathBuf::from("/tmp/unused.sock")),
         accept_task: None,
+        permits: Arc::new(Semaphore::new(MAX_CONNECTIONS)),
+        saturation_permits: Arc::new(Semaphore::new(MAX_SATURATION_DENIES)),
     };
     bridge.set_active_session(Some("session-1")).await;
 
@@ -186,6 +190,8 @@ async fn a_registered_conversation_asks_the_client_and_honors_approval() {
         out_tx: tx,
         socket_path: Arc::new(PathBuf::from("/tmp/unused.sock")),
         accept_task: None,
+        permits: Arc::new(Semaphore::new(MAX_CONNECTIONS)),
+        saturation_permits: Arc::new(Semaphore::new(MAX_SATURATION_DENIES)),
     };
     bridge.register_conversation("conv-1", "session-1").await;
     bridge.set_active_session(Some("session-1")).await;
@@ -249,6 +255,8 @@ async fn tool_calls_aimed_at_the_hook_root_are_refused_without_asking() {
         out_tx: tx,
         socket_path: Arc::new(PathBuf::from("/tmp/unused.sock")),
         accept_task: None,
+        permits: Arc::new(Semaphore::new(MAX_CONNECTIONS)),
+        saturation_permits: Arc::new(Semaphore::new(MAX_SATURATION_DENIES)),
     };
     bridge.register_conversation("conv-1", "session-1").await;
     bridge.set_active_session(Some("session-1")).await;
@@ -279,6 +287,8 @@ async fn cancelled_permission_requests_deny() {
         out_tx: tx,
         socket_path: Arc::new(PathBuf::from("/tmp/unused.sock")),
         accept_task: None,
+        permits: Arc::new(Semaphore::new(MAX_CONNECTIONS)),
+        saturation_permits: Arc::new(Semaphore::new(MAX_SATURATION_DENIES)),
     };
     bridge.register_conversation("conv-1", "session-1").await;
     bridge.set_active_session(Some("session-1")).await;
@@ -318,6 +328,8 @@ async fn responses_for_other_ids_are_left_alone() {
         out_tx: tx,
         socket_path: Arc::new(PathBuf::from("/tmp/unused.sock")),
         accept_task: None,
+        permits: Arc::new(Semaphore::new(MAX_CONNECTIONS)),
+        saturation_permits: Arc::new(Semaphore::new(MAX_SATURATION_DENIES)),
     };
     assert!(!bridge.resolve_response(&json!(17), None).await);
     assert!(!bridge.resolve_response(&json!("some-other-id"), None).await);
