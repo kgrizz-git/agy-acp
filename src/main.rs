@@ -102,17 +102,6 @@ async fn start_permission_prompts(
     Ok((bridge, hook_root, owner, cleanup))
 }
 
-/// Kills agy and everything it started if the adapter is signalled.
-///
-/// There was no kill on exit at all before this: no signal handler, no `Drop`,
-/// no `kill_on_drop`, so a terminated adapter left a whole turn's command tree
-/// running with nothing attached to it. Only the signals a host would actually
-/// use to stop the adapter are handled; `SIGKILL` cannot be, and a tree orphaned
-/// that way is beyond reach.
-///
-/// Note this makes a signalled shutdown do work before it exits -- reading the
-/// process table and killing -- where it used to be immediate. That is the cost
-/// of not orphaning the tree, but a supervisor with a short patience will see it.
 /// Shared handle to the private runtime cleanup, populated once the owner is
 /// created. The signal handlers read it when they fire, so a signal that
 /// arrives before (or when) prompts are off simply finds `None` and skips

@@ -16,26 +16,25 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::{AsyncWriteExt, BufReader};
-use tokio::net::{UnixListener, UnixStream};
+use tokio::net::UnixListener;
 use tokio::sync::{mpsc, oneshot, Mutex, Semaphore};
 use uuid::Uuid;
 
 use crate::runtime::RuntimeOwner;
 
 mod frame;
-pub(crate) use frame::{
-    parse_frame, BRIDGE_READ_TIMEOUT, BRIDGE_WRITE_TIMEOUT, MAX_CONNECTIONS, MAX_FRAME_BYTES,
-    MAX_SATURATION_DENIES,
-};
-use frame::{read_bounded_line_async, FrameReject};
+pub(crate) use frame::{parse_frame, MAX_CONNECTIONS, MAX_SATURATION_DENIES};
 mod path_rules;
 use path_rules::{outside_workspace, string_args};
 mod prompt;
-use prompt::tool_title;
+use prompt::{
+    permission_options, tool_title, AlwaysScope, OPTION_ALLOW_ALWAYS, OPTION_ALLOW_ONCE,
+    OPTION_REJECT_ALWAYS, OPTION_REJECT_ONCE,
+};
 mod safe_command;
-use safe_command::{classify_call, ProgramDef, SafeCommand};
+use safe_command::{classify_call, SafeCommand};
 mod hook_client;
+mod serve;
 pub use hook_client::run_hook;
 
 /// Env var carrying the bridge socket path into the `agy` subprocess (and from
@@ -288,7 +287,7 @@ impl PermissionBridge {
                         if let Ok(permit) = bridge.saturation_permits.clone().try_acquire_owned() {
                             tokio::spawn(async move {
                                 let _permit = permit;
-                                write_saturated_deny(stream).await;
+                                serve::write_saturated_deny(stream).await;
                             });
                         }
                     }
@@ -512,83 +511,6 @@ impl PermissionBridge {
                 .send(Answer::Host(result.unwrap_or_else(|| json!({}))));
         }
         true
-    }
-
-    /// Handles one hook invocation: read the payload, ask the user, write the decision.
-    ///
-    /// Exactly one at-most-1-MiB frame is read, under a read deadline; the
-    /// response write has its own deadline. Frames that cannot parse, exceed
-    /// the limit, time out, or lack a non-empty `toolCall.name` deny without
-    /// asking the ACP host. The caller's permit outlives this future, so the
-    /// host wait inside `decide` stays within the eight-connection bound.
-    async fn serve_hook(&self, stream: UnixStream) {
-        self.serve_hook_with_timeout(stream, BRIDGE_READ_TIMEOUT)
-            .await;
-    }
-
-    /// Same as [`PermissionBridge::serve_hook`] with an injectable read
-    /// deadline. Production passes [`BRIDGE_READ_TIMEOUT`]; tests pass a short
-    /// deadline so a slow peer is denied without waiting out the full bound.
-    async fn serve_hook_with_timeout(&self, stream: UnixStream, read_timeout: Duration) {
-        let (read_half, mut write_half) = stream.into_split();
-        let mut reader = BufReader::new(read_half);
-
-        let line = match tokio::time::timeout(
-            read_timeout,
-            read_bounded_line_async(&mut reader, MAX_FRAME_BYTES),
-        )
-        .await
-        {
-            Ok(Ok(line)) => line,
-            Ok(Err(error)) => {
-                let reject = if error.kind() == std::io::ErrorKind::InvalidInput {
-                    FrameReject::Oversized
-                } else {
-                    FrameReject::Malformed
-                };
-                self.write_hook_response(&mut write_half, reject).await;
-                return;
-            }
-            Err(_) => {
-                self.write_hook_response(&mut write_half, FrameReject::Timeout)
-                    .await;
-                return;
-            }
-        };
-
-        let payload = match parse_frame(line.trim()) {
-            Ok(payload) => payload,
-            Err(reject) => {
-                self.write_hook_response(&mut write_half, reject).await;
-                return;
-            }
-        };
-
-        let (decision, reason) = self.decide(&payload).await;
-        let response = format!("{}\n", decision.as_hook_json(&reason));
-        // Bounded write: the response is small, but a stuck peer must not hold
-        // a permit past its deadline. A failed write denies by omission -- agy
-        // treats a decision-less close as no allow, and no rejection path here
-        // can become one.
-        let _ = tokio::time::timeout(
-            BRIDGE_WRITE_TIMEOUT,
-            write_hook_line(&mut write_half, response.as_bytes()),
-        )
-        .await;
-    }
-
-    /// Writes a fail-closed deny for a frame rejected before `decide`.
-    async fn write_hook_response(
-        &self,
-        write_half: &mut tokio::net::unix::OwnedWriteHalf,
-        reject: FrameReject,
-    ) {
-        let response = format!("{}\n", Decision::Deny.as_hook_json(reject.reason()));
-        let _ = tokio::time::timeout(
-            BRIDGE_WRITE_TIMEOUT,
-            write_hook_line(write_half, response.as_bytes()),
-        )
-        .await;
     }
 
     // A policy cascade, read top to bottom: each arm is one reason to allow or
@@ -1019,138 +941,7 @@ impl PermissionBridge {
     }
 }
 
-/// Writes one response line under the caller's deadline.
-async fn write_hook_line(
-    write_half: &mut tokio::net::unix::OwnedWriteHalf,
-    bytes: &[u8],
-) -> std::io::Result<()> {
-    write_half.write_all(bytes).await?;
-    write_half.flush().await
-}
-
-/// Answers a connection that arrived with no free permit.
-///
-/// Writes a saturated denial inside the one-slot saturated-deny reserve.
-/// Its deadline keeps a non-reading peer from holding that reserve forever.
-async fn write_saturated_deny(stream: UnixStream) {
-    let (read_half, mut write_half) = stream.into_split();
-    // A saturated peer gets one deny line, not a request body.
-    drop(read_half);
-    let response = format!(
-        "{}\n",
-        Decision::Deny.as_hook_json(FrameReject::Saturated.reason())
-    );
-    // Truncate defensively: the deny is far below the frame limit, and a
-    // response must never exceed what the hook will buffer.
-    let bytes = response.as_bytes();
-    let end = bytes.len().min(MAX_FRAME_BYTES);
-    let _ = tokio::time::timeout(
-        BRIDGE_WRITE_TIMEOUT,
-        write_hook_line(&mut write_half, &bytes[..end]),
-    )
-    .await;
-}
-
 const REQUEST_ID_PREFIX: &str = "agyacp-perm-";
-const OPTION_ALLOW_ONCE: &str = "allow_once";
-const OPTION_ALLOW_ALWAYS: &str = "allow_always";
-const OPTION_REJECT_ONCE: &str = "reject_once";
-const OPTION_REJECT_ALWAYS: &str = "reject_always";
-
-/// What the two "always" labels claim the answer covers.
-///
-/// Derived once, in `decide`, from the same `sticky_scope` result that builds the
-/// key, and then handed to both the prompt and [`PermissionBridge::apply_outcome`]
-/// -- so the button, the stored key and the reason string cannot disagree about
-/// scope. They were previously derived independently in those three places, with
-/// nothing tying them together, and the label drifted from the key.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum AlwaysScope {
-    /// Every later call to this tool, for this session. What the answer covers
-    /// when `sticky_scope` returns `None`.
-    Tool,
-    /// This exact command line and no other. The prompt's title is already
-    /// ``Run `{command}` `` (see [`tool_title`]), so "this exact command" refers
-    /// to something shown directly above the buttons.
-    Command,
-    /// This exact call -- same tool, same arguments. The answer is keyed by the
-    /// arguments, but the arguments are not a command, so calling it one would be
-    /// a lie: `read_url_content` and `search_web` land here, as does every tool
-    /// this fork does not know. Nothing above the buttons reads as a command, and
-    /// a label must describe what is actually being consented to.
-    Call,
-    /// Every later invocation of one allowlisted program, for this session:
-    /// `` `ls` commands ``. What a classified `run_command` allow covers, when
-    /// `sticky_scope` returns `safe:<program>`. Carries the table entry, not
-    /// the model's input, so the label cannot carry model-authored text.
-    Program(&'static ProgramDef),
-}
-
-impl AlwaysScope {
-    /// `scope` is the `sticky_scope` result the key is built from; `args` decides
-    /// only the wording, never the breadth.
-    fn of(scope: Option<&String>, args: &Value) -> Self {
-        match scope {
-            None => AlwaysScope::Tool,
-            Some(_) if has_command_line(args) => AlwaysScope::Command,
-            Some(_) => AlwaysScope::Call,
-        }
-    }
-
-    /// The noun the labels and reasons agree on. `None` for [`AlwaysScope::Tool`],
-    /// which names the tool instead.
-    fn noun(self) -> Option<&'static str> {
-        match self {
-            AlwaysScope::Tool => None,
-            AlwaysScope::Command => Some("this exact command"),
-            AlwaysScope::Call => Some("this exact call"),
-            AlwaysScope::Program(program) => Some(program.noun),
-        }
-    }
-}
-
-/// The four answers offered with every prompt.
-///
-/// `kind` is the ACP enum the host styles on; `name` is free display text and is
-/// ours to word. The "always" labels say "this session" because that is the outer
-/// bound on every remembered answer, and name the scope inside it -- the tool, or
-/// the one command or call in front of the user. The prompt is where someone
-/// decides, not the README.
-///
-/// The allow and deny wordings arrive as separate scopes because denies stay
-/// narrow while allows may widen: a classified command offers "Always allow
-/// `ls` commands" beside "Always reject this exact command". Each side is
-/// worded from the key its answer is actually stored under, so neither button
-/// can promise what its store does not cover.
-///
-/// The scope arrives as an [`AlwaysScope`], not as the command text: nothing in
-/// the label needs the string, and passing it would invite someone to interpolate
-/// it.
-fn permission_options(tool_name: &str, allow: AlwaysScope, deny: AlwaysScope) -> Value {
-    let allow_always = match allow.noun() {
-        Some(noun) => format!("Always allow {noun} this session"),
-        None => format!("Always allow {tool_name} this session"),
-    };
-    let reject_always = match deny.noun() {
-        Some(noun) => format!("Always reject {noun} this session"),
-        None => format!("Always reject {tool_name} this session"),
-    };
-    json!([
-        { "optionId": OPTION_ALLOW_ONCE, "name": "Allow once", "kind": "allow_once" },
-        {
-            "optionId": OPTION_ALLOW_ALWAYS,
-            "name": allow_always,
-            "kind": "allow_always",
-        },
-        { "optionId": OPTION_REJECT_ONCE, "name": "Reject", "kind": "reject_once" },
-        {
-            "optionId": OPTION_REJECT_ALWAYS,
-            "name": reject_always,
-            "kind": "reject_always",
-        },
-    ])
-}
-
 /// Comma-separated list of what may run without asking. Accepts tool names and
 /// the groups `reads`, `searches` and `none`. Defaults to [`DEFAULT_AUTO_ALLOW`].
 pub const AUTO_ALLOW_ENV: &str = "AGY_ACP_AUTO_ALLOW";

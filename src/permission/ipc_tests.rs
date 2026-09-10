@@ -5,12 +5,14 @@
 //! without a host request, without unbounded memory/tasks, and never with an
 //! allow.
 
+use super::frame::MAX_FRAME_BYTES;
 use super::test_support::expect_permission_request;
 use super::*;
 use crate::runtime::RuntimeOwner;
 use serde_json::json;
 use std::path::PathBuf;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::UnixStream;
 use uuid::Uuid;
 
 /// A unique scratch base under the real temporary directory. Kept short: the
