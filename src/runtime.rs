@@ -455,12 +455,17 @@ mod tests {
         let scratch_len = scratch.as_os_str().as_bytes().len();
         let max_base_len = MAX_SOCKET_PATH_BYTES - 1 - overhead;
         // Minus one more for the separator `join` inserts between scratch and pad.
-        let pad = max_base_len
-            .checked_sub(scratch_len + 1)
-            .expect("the scratch base must leave room for padding");
-        assert!(
-            overhead + scratch_len + pad < MAX_SOCKET_PATH_BYTES,
-            "budget arithmetic must match socket_path_fits"
+        // A scratch base with no room left (long sandbox TMPDIR) skips rather
+        // than failing: there is no shorter root to fall back to.
+        let Some(pad) = max_base_len.checked_sub(scratch_len + 1) else {
+            eprintln!("SKIP socket_boundary: TMPDIR leaves no room for padding");
+            fs::remove_dir_all(&scratch).unwrap();
+            return;
+        };
+        assert_eq!(
+            scratch_len + 1 + pad + overhead,
+            MAX_SOCKET_PATH_BYTES - 1,
+            "budget arithmetic must match socket_path_fits exactly"
         );
 
         let base = scratch.join("p".repeat(pad));
@@ -490,8 +495,9 @@ mod tests {
         fs::create_dir_all(&over).unwrap();
         let error = RuntimeOwner::create_in(&over).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
-        assert!(
-            !over.join("s.sock").exists(),
+        assert_eq!(
+            fs::read_dir(&over).unwrap().count(),
+            0,
             "a rejected base must create nothing beneath it"
         );
         fs::remove_dir_all(&scratch).unwrap();
