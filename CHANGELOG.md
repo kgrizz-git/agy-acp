@@ -17,8 +17,9 @@ versioned delivery as `0.2.0`; everything under that heading shipped together.
 - Crate and binary renamed `agy-acp` → `agy-gated-acp` to match the
   repository. Sessions migrate automatically: a pre-rename
   `~/.openab/agy-acp/sessions.json` moves to the new state directory once on
-  startup when nothing is there yet. Point hosts at the new binary name and
-  restart them. (PR #26)
+  startup when nothing is there yet. The longer runtime prefix is offset by a
+  shorter random token, so the socket-path budget is unchanged. Point hosts at
+  the new binary name and restart them. (PR #26)
 
 ### Maintenance
 
