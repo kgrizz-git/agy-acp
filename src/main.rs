@@ -173,7 +173,7 @@ fn install_shutdown_killer(live_children: proc::LiveChildren, cleanup: SharedCle
             let mut stream = match signal(kind) {
                 Ok(stream) => stream,
                 Err(e) => {
-                    eprintln!("agy-acp: cannot handle signal {signum}: {e}");
+                    eprintln!("agy-gated-acp: cannot handle signal {signum}: {e}");
                     return;
                 }
             };
@@ -181,7 +181,9 @@ fn install_shutdown_killer(live_children: proc::LiveChildren, cleanup: SharedCle
             live_children.kill_all();
             if let Some(cleanup) = shared_runtime_cleanup(&cleanup) {
                 if let Err(e) = cleanup.cleanup() {
-                    eprintln!("agy-acp: could not clean up runtime directory on shutdown: {e}");
+                    eprintln!(
+                        "agy-gated-acp: could not clean up runtime directory on shutdown: {e}"
+                    );
                 }
             }
             std::process::exit(128 + signum);
@@ -250,8 +252,8 @@ async fn main() {
                 Some(shared_cleanup),
             ),
             Err(e) => {
-                eprintln!("agy-acp: could not enable permission prompts: {e}");
-                eprintln!("agy-acp: continuing with agy's own permission handling");
+                eprintln!("agy-gated-acp: could not enable permission prompts: {e}");
+                eprintln!("agy-gated-acp: continuing with agy's own permission handling");
                 (None, None, None, None)
             }
         }
@@ -507,7 +509,7 @@ async fn main() {
     if let Some(shared) = runtime_cleanup.as_ref() {
         if let Some(cleanup) = shared_runtime_cleanup(shared) {
             if let Err(e) = cleanup.cleanup() {
-                eprintln!("agy-acp: could not clean up runtime directory on exit: {e}");
+                eprintln!("agy-gated-acp: could not clean up runtime directory on exit: {e}");
             }
         }
     }

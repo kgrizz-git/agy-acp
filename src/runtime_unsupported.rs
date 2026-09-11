@@ -1,6 +1,6 @@
 //! Non-Unix fallback for the permission bridge's private runtime directory.
 //!
-//! `agy-acp` can still serve ACP requests on these platforms. Only the optional
+//! `agy-gated-acp` can still serve ACP requests on these platforms. Only the optional
 //! `--permission-prompts` mode needs a private Unix runtime, so this keeps the
 //! types available while failing closed when a caller tries to create one.
 

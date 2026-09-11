@@ -25,7 +25,7 @@ import threading
 import time
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
-BINARY = REPO / "target/debug/agy-acp"
+BINARY = REPO / "target/debug/agy-gated-acp"
 WORKSPACE = pathlib.Path("/tmp/agy-cancel-probe")
 COMMAND_SECONDS = 45
 
@@ -36,7 +36,7 @@ def process_tree(tag):
         ["ps", "-eo", "pid,ppid,pgid,command"], capture_output=True, text=True
     ).stdout
     for line in ps.splitlines():
-        if ("agy " in line or "sleep 45" in line or "agy-acp" in line) and "grep" not in line:
+        if ("agy " in line or "sleep 45" in line or "agy-gated-acp" in line) and "grep" not in line:
             print(line[:130], flush=True)
 
 

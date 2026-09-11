@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
+use std::path::Path;
 
 #[derive(Debug, Deserialize)]
 pub struct JsonRpcRequest {
@@ -26,7 +27,7 @@ pub struct JsonRpcNotification {
     pub params: Value,
 }
 
-/// Persisted session→conversation mapping stored in ~/.openab/agy-acp/sessions.json
+/// Persisted session→conversation mapping stored in ~/.openab/agy-gated-acp/sessions.json
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SessionStore {
     pub sessions: HashMap<String, StoredSession>,
@@ -66,4 +67,28 @@ pub struct Session {
     /// Monotonic tick of the most recent handler that touched this session.
     /// Used to evict the least-recently-used session instead of an arbitrary one.
     pub last_used: u64,
+}
+
+/// The state directory, moving a pre-rename `sessions.json` across once.
+///
+/// New-wins, old-moves, neither-creates-nothing. Silent best-effort, like the
+/// persistence that reads the result: a failed move leaves the old file and the
+/// adapter starts with fresh state.
+pub(crate) fn migrated_state_dir(home: &Path) -> std::path::PathBuf {
+    let state_dir = home.join(".openab/agy-gated-acp");
+    let new_file = state_dir.join("sessions.json");
+    if new_file.exists() {
+        return state_dir;
+    }
+    let old_file = home.join(".openab/agy-acp/sessions.json");
+    if !old_file.exists() {
+        return state_dir;
+    }
+    if std::fs::create_dir_all(&state_dir).is_err() {
+        return state_dir;
+    }
+    if std::fs::rename(&old_file, &new_file).is_ok() {
+        eprintln!("agy-gated-acp: migrated sessions from ~/.openab/agy-acp/sessions.json");
+    }
+    state_dir
 }

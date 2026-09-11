@@ -150,7 +150,7 @@ impl Adapter {
     }
 
     fn new_with_home(home: PathBuf, available_models: Vec<AgyModel>, skip_naration: bool) -> Self {
-        let state_dir = home.join(".openab/agy-acp");
+        let state_dir = migrated_state_dir(&home);
         Self {
             sessions: HashMap::new(),
             working_dir: std::env::current_dir()
@@ -1104,7 +1104,7 @@ async fn drain_agy_io(
                 }
             }
             if let Some(e) = read_error {
-                eprintln!("agy-acp: error reading agy stdout: {e}");
+                eprintln!("agy-gated-acp: error reading agy stdout: {e}");
             }
         }
         processor
@@ -1180,7 +1180,7 @@ fn turn_response(id: Value, drained: &DrainOutcome, denied_by_user: bool) -> Vec
 
     let stderr_text = String::from_utf8_lossy(&drained.stderr_bytes);
     if !stderr_text.is_empty() {
-        eprintln!("[agy-acp] agy stderr: {}", stderr_text.trim_end());
+        eprintln!("[agy-gated-acp] agy stderr: {}", stderr_text.trim_end());
     }
 
     // A turn the user refused is an outcome, not a provider failure; the bridge
@@ -1189,7 +1189,7 @@ fn turn_response(id: Value, drained: &DrainOutcome, denied_by_user: bool) -> Vec
         && !denied_by_user
         && (!status.success() || result_failed || result_missing)
     {
-        eprintln!("[agy-acp] WARN: agy exited with status: {}", status);
+        eprintln!("[agy-gated-acp] WARN: agy exited with status: {}", status);
         // Updates already streamed to the client stay where they are; what must
         // not happen is a failed turn ending in a success response, which is
         // indistinguishable from a good one. This used to be gated on

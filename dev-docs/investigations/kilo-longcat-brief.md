@@ -61,7 +61,7 @@ relevant integration points are:
   {
     "extends": "acp",
     "label": "agy (Gemini via antigravity)",
-    "command": ["agy-acp", "--permission-prompts"],
+    "command": ["agy-gated-acp", "--permission-prompts"],
     "env": {}
   }
   ```

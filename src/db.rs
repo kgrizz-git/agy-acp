@@ -31,7 +31,7 @@ pub fn read_rows_from_db(
         .unwrap_or(false);
     if !table_exists {
         eprintln!(
-            "[agy-acp] WARN: steps table not found in {}.db — schema changed?",
+            "[agy-gated-acp] WARN: steps table not found in {}.db — schema changed?",
             conversation_id
         );
         return None;

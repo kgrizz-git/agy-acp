@@ -5,7 +5,7 @@ use super::frame::{
 };
 use super::{Decision, SOCKET_ENV};
 
-/// Entry point for `agy-acp permission-hook`, the command wired into agy's
+/// Entry point for `agy-gated-acp permission-hook`, the command wired into agy's
 /// `PreToolUse` hook. Reads the hook payload on stdin, asks the running adapter
 /// over the bridge socket, and writes agy's decision JSON to stdout.
 ///
@@ -26,14 +26,16 @@ pub fn run_hook() {
     let payload = match read_bounded_line_sync(&mut locked, MAX_FRAME_BYTES) {
         Ok(line) => line.trim().to_string(),
         Err(err) => {
-            deny(&format!("agy-acp: permission bridge unavailable ({err})"));
+            deny(&format!(
+                "agy-gated-acp: permission bridge unavailable ({err})"
+            ));
             return;
         }
     };
     // An empty stdin frame carries no tool call and must not reach the bridge
     // as an empty line: deny locally, without another socket round trip.
     if payload.is_empty() {
-        deny("agy-acp: malformed permission request");
+        deny("agy-gated-acp: malformed permission request");
         return;
     }
 
@@ -46,7 +48,9 @@ pub fn run_hook() {
     }
     .unwrap_or_else(|err| {
         Decision::Deny
-            .as_hook_json(&format!("agy-acp: permission bridge unavailable ({err})"))
+            .as_hook_json(&format!(
+                "agy-gated-acp: permission bridge unavailable ({err})"
+            ))
             .to_string()
     });
 

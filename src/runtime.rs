@@ -39,17 +39,19 @@ const HOOK_DIR_NAME: &str = "hook";
 
 /// Prefix on the random owner directory. Short for the same reason as the
 /// socket filename.
-const RUNTIME_PREFIX: &str = "agy-acp-";
+const RUNTIME_PREFIX: &str = "agy-gated-acp-";
 
 /// How many random names to try before treating repeated collisions as a
 /// failure. Bounded so a hostile or broken temporary directory cannot make
 /// startup spin.
 const CREATE_ATTEMPTS: usize = 16;
 
-/// Length of the random token in an owner directory name. 64 bits is far more
-/// than enough to make the name unguessable, while keeping the path short
-/// enough for the socket limit on the supported platforms.
-const TOKEN_LEN: usize = 16;
+/// Length of the random token in an owner directory name. 40 bits still makes
+/// the name unguessable for a per-process private directory, while keeping the
+/// total path short: together with the prefix this preserves exactly the
+/// pre-rename byte budget against the socket path limit, so a base directory
+/// that fit before the rename still fits.
+const TOKEN_LEN: usize = 10;
 
 /// A private, randomly named directory owned by this process, holding the
 /// permission bridge's socket and hook root.
@@ -436,5 +438,68 @@ mod tests {
         handle.cleanup().unwrap();
         owner.cleanup().unwrap();
         fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// The rename lengthened the directory prefix, so the token shrank to keep
+    /// the byte budget identical: base + "/" + prefix + token + "/s.sock" must
+    /// stay strictly under the platform limit, exactly as before the rename.
+    /// Builds the longest base that fits, proves the owner, the real bind, and
+    /// the bridge all succeed there, and proves one more byte fails closed.
+    #[tokio::test]
+    async fn socket_boundary_survives_the_longer_prefix() {
+        use crate::permission::PermissionBridge;
+        use std::os::unix::ffi::OsStrExt;
+
+        let scratch = scratch_base("boundary");
+        let overhead = 1 + RUNTIME_PREFIX.len() + TOKEN_LEN + 1 + SOCKET_FILE_NAME.len();
+        let scratch_len = scratch.as_os_str().as_bytes().len();
+        let max_base_len = MAX_SOCKET_PATH_BYTES - 1 - overhead;
+        // Minus one more for the separator `join` inserts between scratch and pad.
+        // A scratch base with no room left (long sandbox TMPDIR) skips rather
+        // than failing: there is no shorter root to fall back to.
+        let Some(pad) = max_base_len.checked_sub(scratch_len + 1) else {
+            eprintln!("SKIP socket_boundary: TMPDIR leaves no room for padding");
+            fs::remove_dir_all(&scratch).unwrap();
+            return;
+        };
+        assert_eq!(
+            scratch_len + 1 + pad + overhead,
+            MAX_SOCKET_PATH_BYTES - 1,
+            "budget arithmetic must match socket_path_fits exactly"
+        );
+
+        let base = scratch.join("p".repeat(pad));
+        assert_eq!(base.as_os_str().as_bytes().len(), max_base_len);
+        fs::create_dir_all(&base).unwrap();
+        let owner = RuntimeOwner::create_in(&base)
+            .expect("the longest fitting base must still succeed after the rename");
+        assert!(socket_path_fits(&owner.socket_path()));
+
+        // The operating system must accept the longest path the budget allows,
+        // which is what the bridge's bind goes through. Bound in a scope so
+        // the bridge can bind the same path right after.
+        {
+            let _bound = std::os::unix::net::UnixListener::bind(owner.socket_path())
+                .expect("the longest fitting socket path must bind");
+        }
+        // Dropping the listener closes it but leaves the socket file behind;
+        // remove it so the bridge can bind the same path right after.
+        fs::remove_file(owner.socket_path()).unwrap();
+        let (out_tx, _out_rx) = tokio::sync::mpsc::unbounded_channel();
+        let bridge = PermissionBridge::start(out_tx, &owner)
+            .expect("the bridge must start at the longest fitting path");
+        bridge.shutdown();
+        owner.cleanup().unwrap();
+
+        let over = scratch.join("p".repeat(pad + 1));
+        fs::create_dir_all(&over).unwrap();
+        let error = RuntimeOwner::create_in(&over).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(
+            fs::read_dir(&over).unwrap().count(),
+            0,
+            "a rejected base must create nothing beneath it"
+        );
+        fs::remove_dir_all(&scratch).unwrap();
     }
 }

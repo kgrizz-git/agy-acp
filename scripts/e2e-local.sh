@@ -14,14 +14,14 @@
 # supplies it). The defaults mirror CI: `-- --ignored --nocapture --test-threads=1`.
 #
 # What it walls off: everything runs under a throwaway HOME (mktemp dir, or
-# $E2E_HOME to reuse one), so agy and agy-acp read and write
+# $E2E_HOME to reuse one), so agy and agy-gated-acp read and write
 # $HOME/.gemini/... (settings.json, conversation DB, installation UUID)
 # inside the sandbox. Your OAuth login, real settings.json, and session
 # history are never read or written through file paths.
 #
 # Caveat: the macOS keychain is global, not under HOME. If agy finds your
 # OAuth token there it may authenticate as you rather than as the token —
-# watch the `[e2e] model:` lines and, on failure, the `[agy-acp stderr]`
+# watch the `[e2e] model:` lines and, on failure, the `[agy-gated-acp stderr]`
 # lines to see which identity a run actually used.
 #
 # Env overrides:
@@ -51,7 +51,7 @@ if ! command -v agy >/dev/null 2>&1; then
     exit 1
 fi
 
-BIN="target/release/agy-acp"
+BIN="target/release/agy-gated-acp"
 if [ ! -x "$BIN" ]; then
     echo "release binary missing; building (required for e2e tests)..."
     cargo build --release
@@ -61,7 +61,7 @@ if [ -n "${E2E_HOME:-}" ]; then
     SANDBOX="$E2E_HOME"
     mkdir -p "$SANDBOX"
 else
-    SANDBOX=$(mktemp -d "${TMPDIR:-/tmp}/agy-acp-e2e-home.XXXXXX")
+    SANDBOX=$(mktemp -d "${TMPDIR:-/tmp}/agy-gated-acp-e2e-home.XXXXXX")
 fi
 # Point HOME at the sandbox AFTER pinning the toolchain locations: rustup
 # resolves its toolchains via $HOME when RUSTUP_HOME/CARGO_HOME are unset,

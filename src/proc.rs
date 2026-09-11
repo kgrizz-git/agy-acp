@@ -106,7 +106,7 @@ fn kill_process_tree(root: u32) {
                 // Not fatal -- `root` is still killed below -- but it silently
                 // restores the exact bug this module exists to fix.
                 eprintln!(
-                    "agy-acp: could not read the process table; agy's own children may survive"
+                    "agy-gated-acp: could not read the process table; agy's own children may survive"
                 );
             }
             break;

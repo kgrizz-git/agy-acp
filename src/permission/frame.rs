@@ -50,11 +50,11 @@ pub enum FrameReject {
 impl FrameReject {
     pub fn reason(self) -> &'static str {
         match self {
-            FrameReject::Malformed => "agy-acp: malformed permission request",
-            FrameReject::Oversized => "agy-acp: permission request exceeds size limit",
-            FrameReject::EmptyTool => "agy-acp: permission request names no tool",
-            FrameReject::Timeout => "agy-acp: timed out waiting for permission request",
-            FrameReject::Saturated => "agy-acp: permission bridge is busy",
+            FrameReject::Malformed => "agy-gated-acp: malformed permission request",
+            FrameReject::Oversized => "agy-gated-acp: permission request exceeds size limit",
+            FrameReject::EmptyTool => "agy-gated-acp: permission request names no tool",
+            FrameReject::Timeout => "agy-gated-acp: timed out waiting for permission request",
+            FrameReject::Saturated => "agy-gated-acp: permission bridge is busy",
         }
     }
 }

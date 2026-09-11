@@ -177,7 +177,7 @@ impl StreamProcessor {
             };
             if streamed.trim() != response.trim() {
                 eprintln!(
-                    "[agy-acp] WARN: result.response ({} chars) differs from the {} chars \
+                    "[agy-gated-acp] WARN: result.response ({} chars) differs from the {} chars \
                      streamed as deltas; the difference is not shown to the client",
                     response.len(),
                     streamed.len()

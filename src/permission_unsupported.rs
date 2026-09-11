@@ -1,6 +1,6 @@
 //! Non-Unix fallback for the Unix-domain-socket permission bridge.
 //!
-//! `agy-acp` can still serve ACP requests on these platforms. Only the optional
+//! `agy-gated-acp` can still serve ACP requests on these platforms. Only the optional
 //! `--permission-prompts` mode is unavailable, and it must fail closed rather
 //! than ever launching agy with its permission checks disabled.
 
@@ -67,7 +67,7 @@ pub fn run_hook() {
     let _ = writeln!(
         stdout,
         "{}",
-        r#"{"decision":"deny","reason":"agy-acp: permission prompts require a Unix platform"}"#
+        r#"{"decision":"deny","reason":"agy-gated-acp: permission prompts require a Unix platform"}"#
     );
     let _ = stdout.flush();
 }
